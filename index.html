@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!--
+      Content Security Policy. 'unsafe-inline' is required for the existing
+      inline onload= handlers and inline <script> IIFEs; remote network loads
+      are blocked, and base/form/frame-ancestors are locked down.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="AsbTrack">
+    <meta name="theme-color" content="#4f46e5">
+    <meta name="description" content="AsbTrack Oversight - Project management and containment tracking">
+    <title>AsbTrack Oversight</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json">
+    
+    <!-- App Icons -->
+    <link rel="icon" type="image/svg+xml" href="/icons/icon-192x192.svg">
+    <link rel="apple-touch-icon" href="/icons/icon-192x192.svg">
+    
+    <link rel="stylesheet" href="dist/output.css">
+    <link rel="stylesheet" href="./fonts/inter.css">
+    <style>
+        /* Hide scrollbar unless hovering or scrolling */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: transparent transparent;
+        }
+        *:hover, *:focus, *:active {
+            scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: transparent;
+            border-radius: 4px;
+        }
+        *:hover::-webkit-scrollbar-thumb,
+        *:focus::-webkit-scrollbar-thumb,
+        *:active::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0.5);
+        }
+        *:hover::-webkit-scrollbar-thumb:hover {
+            background: rgba(107, 114, 128, 0.7);
+        }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        /* Equal gutters on all sides (top matches left/right) */
+        .oversight-page-pad {
+            --page-gutter: 1rem;
+            padding: var(--page-gutter);
+            box-sizing: border-box;
+        }
+        @media (min-width: 768px) {
+            .oversight-page-pad {
+                --page-gutter: 2rem;
+                padding: var(--page-gutter);
+            }
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            transition: background-color 0.2s, color 0.2s;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .btn-sm {
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+        }
+        .btn-primary {
+            background-color: #4f46e5;
+            color: #ffffff;
+        }
+        .btn-primary:hover {
+            background-color: #4338ca;
+        }
+        .btn-secondary {
+            background-color: #e5e7eb;
+            color: #374151;
+        }
+        .btn-secondary:hover {
+            background-color: #d1d5db;
+        }
+        .btn-danger {
+            background-color: #ef4444;
+            color: #ffffff;
+        }
+        .btn-danger:hover {
+            background-color: #dc2626;
+        }
+        .card {
+            background-color: white;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            padding: 1.5rem 2rem;
+        }
+        .list-item-card {
+            --list-item-bg: #ffffff;
+            background-color: var(--list-item-bg);
+            border: 1px solid #e5e7eb;
+            border-radius: 0.75rem;
+            padding: 1rem;
+            box-shadow: 0 1px 2px -1px rgb(0 0 0 / 0.1);
+            transition: all 0.2s ease-in-out;
+        }
+        .list-item-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            border-color: #c7d2fe;
+        }
+        @media (min-width: 768px) {
+            .hover-reveal-card .action-buttons {
+                opacity: 0;
+                transition: opacity 0.2s ease-in-out;
+            }
+            .hover-reveal-card:hover .action-buttons {
+                opacity: 1;
+            }
+            .hover-reveal-card:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+                border-color: #c7d2fe;
+            }
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 10001;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(4px);
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            pointer-events: auto;
+        }
+        .modal select {
+            position: relative;
+            z-index: 10002;
+            appearance: auto;
+            -webkit-appearance: menulist;
+            -moz-appearance: menulist;
+        }
+        .modal select option {
+            background-color: white;
+            color: #374151;
+            padding: 8px;
+            display: block;
+        }
+
+        /* ============================================
+           DEFENSIVE: Modal form controls must always be interactive.
+           Belt-and-suspenders against z-index regressions or stray
+           pointer-events:none that previously caused "can't type in
+           textbox" bugs after import/unarchive flows.
+           ============================================ */
+        .modal-content {
+            position: relative;
+            z-index: 1;
+            pointer-events: auto;
+            isolation: isolate;
+        }
+        .modal-content input,
+        .modal-content select,
+        .modal-content textarea,
+        .modal-content button,
+        .modal-content label,
+        .modal-content a {
+            pointer-events: auto !important;
+        }
+        .modal-content input:not([disabled]):not([readonly]),
+        .modal-content textarea:not([disabled]):not([readonly]) {
+            user-select: text;
+            -webkit-user-select: text;
+            cursor: text;
+        }
+
+        /* Form input focus styles - purple outline */
+        input:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: #4f46e5;
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+        }
+        
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: auto;
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            width: 90%;
+            max-width: 900px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 10px 10px -5px rgb(0 0 0 / 0.1);
+            animation: modalSlideIn 0.25s ease-out;
+        }
+        .modal-content input[type="text"],
+        .modal-content input[type="tel"] {
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+        .modal-content .modal-cancel-btn,
+        .modal-content .modal-save-btn {
+            padding: 0.625rem 1.25rem;
+        }
+        .modal-content .modal-footer,
+        .modal-content .flex.border-t {
+            padding-top: 1.25rem;
+        }
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px) scale(0.98);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        @media (min-width: 640px) {
+            .modal {
+                padding: 2rem 1rem;
+            }
+            .modal-content {
+                padding: 2rem;
+            }
+        }
+        @media (min-width: 1024px) {
+            .modal-content {
+                max-width: 900px;
+                padding: 2rem;
+                transition: max-width 0.3s ease, padding 0.3s ease;
+            }
+            .modal-content.narrow-layout {
+                max-width: 900px;
+            }
+            .modal-content.expanded-layout {
+                max-width: 1120px;
+                padding: 2.25rem;
+            }
+            .oversight-grid-expanded {
+                grid-template-columns: 2fr 3fr;
+                gap: 2.5rem;
+            }
+        }
+        .modal-step {
+            display: none;
+        }
+        .modal-step.active {
+            display: block;
+        }
+        .radio-list-item, .checkbox-list-item {
+            display: block;
+            padding: 0.75rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .radio-list-item:hover, .checkbox-list-item:hover {
+            background-color: #f9fafb;
+        }
+        .radio-list-item input, .checkbox-list-item input {
+            margin-right: 0.75rem;
+        }
+        
+        /* ============================================
+           MOBILE OPTIMIZATIONS (iPhone 15 & similar)
+           ============================================ */
+        @media (max-width: 767px) {
+            body {
+                -webkit-font-smoothing: antialiased;
+                -moz-osx-font-smoothing: grayscale;
+                font-size: 16px;
+            }
+            .oversight-page-pad {
+                --page-gutter: 1rem;
+                padding: var(--page-gutter) !important;
+            }
+            header {
+                margin-bottom: 1.5rem !important;
+            }
+            header h1 {
+                font-size: 1.75rem !important;
+                line-height: 1.2;
+            }
+            header p {
+                font-size: 0.9375rem;
+                margin-top: 0.5rem;
+            }
+            .card {
+                padding: 1.25rem !important;
+                border-radius: 1rem;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            }
+            .btn {
+                min-height: 48px;
+                padding: 0.875rem 1.25rem;
+                font-size: 1rem;
+                border-radius: 0.75rem;
+                -webkit-tap-highlight-color: transparent;
+            }
+            .btn-sm {
+                min-height: 44px;
+                padding: 0.75rem 1rem;
+                font-size: 0.9375rem;
+            }
+            .card > .flex.flex-col.md\:flex-row {
+                gap: 1.25rem;
+            }
+            .card > .flex.flex-col.md\:flex-row h2 {
+                font-size: 1.375rem;
+            }
+            .flex.flex-row.gap-2 {
+                flex-direction: column !important;
+                width: 100%;
+                gap: 0.75rem !important;
+            }
+            .flex.flex-row.gap-2 > * {
+                width: 100%;
+            }
+            .flex.flex-row.gap-2 .btn {
+                width: 100%;
+                justify-content: center;
+            }
+            .list-item-card,
+            .oversight-project-card {
+                padding: 1.25rem !important;
+                border-radius: 1rem;
+                margin-bottom: 1rem;
+            }
+            .list-item-card:last-child,
+            .oversight-project-card:last-child {
+                margin-bottom: 0;
+            }
+            .oversight-project-card > .flex.items-start,
+            .list-item-card > .flex.items-start {
+                flex-direction: column !important;
+                gap: 1rem;
+            }
+            .oversight-project-card .flex-1,
+            .list-item-card .flex-1 {
+                width: 100%;
+            }
+            .oversight-project-card h3 {
+                font-size: 1.125rem;
+                margin-bottom: 0.5rem;
+            }
+            .oversight-project-card .text-sm {
+                font-size: 0.9375rem;
+                line-height: 1.5;
+            }
+            .oversight-project-card .text-xs {
+                font-size: 0.8125rem;
+            }
+            .action-buttons {
+                opacity: 1 !important;
+                width: 100%;
+                display: flex !important;
+                flex-direction: row !important;
+                gap: 0.75rem !important;
+                margin-top: 0.5rem;
+            }
+            .action-buttons .btn {
+                flex: 1;
+                min-width: 0;
+            }
+            .hover-reveal-card:hover,
+            .list-item-card:hover {
+                transform: none !important;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
+            }
+            .modal {
+                padding: 0;
+                align-items: flex-start;
+            }
+            .modal-content {
+                width: 100% !important;
+                max-width: 100% !important;
+                margin: 0 !important;
+                padding: 1.5rem !important;
+                border-radius: 0 0 1.5rem 1.5rem;
+                max-height: 100vh;
+                min-height: 100vh;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            .modal input[type="text"],
+            .modal input[type="number"],
+            .modal input[type="date"],
+            .modal input[type="time"],
+            .modal select,
+            .modal textarea {
+                font-size: 16px !important;
+                padding: 0.875rem 1rem !important;
+                border-radius: 0.75rem !important;
+                min-height: 48px;
+            }
+            .radio-list-item,
+            .checkbox-list-item {
+                padding: 1rem;
+                margin-bottom: 0.75rem;
+                border-radius: 0.75rem;
+                display: flex;
+                align-items: center;
+                min-height: 56px;
+            }
+            .radio-list-item input[type="radio"],
+            .checkbox-list-item input[type="checkbox"] {
+                width: 22px;
+                height: 22px;
+                margin-right: 1rem;
+                flex-shrink: 0;
+                accent-color: #4f46e5;
+            }
+            .radio-list-item label,
+            .checkbox-list-item label,
+            .radio-list-item span,
+            .checkbox-list-item span {
+                font-size: 1rem;
+                line-height: 1.4;
+            }
+            #notification-area {
+                top: 1rem;
+                right: 1rem;
+                left: 1rem;
+                width: auto;
+            }
+            .space-y-4 > * + * {
+                margin-top: 1rem !important;
+            }
+            .space-y-6 > * + * {
+                margin-top: 1.25rem !important;
+            }
+        }
+        
+        @media (max-width: 375px) {
+            .oversight-page-pad {
+                --page-gutter: 0.75rem;
+                padding: var(--page-gutter) !important;
+            }
+            header h1 {
+                font-size: 1.5rem !important;
+            }
+            .card {
+                padding: 1rem !important;
+            }
+            .btn-sm {
+                font-size: 0.875rem;
+                padding: 0.625rem 0.875rem;
+            }
+        }
+        
+        @supports (-webkit-touch-callout: none) {
+            .btn {
+                -webkit-appearance: none;
+                appearance: none;
+            }
+            input[type="text"],
+            input[type="number"],
+            input[type="date"],
+            input[type="time"],
+            input[type="email"],
+            input[type="password"],
+            select,
+            textarea {
+                -webkit-appearance: none;
+                appearance: none;
+                border-radius: 0.5rem;
+            }
+            input[type="radio"],
+            input[type="checkbox"] {
+                -webkit-appearance: auto !important;
+                appearance: auto !important;
+            }
+            .modal-content {
+                -webkit-overflow-scrolling: touch;
+            }
+        }
+        
+        @media (hover: none) and (pointer: coarse) {
+            .btn:active {
+                opacity: 0.85;
+                transform: scale(0.98);
+            }
+            .list-item-card:active {
+                background-color: #f9fafb;
+            }
+            .radio-list-item:active,
+            .checkbox-list-item:active {
+                background-color: #eef2ff;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div id="oversight-dashboard" class="oversight-page-pad container mx-auto">
+        <header class="mb-8 flex justify-between items-start">
+            <div>
+                <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Oversight</h1>
+                <p class="text-gray-600 mt-2">High-level project and data management.</p>
+            </div>
+            <button id="inspector-profile-btn" class="flex items-center gap-2 px-3 py-2 rounded-full bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow text-sm font-medium text-gray-700 hover:text-indigo-600" title="Inspector Profile">
+                <svg xmlns="http://www.w3.org/2000/svg" style="width:20px;height:20px;" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-5.5-2.5a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zM10 12a5.99 5.99 0 00-4.793 2.39A6.483 6.483 0 0010 16.5a6.483 6.483 0 004.793-2.11A5.99 5.99 0 0010 12z" clip-rule="evenodd" />
+                </svg>
+                <span id="inspector-profile-name" class="hidden md:inline">Set Profile</span>
+            </button>
+        </header>
+
+        <div class="card space-y-6">
+            <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-6">
+                <h2 class="text-2xl font-semibold text-gray-900">Dashboard</h2>
+                <div class="flex flex-row gap-2 items-center flex-wrap">
+                    <button id="import-project-btn" class="btn btn-secondary btn-sm whitespace-nowrap">Import Project</button>
+                    <input type="file" id="import-file-input" accept=".xlsx,.xls" style="display:none">
+                    <button id="view-archived-btn" class="btn btn-secondary btn-sm whitespace-nowrap">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                            <path d="M4 3a2 2 0 100 4h12a2 2 0 100-4H4z" />
+                            <path fill-rule="evenodd" d="M3 8h14v7a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm5 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" clip-rule="evenodd" />
+                        </svg>
+                        Archived
+                    </button>
+                    <button id="new-oversight-project-btn" class="btn btn-primary btn-sm whitespace-nowrap">
+                        New Oversight Project
+                    </button>
+                </div>
+            </div>
+
+            <div id="oversight-projects-container" class="space-y-4">
+                <div id="oversight-empty-state" class="text-center text-gray-500 p-10 border-2 border-dashed border-gray-200 rounded-xl bg-gray-50">
+                    <p class="font-medium">No oversight projects yet.</p>
+                    <p class="text-sm text-gray-400 mt-1">Use "New Oversight Project" to start tracking abatement scopes.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="notification-area" class="fixed top-5 right-5 z-50"></div>
+
+    <div id="oversight-modals"></div>
+
+    <!-- JSZip library for creating ZIP files (MIT License - Free) - local for offline -->
+    <script src="./lib/jszip.min.js"></script>
+    <!-- FileSaver for triggering downloads - local for offline -->
+    <script src="./lib/file-saver.min.js"></script>
+    <!-- XLSX library for Excel export/import - local for offline -->
+    <script src="./lib/xlsx.full.min.js"></script>
+    <!-- docxtemplater libraries for Word document generation -->
+    <script src="./lib/pizzip.min.js" onload="console.log('PizZip loaded:', typeof PizZip); if (typeof PizZip !== 'undefined') window.PizZip = PizZip;"></script>
+    <script src="./lib/pizzip-utils.js" onload="console.log('PizZipUtils loaded');"></script>
+    <script src="./lib/docxtemplater.js" onload="console.log('Docxtemplater loaded:', typeof Docxtemplater); if (typeof Docxtemplater !== 'undefined') window.Docxtemplater = Docxtemplater;"></script>
+    <script src="./lib/imagemodule.js" onload="if (typeof ImageModule !== 'undefined') window.ImageModule = ImageModule;"></script>
+    <script>
+        // Ensure docxtemplater libraries are available globally
+        (function() {
+            let retries = 0;
+            const maxRetries = 10;
+            
+            function checkLibraries() {
+                retries++;
+                
+                // Check PizZip
+                if (typeof PizZip !== 'undefined' && typeof window.PizZip === 'undefined') {
+                    window.PizZip = PizZip;
+                }
+                
+                // Check Docxtemplater - try multiple ways
+                if (typeof Docxtemplater !== 'undefined') {
+                    window.Docxtemplater = Docxtemplater;
+                } else if (typeof docxtemplater !== 'undefined') {
+                    window.Docxtemplater = docxtemplater;
+                } else if (typeof DocxTemplater !== 'undefined') {
+                    window.Docxtemplater = DocxTemplater;
+                }
+                
+                if (typeof window.PizZip !== 'undefined' && typeof window.Docxtemplater !== 'undefined') {
+                    console.log('✅ Both libraries are ready for ZIP download!');
+                } else if (retries < maxRetries) {
+                    setTimeout(checkLibraries, 100);
+                } else {
+                    console.error('❌ Failed to load document libraries after', maxRetries, 'retries');
+                }
+            }
+            
+            // Start checking after a short delay
+            setTimeout(checkLibraries, 50);
+        })();
+    </script>
+    <script src="./js/excel.js"></script>
+    <script src="./js/inspector-profile.js"></script>
+    <script src="./js/main.js"></script>
+    
+    <!-- Service Worker Registration for Offline Support (skip in Electron - file:// protocol) -->
+    <script>
+        if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.electronAPI) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/service-worker.js')
+                    .then(reg => console.log('✅ Oversight SW registered'))
+                    .catch(err => console.warn('SW registration failed:', err));
+            });
+        }
+    </script>
+</body>
+</html>

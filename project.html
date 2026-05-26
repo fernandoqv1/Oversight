@@ -1,0 +1,1208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!--
+      Content Security Policy. 'unsafe-inline' is required for the existing
+      inline onload= handlers and inline <script> IIFEs; remote network loads
+      are blocked, and base/form/frame-ancestors are locked down.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="AsbTrack">
+    <meta name="theme-color" content="#4f46e5">
+    <title>Oversight Project - AsbTrack</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json">
+    
+    <!-- App Icons -->
+    <link rel="icon" type="image/svg+xml" href="/icons/icon-192x192.svg">
+    <link rel="apple-touch-icon" href="/icons/icon-192x192.svg">
+    
+    <link rel="stylesheet" href="dist/output.css">
+    <link rel="stylesheet" href="./fonts/inter.css">
+    <!-- docxtemplater library for Word template generation - using local files -->
+    <script src="./lib/pizzip.min.js" onload="console.log('PizZip loaded:', typeof PizZip); if (typeof PizZip !== 'undefined') window.PizZip = PizZip;"></script>
+    <script src="./lib/pizzip-utils.js" onload="console.log('PizZipUtils loaded');"></script>
+    <script src="./lib/docxtemplater.js" onload="console.log('Docxtemplater loaded:', typeof Docxtemplater); if (typeof Docxtemplater !== 'undefined') window.Docxtemplater = Docxtemplater;"></script>
+    <script src="./lib/imagemodule.js" onload="if (typeof ImageModule !== 'undefined') window.ImageModule = ImageModule;"></script>
+    <script>
+        // Ensure docxtemplater libraries are available globally
+        (function() {
+            let retryCount = 0;
+            const maxRetries = 20;
+            
+            function ensureDocxLibs() {
+                retryCount++;
+                
+                // Check PizZip
+                if (typeof PizZip !== 'undefined' && typeof window.PizZip === 'undefined') {
+                    window.PizZip = PizZip;
+                    console.log('PizZip set to window.PizZip');
+                }
+                
+                // Check Docxtemplater - try multiple ways
+                if (typeof Docxtemplater !== 'undefined') {
+                    window.Docxtemplater = Docxtemplater;
+                    console.log('✅ Docxtemplater found as global Docxtemplater');
+                }
+                // Try docxtemplater (lowercase)
+                else if (typeof docxtemplater !== 'undefined') {
+                    window.Docxtemplater = docxtemplater;
+                    console.log('✅ Docxtemplater found as lowercase docxtemplater');
+                }
+                // Try DocxTemplater (camelCase)
+                else if (typeof DocxTemplater !== 'undefined') {
+                    window.Docxtemplater = DocxTemplater;
+                    console.log('✅ Docxtemplater found as camelCase DocxTemplater');
+                }
+                // Try accessing from module.exports or exports
+                else if (typeof module !== 'undefined' && module.exports && module.exports.Docxtemplater) {
+                    window.Docxtemplater = module.exports.Docxtemplater;
+                    console.log('✅ Docxtemplater found in module.exports');
+                }
+                // Try checking if it's in a namespace
+                else {
+                    // Check all window properties for docxtemplater
+                    const possibleNames = Object.keys(window).filter(k => 
+                        k.toLowerCase().includes('docx') || 
+                        k.toLowerCase().includes('templater')
+                    );
+                    if (possibleNames.length > 0) {
+                        console.log('Found possible Docxtemplater names:', possibleNames);
+                    }
+                }
+                
+                // Check if both are available
+                if (typeof window.PizZip !== 'undefined' && typeof window.Docxtemplater !== 'undefined') {
+                    console.log('✅ Both libraries are ready!');
+                    return;
+                }
+                
+                // Retry if not ready and haven't exceeded max retries
+                if (retryCount < maxRetries) {
+                    console.log(`Retrying... (${retryCount}/${maxRetries})`);
+                    setTimeout(ensureDocxLibs, 100);
+                } else {
+                    console.error('❌ Failed to load Docxtemplater after', maxRetries, 'retries');
+                    console.log('Available globals:', Object.keys(window).filter(k => k.toLowerCase().includes('docx') || k.toLowerCase().includes('zip')));
+                }
+            }
+            
+            // Start checking
+            ensureDocxLibs();
+        })();
+    </script>
+    <style>
+        /* Hide scrollbar unless hovering or scrolling */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: transparent transparent;
+        }
+        *:hover, *:focus, *:active {
+            scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: transparent;
+            border-radius: 4px;
+        }
+        *:hover::-webkit-scrollbar-thumb,
+        *:focus::-webkit-scrollbar-thumb,
+        *:active::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0.5);
+        }
+        *:hover::-webkit-scrollbar-thumb:hover {
+            background: rgba(107, 114, 128, 0.7);
+        }
+        
+        /* ============================================
+           PROFESSIONAL PROJECT DASHBOARD THEME
+           ============================================ */
+        :root {
+            --color-primary: #4f46e5;
+            --color-primary-dark: #4338ca;
+            --color-primary-light: #eef2ff;
+            --color-secondary: #64748b;
+            --color-danger: #ef4444;
+            --color-danger-dark: #dc2626;
+            --color-success: #10b981;
+            --color-warning: #f59e0b;
+            --color-background: #f8fafc;
+            --color-surface: #ffffff;
+            --color-border: #e2e8f0;
+            --color-border-light: #f1f5f9;
+            --color-text-primary: #0f172a;
+            --color-text-secondary: #475569;
+            --color-text-muted: #94a3b8;
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.04);
+            --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.05);
+            --radius-sm: 0.5rem;
+            --radius-md: 0.75rem;
+            --radius-lg: 1rem;
+            --radius-xl: 1.25rem;
+            --transition-fast: 150ms ease;
+            --transition-normal: 200ms ease;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--color-background);
+            color: var(--color-text-primary);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* Equal gutters on all sides (top matches left/right) */
+        .oversight-page-pad {
+            --page-gutter: 1rem;
+            padding: var(--page-gutter);
+            box-sizing: border-box;
+        }
+        @media (min-width: 768px) {
+            .oversight-page-pad {
+                --page-gutter: 2rem;
+                padding: var(--page-gutter);
+            }
+        }
+        
+        /* ============================================
+           BUTTONS
+           ============================================ */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.625rem 1.25rem;
+            border-radius: var(--radius-md);
+            font-weight: 500;
+            font-size: 0.9375rem;
+            line-height: 1.5;
+            border: none;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all var(--transition-normal);
+            white-space: nowrap;
+        }
+        .btn:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.3);
+        }
+        .btn-sm {
+            padding: 0.5rem 1rem;
+            font-size: 0.8125rem;
+            border-radius: var(--radius-sm);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+            color: #ffffff;
+            box-shadow: 0 1px 3px rgba(79, 70, 229, 0.3);
+        }
+        .btn-primary:hover:not(:disabled) {
+            background: linear-gradient(135deg, var(--color-primary-dark) 0%, #3730a3 100%);
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.35);
+            transform: translateY(-1px);
+        }
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        .btn-secondary {
+            background-color: var(--color-surface);
+            color: var(--color-text-secondary);
+            border: 1px solid var(--color-border);
+        }
+        .btn-secondary:hover {
+            background-color: var(--color-border-light);
+            border-color: #cbd5e1;
+            color: var(--color-text-primary);
+        }
+        .btn-danger {
+            background: linear-gradient(135deg, var(--color-danger) 0%, var(--color-danger-dark) 100%);
+            color: #ffffff;
+            box-shadow: 0 1px 3px rgba(239, 68, 68, 0.3);
+        }
+        .btn-danger:hover:not(:disabled) {
+            background: linear-gradient(135deg, var(--color-danger-dark) 0%, #b91c1c 100%);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35);
+            transform: translateY(-1px);
+        }
+        
+        /* ============================================
+           CARDS
+           ============================================ */
+        .card {
+            background-color: var(--color-surface);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--color-border-light);
+            padding: 0;
+            overflow: hidden;
+        }
+        .card.rounded-2xl {
+            border-radius: var(--radius-xl);
+        }
+        
+        /* Section Headers */
+        .section-header {
+            padding: 1.25rem 1.75rem;
+            background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);
+            border-bottom: 1px solid var(--color-border-light);
+            margin: 0;
+        }
+        .section-header h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--color-text-primary);
+            margin: 0;
+        }
+        .section-header h3 {
+            font-size: 1.0625rem;
+            font-weight: 600;
+            color: var(--color-text-primary);
+            margin: 0;
+        }
+        .section-header p {
+            font-size: 0.875rem;
+            color: var(--color-text-muted);
+            margin-top: 0.25rem;
+        }
+        .section-header.compact {
+            padding: 1rem 1.75rem;
+        }
+        .card > .section-header {
+            margin: 0;
+        }
+        
+        /* Section Content */
+        .section-content {
+            padding: 1.5rem 1.75rem;
+        }
+        
+        /* ============================================
+           OVERVIEW CARD COLUMNS
+           ============================================ */
+        .overview-columns {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 1.5rem;
+        }
+        
+        @media (min-width: 768px) {
+            .overview-columns {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            }
+            .overview-columns.single-column {
+                grid-template-columns: 1fr;
+                max-width: 300px;
+            }
+        }
+        
+        .overview-column {
+            background-color: var(--color-border-light);
+            border-radius: var(--radius-md);
+            padding: 1rem;
+        }
+        
+        .overview-column.hidden {
+            display: none;
+        }
+        
+        .overview-actions-col {
+            background-color: transparent;
+            padding: 0;
+        }
+        
+        @media (min-width: 768px) {
+            .overview-actions-col {
+                background-color: var(--color-border-light);
+                padding: 1rem;
+            }
+        }
+        
+        .overview-item {
+            background-color: var(--color-surface);
+            border-radius: var(--radius-sm);
+            padding: 0.75rem;
+            border: 1px solid var(--color-border);
+        }
+        
+        .overview-item-name {
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: var(--color-text-primary);
+        }
+        
+        .overview-item-detail {
+            font-size: 0.75rem;
+            color: var(--color-text-secondary);
+            margin-top: 0.25rem;
+        }
+        
+        .overview-item-stage {
+            display: inline-block;
+            font-size: 0.6875rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+            padding: 0.25rem 0.5rem;
+            border-radius: var(--radius-sm);
+            margin-top: 0.5rem;
+        }
+        
+        .stage-preparation { background-color: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe; }
+        .stage-active { background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+        .stage-clearance { background-color: #f3e8ff; color: #6b21a8; border: 1px solid #e9d5ff; }
+        .stage-teardown { background-color: #ffedd5; color: #c2410c; border: 1px solid #fed7aa; }
+        .stage-completed { background-color: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
+        
+        /* Mobile: hide desktop-only elements */
+        @media (max-width: 767px) {
+            .desktop-only {
+                display: none !important;
+            }
+            #overview-containments-col,
+            #overview-airmonitoring-col {
+                display: none !important;
+            }
+            .overview-actions-col {
+                background-color: transparent;
+                padding: 0;
+            }
+            .overview-actions-col .flex {
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+            .overview-actions-col .btn {
+                flex: 1;
+                min-width: calc(50% - 0.5rem);
+            }
+        }
+        
+        /* List Item Cards */
+        .list-item-card {
+            background-color: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-lg);
+            padding: 1.25rem;
+            box-shadow: var(--shadow-sm);
+            transition: all var(--transition-normal);
+            position: relative;
+        }
+        .list-item-card:hover {
+            border-color: #c7d2fe;
+            box-shadow: var(--shadow-md);
+            transform: translateY(-1px);
+        }
+        
+        /* Hover reveal for action buttons */
+        @media (min-width: 768px) {
+            .hover-reveal-card .action-buttons {
+                opacity: 0;
+                transition: all var(--transition-normal);
+            }
+            .hover-reveal-card:hover .action-buttons {
+                opacity: 1;
+            }
+        }
+        
+        /* Air samples action buttons - positioned in bottom right (desktop only) */
+        @media (min-width: 768px) {
+            #oversight-project-air-samples .list-item-card .action-buttons {
+                position: absolute;
+                right: 1.25rem;
+                bottom: 1.25rem;
+            }
+        }
+        
+        /* ============================================
+           MODALS
+           ============================================ */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 10001;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(4px);
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+            pointer-events: auto;
+        }
+        .modal select {
+            position: relative;
+            z-index: 10002;
+            appearance: auto;
+            -webkit-appearance: menulist;
+            -moz-appearance: menulist;
+        }
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            background-color: var(--color-surface);
+            margin: auto;
+            padding: 1.75rem;
+            border-radius: var(--radius-xl);
+            width: 100%;
+            max-width: 720px;
+            max-height: calc(100vh - 3rem);
+            overflow-y: auto;
+            box-shadow: var(--shadow-xl);
+            animation: modalSlideIn 0.25s ease-out;
+            position: relative;
+            z-index: 1;
+            pointer-events: auto;
+            isolation: isolate;
+        }
+        /* ============================================
+           DEFENSIVE: Modal form controls must always be interactive.
+           Belt-and-suspenders against z-index regressions or stray
+           pointer-events:none that previously caused "can't type in
+           textbox" bugs after import/unarchive flows.
+           ============================================ */
+        .modal-content input,
+        .modal-content select,
+        .modal-content textarea,
+        .modal-content button,
+        .modal-content label,
+        .modal-content a {
+            pointer-events: auto !important;
+        }
+        .modal-content input:not([disabled]):not([readonly]),
+        .modal-content textarea:not([disabled]):not([readonly]) {
+            user-select: text;
+            -webkit-user-select: text;
+            cursor: text;
+        }
+        .modal-content input[type="text"],
+        .modal-content input[type="tel"] {
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+        .modal-content .modal-cancel-btn,
+        .modal-content .modal-save-btn {
+            padding: 0.625rem 1.25rem;
+        }
+        .modal-content .modal-footer,
+        .modal-content .flex.border-t {
+            padding-top: 1.25rem;
+        }
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px) scale(0.98);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        
+        /* ============================================
+           FORM ELEMENTS
+           ============================================ */
+        input[type="text"],
+        input[type="number"],
+        input[type="date"],
+        input[type="time"],
+        select,
+        textarea {
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+            padding: 0.625rem 0.875rem;
+            font-size: 0.9375rem;
+            transition: all var(--transition-fast);
+            width: 100%;
+        }
+        input:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: var(--color-primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+        }
+        
+        /* ============================================
+           CONTAINMENT & MATERIAL CARDS (Desktop polish)
+           ============================================ */
+        #oversight-project-containments > div {
+            background-color: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-lg);
+            padding: 1.5rem;
+            transition: all var(--transition-normal);
+        }
+        #oversight-project-containments > div:hover {
+            border-color: #c7d2fe;
+            box-shadow: var(--shadow-md);
+        }
+        
+        #oversight-project-materials .border {
+            border-radius: var(--radius-lg);
+            transition: all var(--transition-normal);
+        }
+        #oversight-project-materials .border:hover {
+            box-shadow: var(--shadow-md);
+        }
+        
+        /* ============================================
+           STATUS BADGES
+           ============================================ */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.25rem 0.625rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+        }
+        
+        /* ============================================
+           NOTIFICATIONS
+           ============================================ */
+        #notification-area {
+            z-index: 9999;
+        }
+        
+        /* ============================================
+           DESKTOP LAYOUT REFINEMENTS
+           ============================================ */
+        @media (min-width: 1024px) {
+            #oversight-project-content {
+                gap: 2rem;
+            }
+            .section-content {
+                padding: 1.75rem 2rem;
+            }
+            .section-header {
+                padding: 1.5rem 2rem;
+            }
+        }
+        
+        /* ============================================
+           MOBILE OPTIMIZATIONS (iPhone 15 & similar)
+           ============================================ */
+        @media (max-width: 767px) {
+            /* Base mobile styles */
+            body {
+                -webkit-font-smoothing: antialiased;
+                -moz-osx-font-smoothing: grayscale;
+                font-size: 16px;
+            }
+            
+            /* Main view — same gutter on top as left/right */
+            .oversight-page-pad {
+                --page-gutter: 1rem;
+                padding: var(--page-gutter) !important;
+            }
+            
+            /* Page header */
+            header {
+                margin-bottom: 1.5rem;
+            }
+            header h1 {
+                font-size: 1.625rem !important;
+                line-height: 1.2;
+            }
+            header p {
+                font-size: 0.9375rem;
+            }
+            header > div:last-child {
+                width: 100%;
+            }
+            header .flex.gap-2 {
+                flex-direction: column !important;
+                width: 100%;
+                gap: 0.75rem !important;
+            }
+            header .flex.gap-2 > * {
+                width: 100%;
+            }
+            header .btn {
+                width: 100%;
+                justify-content: center;
+            }
+            
+            /* Main content grid - single column */
+            #oversight-project-content {
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 1.5rem !important;
+            }
+            #oversight-project-content > div:first-child {
+                order: 1;
+            }
+            
+            /* Cards */
+            .card {
+                padding: 0 !important;
+                border-radius: 1rem;
+                overflow: hidden;
+            }
+            .card.rounded-2xl {
+                border-radius: 1rem;
+            }
+            
+            /* Section headers */
+            .section-header {
+                padding: 1.25rem 1rem !important;
+                margin: 0 !important;
+            }
+            .section-header h2 {
+                font-size: 1.25rem;
+            }
+            .section-header h3 {
+                font-size: 1.125rem;
+            }
+            .section-header p {
+                font-size: 0.875rem;
+                margin-top: 0.375rem;
+            }
+            .section-header.flex {
+                flex-direction: column !important;
+                align-items: stretch !important;
+                gap: 1rem;
+            }
+            .section-header.flex > div:first-child {
+                width: 100%;
+            }
+            .section-header .btn {
+                width: 100%;
+            }
+            
+            /* Section content */
+            .section-content {
+                padding: 1.25rem 1rem !important;
+            }
+            
+            /* Buttons - touch friendly */
+            .btn {
+                min-height: 48px;
+                padding: 0.875rem 1.25rem;
+                font-size: 1rem;
+                border-radius: 0.75rem;
+                -webkit-tap-highlight-color: transparent;
+            }
+            .btn-sm {
+                min-height: 44px;
+                padding: 0.75rem 1rem;
+                font-size: 0.9375rem;
+            }
+            
+            /* List item cards */
+            .list-item-card {
+                padding: 1.25rem !important;
+                border-radius: 1rem;
+                margin-bottom: 1rem;
+            }
+            .list-item-card:last-child {
+                margin-bottom: 0;
+            }
+            
+            /* Air samples grid - single column */
+            #oversight-project-air-samples {
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 1rem;
+            }
+            
+            /* Air sample cards */
+            #oversight-project-air-samples .list-item-card {
+                position: relative;
+            }
+            #oversight-project-air-samples .list-item-card > .flex.justify-between {
+                flex-direction: column !important;
+                gap: 1rem;
+            }
+            #oversight-project-air-samples .list-item-card .flex.flex-col.items-end {
+                width: 100%;
+                flex-direction: row !important;
+                align-items: center !important;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 0.75rem;
+            }
+            #oversight-project-air-samples .list-item-card .action-buttons {
+                position: static !important;
+                opacity: 1 !important;
+                width: 100%;
+                display: flex !important;
+                gap: 0.75rem;
+                margin-top: 0.5rem;
+            }
+            #oversight-project-air-samples .list-item-card .action-buttons .btn {
+                flex: 1;
+            }
+            
+            /* Air sample data grid */
+            .list-item-card .grid.grid-cols-2 {
+                grid-template-columns: repeat(2, 1fr) !important;
+                gap: 0.75rem 1rem;
+            }
+            .list-item-card .grid.grid-cols-2 > div {
+                display: flex;
+                flex-direction: column;
+                gap: 0.125rem;
+            }
+            .list-item-card .grid.grid-cols-2 .text-xs {
+                font-size: 0.75rem;
+            }
+            .list-item-card .grid.grid-cols-2 .font-medium {
+                font-size: 0.9375rem;
+            }
+            
+            /* Material cards */
+            #oversight-project-materials .border {
+                padding: 1.25rem !important;
+                border-radius: 1rem;
+            }
+            #oversight-project-materials .flex.items-start.justify-between {
+                flex-direction: column !important;
+                gap: 1rem;
+            }
+            
+            /* Spaces section */
+            #oversight-project-spaces {
+                max-height: none;
+                overflow-y: visible;
+            }
+            #oversight-project-spaces .flex.items-center {
+                padding: 1rem;
+            }
+            
+            /* Containment cards */
+            #oversight-project-containments > div {
+                padding: 1.25rem !important;
+                border-radius: 1rem;
+                margin-bottom: 1rem;
+            }
+            #oversight-project-containments > div:last-child {
+                margin-bottom: 0;
+            }
+            #oversight-project-containments .flex.items-start.justify-between {
+                flex-direction: column !important;
+                gap: 0.75rem;
+            }
+            #oversight-project-containments .flex.flex-col.items-end {
+                width: 100%;
+                flex-direction: row !important;
+                align-items: center !important;
+                justify-content: space-between;
+            }
+            #oversight-project-containments .flex.flex-wrap.gap-2 {
+                flex-direction: column !important;
+                width: 100%;
+            }
+            #oversight-project-containments .flex.flex-wrap.gap-2 .btn {
+                width: 100%;
+            }
+            
+            /* Action buttons - always visible */
+            .action-buttons {
+                opacity: 1 !important;
+            }
+            .hover-reveal-card:hover {
+                transform: none !important;
+            }
+            
+            /* Modal styling - full screen on mobile */
+            .modal {
+                padding: 0 !important;
+            }
+            .modal-content {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-height: 100vh;
+                margin: 0 !important;
+                padding: 1.5rem !important;
+                border-radius: 0 !important;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            
+            /* Form inputs - iOS friendly */
+            input[type="text"],
+            input[type="number"],
+            input[type="date"],
+            input[type="time"],
+            select,
+            textarea {
+                font-size: 16px !important; /* Prevents iOS zoom */
+                padding: 0.875rem 1rem !important;
+                border-radius: 0.75rem !important;
+                min-height: 48px;
+            }
+            
+            /* Radio and checkbox styling */
+            input[type="radio"],
+            input[type="checkbox"] {
+                width: 22px !important;
+                height: 22px !important;
+                margin-right: 0.75rem;
+                accent-color: #4f46e5;
+            }
+            
+            /* Notification area */
+            #notification-area {
+                top: 1rem;
+                right: 1rem;
+                left: 1rem;
+                width: auto;
+            }
+        }
+        
+        /* Extra small screens (iPhone SE) */
+        @media (max-width: 375px) {
+            .oversight-page-pad {
+                --page-gutter: 0.75rem;
+                padding: var(--page-gutter) !important;
+            }
+            header h1 {
+                font-size: 1.375rem !important;
+            }
+            .section-header {
+                padding: 1rem 0.875rem !important;
+            }
+            .section-content {
+                padding: 1rem 0.875rem !important;
+            }
+            .btn-sm {
+                font-size: 0.875rem;
+                padding: 0.625rem 0.875rem;
+            }
+        }
+        
+        /* Safari-specific fixes - preserve radio/checkbox appearance */
+        @supports (-webkit-touch-callout: none) {
+            .btn {
+                -webkit-appearance: none;
+            }
+            /* Only reset appearance for text inputs */
+            input[type="text"],
+            input[type="number"],
+            input[type="date"],
+            input[type="time"],
+            input[type="email"],
+            select,
+            textarea {
+                -webkit-appearance: none;
+            }
+            /* Preserve native radio and checkbox */
+            input[type="radio"],
+            input[type="checkbox"] {
+                -webkit-appearance: auto !important;
+                appearance: auto !important;
+            }
+            .modal-content {
+                -webkit-overflow-scrolling: touch;
+            }
+        }
+        
+        /* Touch device improvements */
+        @media (hover: none) and (pointer: coarse) {
+            .btn:active {
+                opacity: 0.85;
+                transform: scale(0.98);
+            }
+            .list-item-card:active {
+                background-color: #f9fafb;
+            }
+        }
+        
+        .section-header {
+            padding: 1.25rem 2rem 1.1rem;
+            background: linear-gradient(120deg, rgba(79, 70, 229, 0.08), rgba(255, 255, 255, 0.9));
+            border-bottom: 1px solid #e5e7eb;
+            margin: 0;
+        }
+        .section-header.compact {
+            padding: 1rem 2rem 0.85rem;
+        }
+        .section-header h2,
+        .section-header h3 {
+            margin: 0;
+        }
+        .section-header p {
+            margin-top: 0.35rem;
+        }
+        .section-content {
+            padding: 1.5rem 2rem 2rem;
+        }
+        #new-containment-btn {
+            background-color: #4f46e5;
+            color: #ffffff;
+        }
+        #new-containment-btn:hover:not(:disabled) {
+            background-color: #4338ca;
+        }
+        #new-containment-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        /* Collapsed Project Details: keep folder icon and label on one line (match expanded row) */
+        #project-details-collapsed-actions.hidden {
+            display: none !important;
+        }
+        #project-details-collapsed-actions:not(.hidden) {
+            display: flex !important;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            align-items: center;
+        }
+        #project-details-open-folder-header {
+            display: inline-flex !important;
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            align-items: center !important;
+            white-space: nowrap;
+        }
+        #project-details-open-folder-header svg {
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div id="notification-area" class="fixed top-4 right-4 z-50 space-y-2 mobile:left-4"></div>
+    <!-- Wider than Tailwind `container` so side gutters come from max-width, not tiny px tweaks -->
+    <div id="project-main-view" class="oversight-page-pad mx-auto w-full max-w-[min(100%,1920px)] space-y-6">
+        <header class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+                <p class="text-sm font-medium text-indigo-600 uppercase tracking-wide">Oversight Project</p>
+                <h1 id="oversight-project-number" class="text-3xl md:text-4xl font-bold text-gray-900">Loading...</h1>
+                <p id="oversight-project-site" class="text-gray-600 mt-2">Site details loading...</p>
+            </div>
+            <div class="flex gap-2 flex-wrap items-center">
+                <a href="index.html" class="btn btn-secondary whitespace-nowrap">&larr; Back to Oversight</a>
+                <button id="header-edit-project-btn" class="btn btn-secondary whitespace-nowrap" title="Edit Project Details">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px;display:inline;vertical-align:text-bottom;margin-right:4px;" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M2.695 14.763l-1.262 3.154a.5.5 0 00.65.65l3.155-1.262a4 4 0 001.343-.885L17.5 5.5a2.121 2.121 0 00-3-3L3.58 13.42a4 4 0 00-.885 1.343z" />
+                    </svg>
+                    Edit Project
+                </button>
+                <button id="inspector-profile-btn" class="flex items-center gap-2 px-3 py-2 rounded-full bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow text-sm font-medium text-gray-700 hover:text-indigo-600" title="Inspector Profile">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="width:20px;height:20px;" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-5.5-2.5a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zM10 12a5.99 5.99 0 00-4.793 2.39A6.483 6.483 0 0010 16.5a6.483 6.483 0 004.793-2.11A5.99 5.99 0 0010 12z" clip-rule="evenodd" />
+                    </svg>
+                    <span id="inspector-profile-name" class="hidden md:inline">Set Profile</span>
+                </button>
+            </div>
+        </header>
+
+        <div id="oversight-project-content" class="grid gap-6">
+            <div class="space-y-6">
+                <!-- Project Info Card (first; collapsible details) -->
+                <div id="project-info-card" class="card rounded-2xl">
+                    <div class="section-header compact">
+                        <div class="flex flex-wrap items-center justify-between gap-3 w-full">
+                            <div class="flex flex-wrap items-center gap-3 min-w-0">
+                                <h3 class="text-lg font-semibold text-gray-900">Project Details</h3>
+                                <div id="project-details-collapsed-actions" class="hidden flex flex-row flex-nowrap items-center gap-2 text-sm">
+                                    <button type="button" id="project-details-open-folder-header" class="open-project-folder-btn flex flex-row flex-nowrap items-center gap-1.5 text-indigo-600 hover:text-indigo-800 font-medium hover:underline" style="background:none;border:none;padding:0;cursor:pointer;" title="Open project folder">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path d="M3.75 3A1.75 1.75 0 002 4.75v10.5c0 .966.784 1.75 1.75 1.75h12.5A1.75 1.75 0 0018 15.25v-8.5A1.75 1.75 0 0016.25 5h-4.836a.25.25 0 01-.177-.073L9.823 3.513A1.75 1.75 0 008.586 3H3.75z"/>
+                                        </svg>
+                                        <span>Open folder</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <button type="button" id="project-details-toggle-btn" class="text-sm font-medium text-indigo-600 hover:text-indigo-800 whitespace-nowrap" style="background:none;border:none;padding:0;cursor:pointer;">Hide</button>
+                        </div>
+                    </div>
+                    <div id="project-details-content" class="section-content">
+                        <div id="project-info" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <!-- Project info will be rendered here -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Overview Card -->
+                <div id="overview-card" class="card rounded-2xl">
+                    <div class="section-header">
+                        <h2 class="text-2xl font-semibold text-gray-900">Overview</h2>
+                        <p id="oversight-project-overview" class="text-sm text-gray-600 mt-1">Loading details...</p>
+                    </div>
+                    <div class="section-content">
+                        <div id="overview-columns" class="overview-columns">
+                            <div id="overview-containments-col" class="overview-column hidden">
+                                <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Active Containments</h3>
+                                <div id="overview-containments-list" class="space-y-2"></div>
+                            </div>
+                            <div id="overview-airmonitoring-col" class="overview-column hidden">
+                                <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Active Sample Collection</h3>
+                                <div id="overview-airmonitoring-list" class="space-y-2"></div>
+                            </div>
+                            <div id="overview-actions-col" class="overview-column overview-actions-col">
+                                <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3 desktop-only">Quick Actions</h3>
+                                <div class="flex flex-col gap-2">
+                                    <button type="button" id="overview-create-log-btn" class="btn btn-primary">Create Daily Log</button>
+                                    <button type="button" id="overview-view-logs-btn" class="btn btn-secondary">View Daily Logs</button>
+                                    <button type="button" id="overview-worker-roster-btn" class="btn btn-secondary">Worker Roster</button>
+                                    <button type="button" id="edit-project-btn" class="btn btn-secondary">Edit Project</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Workflow Guide -->
+                <div class="card rounded-2xl bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
+                    <div class="section-content py-3">
+                        <div class="flex items-center gap-6 text-sm">
+                            <span class="font-medium text-gray-700">Workflow:</span>
+                            <div class="flex items-center gap-2">
+                                <span class="bg-indigo-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold">1</span>
+                                <span class="text-gray-600">Add Materials</span>
+                            </div>
+                            <span class="text-gray-400">→</span>
+                            <div class="flex items-center gap-2">
+                                <span class="bg-indigo-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold">2</span>
+                                <span class="text-gray-600">Add Buildings</span>
+                        </div>
+                            <span class="text-gray-400">→</span>
+                            <div class="flex items-center gap-2">
+                                <span class="bg-indigo-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold">3</span>
+                                <span class="text-gray-600">Add Spaces & Assign Materials</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Step 1: Materials Card (First!) -->
+                    <div id="materials-card" class="card rounded-2xl">
+                        <div class="section-header flex justify-between items-start">
+                            <div class="flex items-center gap-3">
+                                <span class="bg-indigo-600 text-white rounded-full w-7 h-7 flex items-center justify-center text-sm font-bold">1</span>
+                            <div>
+                                    <h2 class="text-2xl font-semibold text-gray-900">Site Materials</h2>
+                                    <p class="text-sm text-gray-600 mt-1">Define materials and total quantities. Double-click a material to add bulk sample.</p>
+                    </div>
+                            </div>
+                            <div class="flex gap-2">
+                                <button id="print-bulk-samples-btn" class="btn btn-secondary btn-sm whitespace-nowrap" disabled title="Print Bulk Sample Chain of Custody">
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+                                        <path fill-rule="evenodd" d="M5 2.75C5 1.784 5.784 1 6.75 1h6.5c.966 0 1.75.784 1.75 1.75v3.552c.377.046.752.097 1.126.153A2.212 2.212 0 0 1 18 8.653v4.097A2.25 2.25 0 0 1 15.75 15h-.241l.305 1.984A1.75 1.75 0 0 1 14.084 19H5.916a1.75 1.75 0 0 1-1.73-2.016L4.492 15H4.25A2.25 2.25 0 0 1 2 12.75V8.653c0-1.082.775-2.034 1.874-2.198.374-.056.749-.107 1.126-.153V2.75ZM7.5 3v2.932c.658-.043 1.321-.065 1.989-.065h1.022c.668 0 1.33.022 1.989.065V3h-5Zm1.086 12 .222-1.5h2.384l.222 1.5H8.586Z" clip-rule="evenodd" />
+                                    </svg>
+                                    Print
+                                </button>
+                                <button id="add-material-btn" class="btn btn-primary btn-sm whitespace-nowrap">+ Add Material</button>
+                            </div>
+                        </div>
+                        <div class="section-content">
+                            <div id="project-materials" class="space-y-3">
+                                <!-- Materials will be rendered here -->
+                                <p class="text-gray-500 text-sm">No materials added. Start by adding the materials for this project.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Buildings & Spaces Card -->
+                    <div id="buildings-card" class="card rounded-2xl">
+                        <div class="section-header flex justify-between items-start">
+                            <div class="flex items-center gap-3">
+                                <span class="bg-indigo-600 text-white rounded-full w-7 h-7 flex items-center justify-center text-sm font-bold">2</span>
+                            <div>
+                                    <h2 class="text-2xl font-semibold text-gray-900">Buildings & Spaces</h2>
+                                    <p class="text-sm text-gray-600 mt-1">Add buildings, then add spaces and assign materials to each space</p>
+                                </div>
+                            </div>
+                            <div class="flex flex-wrap justify-end gap-2 flex-shrink-0">
+                                <button id="add-building-btn" type="button" class="btn btn-primary btn-sm whitespace-nowrap">+ Add Building</button>
+                                <button id="add-space-header-btn" type="button" class="btn btn-primary btn-sm whitespace-nowrap">+ Add Space</button>
+                            </div>
+                        </div>
+                        <div class="section-content">
+                            <div id="project-buildings" class="space-y-4">
+                                <!-- Buildings will be rendered here -->
+                                <p class="text-gray-500 text-sm">No buildings added. Add site materials first, then add buildings.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Containments Card (moved above Air Monitoring) -->
+                    <div class="card rounded-2xl">
+                        <div class="section-header flex justify-between items-start">
+                            <div>
+                                <h2 class="text-2xl font-semibold text-gray-900">Containments</h2>
+                                <p class="text-sm text-gray-600 mt-1">Defined containments and their locations.</p>
+                            </div>
+                            <button id="new-containment-btn" class="btn btn-primary btn-sm whitespace-nowrap">+ New Containment</button>
+                        </div>
+                        <div class="section-content space-y-3" id="oversight-project-containments">
+                            <!-- Containments injected here -->
+                        </div>
+                    </div>
+
+                    <div class="card rounded-2xl">
+                        <div class="section-header flex justify-between items-start">
+                            <div>
+                                <h2 class="text-2xl font-semibold text-gray-900">Air Monitoring</h2>
+                                <p class="text-sm text-gray-600 mt-1">Manage project air samples.</p>
+                            </div>
+                            <div class="flex gap-2">
+                                <button id="print-air-samples-btn" class="btn btn-secondary btn-sm whitespace-nowrap" disabled>
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+                                        <path fill-rule="evenodd" d="M5 2.75C5 1.784 5.784 1 6.75 1h6.5c.966 0 1.75.784 1.75 1.75v3.552c.377.046.752.097 1.126.153A2.212 2.212 0 0 1 18 8.653v4.097A2.25 2.25 0 0 1 15.75 15h-.241l.305 1.984A1.75 1.75 0 0 1 14.084 19H5.916a1.75 1.75 0 0 1-1.73-2.016L4.492 15H4.25A2.25 2.25 0 0 1 2 12.75V8.653c0-1.082.775-2.034 1.874-2.198.374-.056.749-.107 1.126-.153V2.75ZM7.5 3v2.932c.658-.043 1.321-.065 1.989-.065h1.022c.668 0 1.33.022 1.989.065V3h-5Zm1.086 12 .222-1.5h2.384l.222 1.5H8.586Z" clip-rule="evenodd" />
+                                    </svg>
+                                    Print
+                                </button>
+                                <button id="new-air-sample-btn" class="btn btn-primary btn-sm whitespace-nowrap">+ Add Air Sample</button>
+                            </div>
+                        </div>
+                        <div class="section-content">
+                            <div id="oversight-project-air-samples" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <!-- Air samples injected here -->
+                                <p class="text-gray-500 text-sm col-span-full">No air samples recorded.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="oversight-project-error" class="hidden border border-red-200 bg-red-50 text-red-700 p-4 rounded-lg">
+            Unable to load project. Please return to the Oversight dashboard.
+        </div>
+    </div>
+
+    <div id="worker-roster-view" class="hidden oversight-page-pad container mx-auto space-y-6"></div>
+    <div id="daily-log-view" class="hidden oversight-page-pad container mx-auto space-y-6"></div>
+
+    <script src="./js/inspector-profile.js"></script>
+    <script src="./js/project.js"></script>
+    
+    <!-- Service Worker Registration for Offline Support (skip in Electron - file:// protocol) -->
+    <script>
+        if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.electronAPI) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/service-worker.js')
+                    .then(reg => console.log('✅ Project SW registered'))
+                    .catch(err => console.warn('SW registration failed:', err));
+            });
+        }
+    </script>
+</body>
+</html>

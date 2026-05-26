@@ -1,0 +1,62 @@
+{
+  "name": "oversight-desktop",
+  "version": "1.0.1",
+  "description": "Oversight Desktop - Standalone offline project management application",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "keywords": ["oversight", "project-management", "electron"],
+  "author": "AsbTrack",
+  "license": "ISC",
+  "devDependencies": {
+    "adm-zip": "^0.5.16",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.0.0",
+    "docxtemplater": "^3.68.1",
+    "docxtemplater-image-module-free": "^1.1.1",
+    "file-saver": "^2.0.5",
+    "jszip": "^3.10.1",
+    "xlsx": "^0.18.5"
+  },
+  "build": {
+    "appId": "com.asbtrack.oversight",
+    "productName": "Oversight Desktop",
+    "copyright": "Copyright © 2024 AsbTrack",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!node_modules/**/*",
+      "!dist/**/*",
+      "!dist-packaged/**/*",
+      "!example_oversight/**/*",
+      "!asbtract_template/**/*",
+      "!*.log",
+      "!.git/**/*",
+      "!.cursor/**/*"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Oversight Desktop"
+    }
+  }
+}
