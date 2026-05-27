@@ -102,12 +102,89 @@ document.addEventListener('DOMContentLoaded', () => {
         cleanupOrphanedModals();
     });
 
+    // Migrate any older project data before the dashboard reads it. This is
+    // the guarantee behind "updating won't delete your projects": new app
+    // versions add missing fields with safe defaults instead of throwing
+    // out the record. Runs once per app start; fast no-op when nothing to do.
+    migrateAllProjects();
+
     loadProjects();
     setupEventListeners();
 });
 
 const STORAGE_KEY_PREFIX = 'oversight_project_';
 const INDEX_KEY = 'oversight_project_index';
+
+// =====================================================================
+// SCHEMA MIGRATION
+// ---------------------------------------------------------------------
+// `DATA_SCHEMA_VERSION` is the shape this build of the app understands.
+// Bump it when project JSON gains a new required field or changes shape,
+// and add a step to `PROJECT_MIGRATIONS` that upgrades from the previous
+// version to the new one. Migrations MUST be additive — never delete
+// inspector data; fall back to safe defaults if a field is missing.
+// =====================================================================
+const DATA_SCHEMA_VERSION = 1;
+const SCHEMA_VERSION_KEY = 'oversight_data_schema_version';
+
+const PROJECT_MIGRATIONS = {
+    // Example for future use:
+    // 1: (p) => { p.someNewField = p.someNewField ?? []; return p; },
+};
+
+function migrateProject(project) {
+    if (!project || typeof project !== 'object') return project;
+    const fromVersion = Number(project.schemaVersion) || 0;
+    let v = fromVersion;
+    while (v < DATA_SCHEMA_VERSION) {
+        const step = PROJECT_MIGRATIONS[v + 1];
+        if (typeof step === 'function') {
+            try { step(project); } catch (e) {
+                console.warn('Migration step', v + 1, 'failed; keeping project as-is.', e);
+                break;
+            }
+        }
+        v += 1;
+    }
+    project.schemaVersion = DATA_SCHEMA_VERSION;
+    // Belt-and-suspenders: guarantee the collections the UI iterates exist,
+    // so older exports that pre-date a feature still render cleanly.
+    if (!Array.isArray(project.buildings)) project.buildings = [];
+    if (!Array.isArray(project.materials)) project.materials = [];
+    if (!Array.isArray(project.containments)) project.containments = [];
+    if (!Array.isArray(project.airSamples)) project.airSamples = [];
+    if (!Array.isArray(project.dailyLogs)) project.dailyLogs = [];
+    if (!Array.isArray(project.workerRoster)) project.workerRoster = [];
+    return project;
+}
+
+function migrateAllProjects() {
+    try {
+        const storedVersion = Number(localStorage.getItem(SCHEMA_VERSION_KEY)) || 0;
+        if (storedVersion === DATA_SCHEMA_VERSION) return; // nothing to do
+        const index = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
+        let migrated = 0;
+        for (const id of index) {
+            const key = STORAGE_KEY_PREFIX + id;
+            const raw = localStorage.getItem(key);
+            if (!raw) continue;
+            try {
+                const project = JSON.parse(raw);
+                migrateProject(project);
+                localStorage.setItem(key, JSON.stringify(project));
+                migrated += 1;
+            } catch (e) {
+                console.warn('Could not migrate project', id, e);
+            }
+        }
+        localStorage.setItem(SCHEMA_VERSION_KEY, String(DATA_SCHEMA_VERSION));
+        if (migrated > 0) {
+            console.log(`[migrate] Updated ${migrated} project(s) to schema v${DATA_SCHEMA_VERSION}.`);
+        }
+    } catch (e) {
+        console.warn('Schema migration skipped:', e);
+    }
+}
 
 function setupEventListeners() {
     const newProjectBtn = document.getElementById('new-oversight-project-btn');
@@ -144,58 +221,11 @@ function setupEventListeners() {
 }
 
 function loadProjects() {
-    const container = document.getElementById('oversight-projects-container');
-    const emptyState = document.getElementById('oversight-empty-state');
-    const archivedBtn = document.getElementById('view-archived-btn');
-    const dashboardTitle = container?.closest('.card')?.querySelector('h2');
-    
-    if (!container) return;
-
-    // Update archived toggle button text
-    if (archivedBtn) {
-        archivedBtn.innerHTML = showingArchivedProjects
-            ? `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                <path fill-rule="evenodd" d="M9.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L7.414 9H15a1 1 0 110 2H7.414l2.293 2.293a1 1 0 010 1.414z" clip-rule="evenodd" />
-               </svg>Active Projects`
-            : `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                <path d="M4 3a2 2 0 100 4h12a2 2 0 100-4H4z" />
-                <path fill-rule="evenodd" d="M3 8h14v7a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm5 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" clip-rule="evenodd" />
-               </svg>Archived`;
+    // Rendering is owned by js/shell.js (redesigned shell). This helper
+    // is now a thin re-render trigger used by archive/delete/import handlers.
+    if (window.OverShell && typeof window.OverShell.refreshDashboard === 'function') {
+        window.OverShell.refreshDashboard();
     }
-    
-    // Update dashboard title
-    if (dashboardTitle) {
-        dashboardTitle.textContent = showingArchivedProjects ? 'Archived Projects' : 'Dashboard';
-    }
-
-    // Get all projects from localStorage
-    const allProjects = getAllProjects();
-    
-    // Filter by archived status
-    const projects = allProjects.filter(p => showingArchivedProjects ? p.archived === true : p.archived !== true);
-    
-    if (projects.length === 0) {
-        if (emptyState) {
-            emptyState.style.display = 'block';
-            emptyState.innerHTML = showingArchivedProjects
-                ? `<p class="font-medium">No archived projects.</p><p class="text-sm text-gray-400 mt-1">Completed projects will appear here after archiving.</p>`
-                : `<p class="font-medium">No oversight projects yet.</p><p class="text-sm text-gray-400 mt-1">Use "New Oversight Project" to start tracking abatement scopes.</p>`;
-        }
-        container.innerHTML = '';
-        container.appendChild(emptyState);
-        return;
-    }
-    
-    if (emptyState) emptyState.style.display = 'none';
-    container.innerHTML = ''; // Clear container
-    
-    // Sort by last modified (newest first)
-    projects.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
-    
-    projects.forEach(project => {
-        const card = createProjectCard(project);
-        container.appendChild(card);
-    });
 }
 
 function getAllProjects() {
@@ -372,7 +402,16 @@ function calculateMaterialCompletion(project) {
     return { percent, allAbated, allAssigned };
 }
 
+// Retained for backwards compatibility; the redesigned shell renders project
+// rows directly via js/shell.js (renderTodayView / renderProjectsView /
+// renderArchiveView). This stub is unused but kept so older call sites do
+// not throw.
 function createProjectCard(project) {
+    const div = document.createElement('div');
+    div.style.display = 'none';
+    return div;
+}
+function _legacy_createProjectCard_unused(project) {
     const div = document.createElement('div');
     div.className = 'list-item-card hover-reveal-card animate-fade-in';
     div.onclick = (e) => {
@@ -1076,6 +1115,47 @@ async function downloadArchivedProject(projectId, projectName) {
             return date < new Date();
         };
 
+        const removeEmptyPhotoLogCells = (zip) => {
+            const docFile = zip?.file?.('word/document.xml');
+            if (!docFile) return;
+
+            const getCellText = (cellXml) => (cellXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [])
+                .map(t => t.replace(/<[^>]+>/g, ''))
+                .join('')
+                .replace(/&amp;/g, '&')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .trim();
+            const hasImage = (cellXml) => /<w:(?:drawing|pict|object)\b|<a:blip\b/.test(cellXml);
+            const isEmptyCell = (cellXml) => !hasImage(cellXml) && getCellText(cellXml) === '';
+
+            const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+            let removeNextPhotoImageCell = false;
+            const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
+                const cells = rowXml.match(cellPattern);
+                if (!cells || cells.length !== 2 || !isEmptyCell(cells[1])) {
+                    removeNextPhotoImageCell = false;
+                    return rowXml;
+                }
+
+                const firstText = getCellText(cells[0]);
+                if (/Photo\s*#/.test(firstText)) {
+                    removeNextPhotoImageCell = true;
+                    return rowXml.replace(cells[1], '');
+                }
+
+                if (removeNextPhotoImageCell && hasImage(cells[0])) {
+                    removeNextPhotoImageCell = false;
+                    return rowXml.replace(cells[1], '');
+                }
+
+                removeNextPhotoImageCell = false;
+                return rowXml;
+            });
+
+            zip.file('word/document.xml', updatedXml);
+        };
+
         // Template document generator - uses ImageModule for {%image}/{%%image} signatures
         const generateDocBlob = async (templatePath, templateData) => {
             try {
@@ -1099,6 +1179,9 @@ async function downloadArchivedProject(projectId, projectName) {
                 if (signatureImageModule) docOptions.modules = [signatureImageModule];
                 const docTemplate = new DocxtemplaterClass(docZip, docOptions);
                 docTemplate.render(templateData);
+                if (/Daily Log Template\.docx/i.test(templatePath)) {
+                    removeEmptyPhotoLogCells(docTemplate.getZip());
+                }
                 return docTemplate.getZip().generate({
                     type: 'blob',
                     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'

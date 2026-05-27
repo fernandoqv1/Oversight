@@ -238,8 +238,7 @@ function updateProfileButton() {
     const nameEl = document.getElementById('inspector-profile-name');
     if (nameEl) {
         if (profile.name) {
-            const sigIndicator = profile.signatureBase64 ? ' ✍' : '';
-            nameEl.textContent = profile.name + sigIndicator;
+            nameEl.textContent = profile.name;
         } else {
             nameEl.textContent = 'Set Profile';
         }

@@ -1,13 +1,14 @@
 {
   "name": "oversight-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Oversight Desktop - Standalone offline project management application",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "build": "electron-builder",
-    "build:win": "electron-builder --win",
+    "build:win": "electron-builder --win --config.win.signAndEditExecutable=false",
     "build:dir": "electron-builder --win --dir",
+    "release": "electron-builder --win --publish always",
     "postinstall": "node scripts/postinstall.js"
   },
   "keywords": ["oversight", "project-management", "electron"],
@@ -22,6 +23,7 @@
     "@fontsource/inter": "^5.0.0",
     "docxtemplater": "^3.68.1",
     "docxtemplater-image-module-free": "^1.1.1",
+    "electron-updater": "^6.8.3",
     "file-saver": "^2.0.5",
     "jszip": "^3.10.1",
     "xlsx": "^0.18.5"
@@ -38,8 +40,13 @@
       "!node_modules/**/*",
       "!dist/**/*",
       "!dist-packaged/**/*",
+      "!dist-build/**/*",
+      "!dist-release/**/*",
+      "!oversight/**/*",
+      "!oversight_example/**/*",
       "!example_oversight/**/*",
       "!asbtract_template/**/*",
+      "!templates/~$*.docx",
       "!*.log",
       "!.git/**/*",
       "!.cursor/**/*"
@@ -49,7 +56,7 @@
         { "target": "nsis", "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
       ],
-      "icon": "assets/icon.ico"
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
@@ -57,6 +64,14 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Oversight Desktop"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "fernandoqv1",
+        "repo": "Oversight",
+        "releaseType": "release"
+      }
+    ]
   }
 }
