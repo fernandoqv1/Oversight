@@ -5,6 +5,18 @@ const STORAGE_KEY_PREFIX = 'oversight_project_';
 let currentProject = null;
 let currentSubview = null; // null = main, 'workerRoster', 'dailyLog'
 
+// Expose currentProject to window so the redesigned shell (js/shell.js)
+// can read the latest state for tab rendering after mutations.
+function _publishCurrentProject() {
+    try { window.currentProject = currentProject; } catch (e) {}
+}
+function _shellRefresh() {
+    _publishCurrentProject();
+    if (window.OverShell && typeof window.OverShell.renderAll === 'function') {
+        window.OverShell.renderAll();
+    }
+}
+
 // Convert stored unit codes to user-facing display strings.
 // Storage values stay as legacy codes for backwards compatibility.
 function displayUnit(u, fallback) {
@@ -106,33 +118,12 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function setupEventListeners() {
-    // Project info - both overview button and header button
-    document.getElementById('edit-project-btn')?.addEventListener('click', openEditProjectModal);
-    document.getElementById('header-edit-project-btn')?.addEventListener('click', openEditProjectModal);
-    
-    // Buildings & Spaces
-    document.getElementById('add-building-btn')?.addEventListener('click', openAddBuildingModal);
-    document.getElementById('add-space-header-btn')?.addEventListener('click', openAddSpaceFromHeader);
-    
-    // Materials
-    document.getElementById('add-material-btn')?.addEventListener('click', openAddMaterialModal);
-    document.getElementById('print-bulk-samples-btn')?.addEventListener('click', () => openPrintBulkSamplesModal());
-    
-    // Containments
-    document.getElementById('new-containment-btn')?.addEventListener('click', openAddContainmentModal);
-    
-    // Air Samples
-    document.getElementById('new-air-sample-btn')?.addEventListener('click', openAddAirSampleModal);
-    document.getElementById('print-air-samples-btn')?.addEventListener('click', openPrintAirSamplesModal);
-    
-    // Overview Quick Actions
-    document.getElementById('overview-create-log-btn')?.addEventListener('click', openProjectDailyLogModal);
-    document.getElementById('overview-view-logs-btn')?.addEventListener('click', () => navigateToSubview('dailyLog'));
-    document.getElementById('overview-worker-roster-btn')?.addEventListener('click', () => navigateToSubview('workerRoster'));
-
-    document.getElementById('project-details-toggle-btn')?.addEventListener('click', () => {
-        setProjectDetailsHidden(!isProjectDetailsHidden());
-    });
+    // The redesigned shell (js/shell.js) owns the project workspace chrome
+    // (sidebar, topbar, tabs, tab-level action buttons). All button IDs
+    // referenced here belonged to the legacy DOM, which no longer exists,
+    // so the optional chaining short-circuits safely. Modal builders that
+    // these handlers point at remain available as global functions and
+    // are wired by the shell where appropriate.
 }
 
 function loadProject(id) {
@@ -152,7 +143,8 @@ function loadProject(id) {
         if (!currentProject.bulkSamples) currentProject.bulkSamples = [];
         if (!currentProject.workerRoster) currentProject.workerRoster = [];
         if (!currentProject.dailyLogs) currentProject.dailyLogs = [];
-        
+        currentProject.workerRoster = normalizeWorkerRoster(currentProject.workerRoster);
+        _publishCurrentProject();
         renderProject();
     } catch (e) {
         console.error(e);
@@ -162,38 +154,12 @@ function loadProject(id) {
 
 function renderProject() {
     if (!currentProject) return;
-    
-    // Header
-    setText('oversight-project-number', currentProject.projectNumber || 'Untitled Project');
-    setText('oversight-project-site', currentProject.siteAddress || 'No address specified');
-    
-    // Overview Card
-    renderOverviewCard();
-    
-    // Project Info
-    renderProjectInfo();
-    
-    // Buildings & Spaces
-    renderBuildings();
-    
-    // Materials
-    renderMaterials();
-    
-    // Containments
-    renderContainments();
-    
-    // Air Samples
-    renderAirSamples();
-    
-    // Re-render subviews if active
-    if (currentSubview === 'workerRoster') {
-        renderWorkerRosterView(currentProject);
-    } else if (currentSubview === 'dailyLog') {
-        renderDailyLogView(currentProject);
-    }
+    // The redesigned shell (js/shell.js) renders the project workspace.
+    _shellRefresh();
 }
 
 function renderProjectInfo() {
+    _shellRefresh();
     const container = document.getElementById('project-info');
     const card = document.getElementById('project-info-card');
     if (!container || !card) return;
@@ -282,6 +248,7 @@ function renderProjectInfo() {
 }
 
 function renderBuildings() {
+    _shellRefresh();
     const container = document.getElementById('project-buildings');
     if (!container) return;
     
@@ -381,6 +348,7 @@ function renderSpaces(building) {
 }
 
 function renderMaterials() {
+    _shellRefresh();
     const container = document.getElementById('project-materials');
     if (!container) return;
     
@@ -450,6 +418,7 @@ function getAssignedQuantity(materialId) {
 }
 
 function renderContainments() {
+    _shellRefresh();
     const container = document.getElementById('oversight-project-containments');
     if (!container) return;
     
@@ -516,6 +485,7 @@ function renderContainments() {
 }
 
 function renderAirSamples() {
+    _shellRefresh();
     const container = document.getElementById('oversight-project-air-samples');
     if (!container) return;
     
@@ -625,7 +595,8 @@ function calculateTimeElapsed(startTime, stopTime) {
         const [stopH, stopM] = stopTime.split(':').map(Number);
         const startMinutes = startH * 60 + startM;
         const stopMinutes = stopH * 60 + stopM;
-        return stopMinutes - startMinutes;
+        const elapsed = stopMinutes - startMinutes;
+        return elapsed < 0 ? elapsed + (24 * 60) : elapsed;
     } catch (e) {
         return null;
     }
@@ -683,6 +654,36 @@ function updateSampleCalc(prefix) {
     } else {
         preview.classList.add('hidden');
     }
+}
+
+function getAirSampleTypePrefix(type) {
+    const normalized = String(type || '').toLowerCase();
+    if (normalized === 'personal') return 'PS';
+    if (normalized === 'clearance') return 'CA';
+    return 'AS';
+}
+
+function getNextAirSampleId(type, currentSampleId = null) {
+    const projectNum = currentProject?.projectNumber || 'PJ';
+    const typePrefix = getAirSampleTypePrefix(type);
+    const prefix = `${projectNum}-${typePrefix}`;
+    let nextNum = 1;
+    (currentProject?.airSamples || []).forEach(sample => {
+        const id = sample.sampleId || '';
+        if (currentSampleId && id === currentSampleId) return;
+        if (!id.startsWith(prefix)) return;
+        const suffix = id.slice(prefix.length);
+        if (/^\d+$/.test(suffix)) {
+            nextNum = Math.max(nextNum, parseInt(suffix, 10) + 1);
+        }
+    });
+    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+}
+
+function isAutoAirSampleId(value) {
+    const projectNum = currentProject?.projectNumber || 'PJ';
+    const escapedProject = projectNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`^${escapedProject}-(AS|PS|CA)\\d{3}$`, 'i').test(String(value || ''));
 }
 
 // Export for onclick handlers
@@ -2002,7 +2003,7 @@ function createClearanceAirSamples(containment, inspectionData) {
 
     // Create 5 clearance samples - use containment dropdown, not location text
     for (let i = 1; i <= 5; i++) {
-        const sampleId = `${prefix}${String(maxSeq + i).padStart(2, '0')}`;
+        const sampleId = `${prefix}${String(maxSeq + i).padStart(3, '0')}`;
         const newSample = {
             id: generateId(),
             sampleId: sampleId,
@@ -2331,9 +2332,7 @@ function openEditContainmentModal(containmentId) {
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
                 <div class="relative w-full border border-gray-300 rounded-lg bg-white overflow-hidden" style="min-height: 2.75rem;">
-                    <span id="edit-containment-mirror" class="absolute whitespace-pre pointer-events-none" style="visibility:hidden;left:-9999px;top:0" aria-hidden="true"></span>
-                    <input type="text" id="edit-containment-name" class="w-full p-3 pr-28 border-0 focus:ring-0 bg-transparent" value="${escapeHtml(containment.name)}" style="box-shadow: none;">
-                    <span id="edit-containment-suffix" class="absolute text-gray-400 pointer-events-none" style="display: none; top: 50%; transform: translateY(-50%); padding-left: 0.25em;">Containment</span>
+                    <input type="text" id="edit-containment-name" class="w-full p-3 border-0 focus:ring-0 bg-transparent" value="${escapeHtml(containment.name)}" style="box-shadow: none;">
                 </div>
             </div>
             <div>
@@ -2696,31 +2695,8 @@ function openEditContainmentModal(containmentId) {
         spacesSection.classList.remove('hidden');
     };
     
-    // Add event listener for building selection and ghost suffix (inline, next to typed text)
+    // Add event listener for building selection
     setTimeout(() => {
-        const nameInput = document.getElementById('edit-containment-name');
-        const suffixSpan = document.getElementById('edit-containment-suffix');
-        const mirrorSpan = document.getElementById('edit-containment-mirror');
-        if (nameInput && suffixSpan && mirrorSpan) {
-            const updateSuffix = () => {
-                const raw = nameInput.value;
-                if (!raw.trim()) {
-                    suffixSpan.style.display = 'none';
-                    return;
-                }
-                mirrorSpan.textContent = raw;
-                mirrorSpan.style.font = window.getComputedStyle(nameInput).font;
-                mirrorSpan.style.fontSize = window.getComputedStyle(nameInput).fontSize;
-                mirrorSpan.style.lineHeight = window.getComputedStyle(nameInput).lineHeight;
-                const pad = parseFloat(window.getComputedStyle(nameInput).paddingLeft) || 12;
-                suffixSpan.style.left = `${pad + mirrorSpan.offsetWidth}px`;
-                suffixSpan.style.font = window.getComputedStyle(nameInput).font;
-                suffixSpan.style.display = 'inline';
-            };
-            nameInput.addEventListener('input', updateSuffix);
-            nameInput.addEventListener('focus', updateSuffix);
-            updateSuffix(); // Show suffix if field is pre-filled
-        }
         const buildingSelect = document.getElementById('edit-containment-building');
         if (buildingSelect) {
             // Initial render if building is already selected
@@ -2747,15 +2723,7 @@ function openAddAirSampleModal() {
         `<option value="${c.id}">${escapeHtml(c.name)}</option>`
     ).join('');
     
-    // Generate next sample ID
-    const existingIds = (currentProject.airSamples || []).map(s => s.sampleId || '');
-    const projectNum = currentProject.projectNumber || 'PJ';
-    let nextNum = 1;
-    existingIds.forEach(id => {
-        const match = id.match(/-(\d+)$/);
-        if (match) nextNum = Math.max(nextNum, parseInt(match[1]) + 1);
-    });
-    const suggestedId = `${projectNum}-AS${String(nextNum).padStart(3, '0')}`;
+    const suggestedId = getNextAirSampleId('Area');
     
     const modal = createModal('Add Air Sample', `
         <div class="space-y-4">
@@ -2772,9 +2740,8 @@ function openAddAirSampleModal() {
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
                     <select id="new-sample-type" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="Background">Background</option>
-                        <option value="Personal">Personal</option>
                         <option value="Area" selected>Area</option>
+                        <option value="Personal">Personal</option>
                         <option value="Clearance">Clearance</option>
                     </select>
                 </div>
@@ -2843,6 +2810,12 @@ function openAddAirSampleModal() {
         if (!currentProject.airSamples) currentProject.airSamples = [];
         const containmentIdVal = document.getElementById('new-sample-containment').value;
         const containment = containmentIdVal ? currentProject.containments?.find(c => c.id === containmentIdVal) : null;
+        const startTime = document.getElementById('new-sample-start-time').value;
+        const stopTime = document.getElementById('new-sample-stop-time').value;
+        const startFlowRate = parseFloat(document.getElementById('new-sample-start-flow').value) || null;
+        const stopFlowRate = parseFloat(document.getElementById('new-sample-stop-flow').value) || null;
+        const timeElapsed = calculateTimeElapsed(startTime, stopTime);
+        const samplingVolume = calculateSamplingVolume(startFlowRate, stopFlowRate, timeElapsed);
         currentProject.airSamples.push({
             id: generateId(),
             sampleId,
@@ -2851,13 +2824,25 @@ function openAddAirSampleModal() {
             containmentId: containmentIdVal,
             containmentName: containment?.name || '',
             date: document.getElementById('new-sample-date').value,
-            startTime: document.getElementById('new-sample-start-time').value,
-            stopTime: document.getElementById('new-sample-stop-time').value,
-            startFlowRate: parseFloat(document.getElementById('new-sample-start-flow').value) || null,
-            stopFlowRate: parseFloat(document.getElementById('new-sample-stop-flow').value) || null
+            startTime,
+            stopTime,
+            startFlowRate,
+            stopFlowRate,
+            timeElapsed: timeElapsed || null,
+            sampleVolume: samplingVolume ? Number(samplingVolume.toFixed(2)) : null,
+            samplingVolume: samplingVolume ? Number(samplingVolume.toFixed(2)) : null
         });
         saveCurrentProject();
         renderProject();
+    });
+
+    const sampleTypeSelect = modal.querySelector('#new-sample-type');
+    const sampleIdInput = modal.querySelector('#new-sample-id');
+    sampleTypeSelect?.addEventListener('change', () => {
+        if (!sampleIdInput) return;
+        if (!sampleIdInput.value.trim() || isAutoAirSampleId(sampleIdInput.value.trim())) {
+            sampleIdInput.value = getNextAirSampleId(sampleTypeSelect.value);
+        }
     });
 }
 
@@ -2878,26 +2863,26 @@ function openEditAirSampleModal(sampleId) {
     });
     const sampleSetPickerRows = otherSamples.sort((a, b) => (a.sampleId || '').localeCompare(b.sampleId || '')).map(s => {
         const inSet = hasSetAlready && s.sampleSetId === sample.sampleSetId;
-        return `<div class="sample-set-row flex items-center gap-2 p-2 rounded-lg hover:bg-gray-50" data-sample-id="${s.id}">
-            <label class="flex items-center gap-2 cursor-pointer flex-shrink-0">
+        return `<div class="sample-set-row p-2 rounded-lg hover:bg-gray-50" data-sample-id="${s.id}">
+            <label class="sample-set-label flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" class="sample-set-cb h-4 w-4 text-indigo-600 border-gray-300 rounded" value="${s.id}" ${inSet ? 'checked' : ''}>
                 <span class="text-sm font-medium text-gray-800">${escapeHtml(s.sampleId || s.id)}</span>
                 <span class="text-xs text-gray-500">${s.type || 'Area'}</span>
             </label>
-            <input type="text" class="sample-set-location border rounded ${inSet ? '' : 'hidden'}" data-sample-id="${s.id}" value="${escapeHtml(s.location || '')}" placeholder="Location / Comments" style="padding:0.3rem 0.5rem; font-size:0.875rem; min-width:0;">
+            <input type="text" class="sample-set-location border rounded ${inSet ? '' : 'hidden'}" data-sample-id="${s.id}" value="${escapeHtml(s.location || '')}" placeholder="Location / Comments" style="padding:0.3rem 0.5rem; font-size:0.875rem;">
         </div>`;
     }).join('');
     
     const hasSampleSetPanel = otherSamples.length > 0;
     // Form column constraints apply only while the set panel is visible (toggled on).
     // When the panel is hidden, the form fills the modal width.
-    const formColExpandedCss = 'flex: 0 1 40%; max-width: 44%;';
+    const formColExpandedCss = 'flex: 0 0 390px; max-width: none;';
     const formColStyle = (hasSampleSetPanel && hasSetAlready)
         ? `${formColExpandedCss} min-width: 0; display: flex; flex-direction: column; gap: 0.35rem;`
         : 'flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.35rem;';
 
     const modal = createModal('Edit Air Sample', `
-        <div style="display: flex; gap: 1rem; align-items: flex-start;">
+        <div id="edit-air-sample-layout" style="display: flex; gap: 1rem; align-items: flex-start; min-width:0;">
             <div id="edit-air-sample-form-col" style="${formColStyle}">
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem 0.75rem;">
                     <div>
@@ -2907,9 +2892,8 @@ function openEditAirSampleModal(sampleId) {
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample Type</label>
                         <select id="edit-sample-type" class="w-full border rounded bg-white" style="padding:0.3rem 0.5rem; font-size:0.875rem;">
-                            <option value="Background" ${sample.type === 'Background' ? 'selected' : ''}>Background</option>
+                            <option value="Area" ${sample.type !== 'Personal' && sample.type !== 'Clearance' ? 'selected' : ''}>Area</option>
                             <option value="Personal" ${sample.type === 'Personal' ? 'selected' : ''}>Personal</option>
-                            <option value="Area" ${sample.type === 'Area' ? 'selected' : ''}>Area</option>
                             <option value="Clearance" ${sample.type === 'Clearance' ? 'selected' : ''}>Clearance</option>
                         </select>
                     </div>
@@ -2986,7 +2970,7 @@ function openEditAirSampleModal(sampleId) {
             </div>
 
             ${otherSamples.length > 0 ? `
-            <div id="edit-sample-set-panel" class="${hasSetAlready ? '' : 'hidden'}" style="flex: 1 1 0; min-width: 300px; border-left: 1px solid #e5e7eb; padding-left: 1rem;">
+            <div id="edit-sample-set-panel" class="${hasSetAlready ? '' : 'hidden'}" style="flex: 1 1 440px; min-width: 380px; border-left: 1px solid #e5e7eb; padding-left: 1rem;">
                 <h4 style="font-size:0.85rem; font-weight:600; color:#1f2937; margin-bottom:0.35rem;">Sample Set</h4>
                 <div id="edit-sample-set-picker" class="max-h-80 overflow-y-auto space-y-1 pr-1">
                     ${sampleSetPickerRows}
@@ -3013,6 +2997,11 @@ function openEditAirSampleModal(sampleId) {
         sample.stopTime = document.getElementById('edit-sample-stop-time').value;
         sample.startFlowRate = parseFloat(document.getElementById('edit-sample-start-flow').value) || null;
         sample.stopFlowRate = parseFloat(document.getElementById('edit-sample-stop-flow').value) || null;
+        const editTimeElapsed = calculateTimeElapsed(sample.startTime, sample.stopTime);
+        const editSamplingVolume = calculateSamplingVolume(sample.startFlowRate, sample.stopFlowRate, editTimeElapsed);
+        sample.timeElapsed = editTimeElapsed || null;
+        sample.sampleVolume = editSamplingVolume ? Number(editSamplingVolume.toFixed(2)) : null;
+        sample.samplingVolume = editSamplingVolume ? Number(editSamplingVolume.toFixed(2)) : null;
 
         const setToggle = document.getElementById('edit-sample-set-toggle');
         if (setToggle && setToggle.checked) {
@@ -3020,7 +3009,16 @@ function openEditAirSampleModal(sampleId) {
             if (checkedIds.length > 0) {
                 const setId = sample.sampleSetId || ('set_' + generateId());
                 sample.sampleSetId = setId;
-                const syncFields = { date: sample.date, startTime: sample.startTime, stopTime: sample.stopTime, startFlowRate: sample.startFlowRate, stopFlowRate: sample.stopFlowRate };
+                const syncFields = {
+                    date: sample.date,
+                    startTime: sample.startTime,
+                    stopTime: sample.stopTime,
+                    startFlowRate: sample.startFlowRate,
+                    stopFlowRate: sample.stopFlowRate,
+                    timeElapsed: sample.timeElapsed,
+                    sampleVolume: sample.sampleVolume,
+                    samplingVolume: sample.samplingVolume
+                };
                 checkedIds.forEach(id => {
                     const linked = currentProject.airSamples.find(s => s.id === id);
                     if (linked) {
@@ -3053,16 +3051,27 @@ function openEditAirSampleModal(sampleId) {
         renderProject();
     });
 
+    modal.querySelector('.modal-content')?.classList.add('air-sample-edit-modal');
+    const editSampleTypeSelect = modal.querySelector('#edit-sample-type');
+    const editSampleIdInput = modal.querySelector('#edit-sample-id');
+    editSampleTypeSelect?.addEventListener('change', () => {
+        if (!editSampleIdInput) return;
+        const currentValue = editSampleIdInput.value.trim();
+        if (!currentValue || isAutoAirSampleId(currentValue)) {
+            editSampleIdInput.value = getNextAirSampleId(editSampleTypeSelect.value, sample.sampleId || '');
+        }
+    });
+
     setTimeout(() => {
         updateSampleCalc('edit');
 
         const modalContentEl = modal.querySelector('.modal-content');
         if (modalContentEl) {
-            modalContentEl.style.padding = '0.75rem 1.25rem';
+            modalContentEl.style.padding = '0';
             const titleEl = modalContentEl.querySelector('h3');
-            if (titleEl) { titleEl.style.marginBottom = '0.35rem'; titleEl.style.fontSize = '1.05rem'; }
+            if (titleEl) { titleEl.style.marginBottom = '0'; titleEl.style.fontSize = '1.05rem'; }
             const footerEl = modalContentEl.querySelector('.modal-footer');
-            if (footerEl) { footerEl.style.marginTop = '0.4rem'; footerEl.style.paddingTop = '0.4rem'; }
+            if (footerEl) { footerEl.style.marginTop = '0'; footerEl.style.paddingTop = '0'; }
             modalContentEl.querySelectorAll('input, select').forEach(el => {
                 el.style.paddingLeft = '0.5rem';
                 el.style.paddingRight = '0.5rem';
@@ -3073,13 +3082,10 @@ function openEditAirSampleModal(sampleId) {
         // Width = 70% of main Location input, then +20% (i.e. 84%). Inputs sit right next to
         // each sample's name/type pair (no auto-right alignment) so they hug the label.
         const sizeSetLocationInputs = () => {
-            const mainLoc = document.getElementById('edit-sample-location');
-            if (!mainLoc) return;
-            const target = Math.max(140, Math.round(mainLoc.getBoundingClientRect().width * 0.7 * 1.2));
             document.querySelectorAll('.sample-set-location').forEach(inp => {
-                inp.style.width = `${target}px`;
-                inp.style.flex = '0 0 auto';
-                inp.style.marginLeft = '0.5rem';
+                inp.style.width = 'auto';
+                inp.style.flex = '1 1 auto';
+                inp.style.marginLeft = '0';
             });
         };
         sizeSetLocationInputs();
@@ -3105,16 +3111,19 @@ function openEditAirSampleModal(sampleId) {
             const applyFormColLayout = (expanded) => {
                 if (!formCol) return;
                 if (expanded) {
-                    formCol.style.flex = '0 1 40%';
-                    formCol.style.maxWidth = '44%';
+                    formCol.style.flex = '0 0 390px';
+                    formCol.style.maxWidth = 'none';
                 } else {
                     formCol.style.flex = '1';
                     formCol.style.maxWidth = 'none';
                 }
             };
             const applyWidth = (expanded) => {
-                if (mcEl) mcEl.style.maxWidth = expanded ? '860px' : '600px';
-                if (mcEl) mcEl.style.transition = 'max-width 0.2s ease';
+                if (mcEl) {
+                    mcEl.style.width = expanded ? 'calc(100vw - 48px)' : '100%';
+                    mcEl.style.maxWidth = expanded ? '940px' : '600px';
+                    mcEl.style.transition = 'max-width 0.2s ease';
+                }
                 applyFormColLayout(expanded);
                 requestAnimationFrame(sizeSetLocationInputs);
             };
@@ -3171,6 +3180,7 @@ function normalizeStage(stage) {
 }
 
 function renderOverviewCard() {
+    _shellRefresh();
     const overviewText = document.getElementById('oversight-project-overview');
     if (overviewText) {
         const siteName = currentProject.siteName || currentProject.name || '';
@@ -3247,26 +3257,13 @@ function renderOverviewCard() {
 // ============================================
 
 function navigateToSubview(view) {
+    // The redesigned shell uses tabs instead of subviews. Map the legacy
+    // names so existing call sites continue to work.
     currentSubview = view;
-    const mainView = document.getElementById('project-main-view');
-    const workerRosterView = document.getElementById('worker-roster-view');
-    const dailyLogView = document.getElementById('daily-log-view');
-    
-    if (!view) {
-        // Show main, hide subviews
-        mainView?.classList.remove('hidden');
-        workerRosterView?.classList.add('hidden');
-        dailyLogView?.classList.add('hidden');
-    } else if (view === 'workerRoster') {
-        mainView?.classList.add('hidden');
-        dailyLogView?.classList.add('hidden');
-        workerRosterView?.classList.remove('hidden');
-        renderWorkerRosterView(currentProject);
-    } else if (view === 'dailyLog') {
-        mainView?.classList.add('hidden');
-        workerRosterView?.classList.add('hidden');
-        dailyLogView?.classList.remove('hidden');
-        renderDailyLogView(currentProject);
+    const tabMap = { workerRoster: 'team', dailyLog: 'logs' };
+    const tab = view ? (tabMap[view] || 'overview') : 'overview';
+    if (window.OverShell && typeof window.OverShell.switchTab === 'function') {
+        window.OverShell.switchTab(tab);
     }
 }
 
@@ -3288,7 +3285,25 @@ function formatDateText(dateStr) {
     return date.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 }
 
+/** Ensure roster rows match Worker Roster Template.docx fields (legacy imports). */
+function normalizeWorkerRoster(workers) {
+    return (workers || []).map(w => {
+        const copy = { ...w };
+        if (!copy.certificationType) {
+            copy.certificationType = (copy.role && /supervisor/i.test(copy.role)) ? 'S' : 'W';
+        }
+        if (!copy.aheraExpiration && copy.certificationExpiration) {
+            copy.aheraExpiration = copy.certificationExpiration;
+        }
+        if (!Array.isArray(copy.respiratorTypes)) {
+            copy.respiratorTypes = copy.respiratorTypes ? [].concat(copy.respiratorTypes) : [];
+        }
+        return copy;
+    });
+}
+
 function renderWorkerRosterView(project) {
+    _shellRefresh();
     const workerRosterView = document.getElementById('worker-roster-view');
     if (!workerRosterView) return;
 
@@ -4152,6 +4167,7 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
 }
 
 function renderDailyLogView(project) {
+    _shellRefresh();
     const dailyLogView = document.getElementById('daily-log-view');
     if (!dailyLogView) return;
 
@@ -4641,6 +4657,47 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
 // DAILY LOG DOCUMENT GENERATION
 // ============================================
 
+function removeEmptyPhotoLogCells(zip) {
+    const docFile = zip?.file?.('word/document.xml');
+    if (!docFile) return;
+
+    const getCellText = (cellXml) => (cellXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [])
+        .map(t => t.replace(/<[^>]+>/g, ''))
+        .join('')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .trim();
+    const hasImage = (cellXml) => /<w:(?:drawing|pict|object)\b|<a:blip\b/.test(cellXml);
+    const isEmptyCell = (cellXml) => !hasImage(cellXml) && getCellText(cellXml) === '';
+
+    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+    let removeNextPhotoImageCell = false;
+    const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
+        const cells = rowXml.match(cellPattern);
+        if (!cells || cells.length !== 2 || !isEmptyCell(cells[1])) {
+            removeNextPhotoImageCell = false;
+            return rowXml;
+        }
+
+        const firstText = getCellText(cells[0]);
+        if (/Photo\s*#/.test(firstText)) {
+            removeNextPhotoImageCell = true;
+            return rowXml.replace(cells[1], '');
+        }
+
+        if (removeNextPhotoImageCell && hasImage(cells[0])) {
+            removeNextPhotoImageCell = false;
+            return rowXml.replace(cells[1], '');
+        }
+
+        removeNextPhotoImageCell = false;
+        return rowXml;
+    });
+
+    zip.file('word/document.xml', updatedXml);
+}
+
 function printDailyLog(project, dailyLog) {
     try {
         let DocxtemplaterClass = window.Docxtemplater || (typeof Docxtemplater !== 'undefined' ? Docxtemplater : null);
@@ -4826,6 +4883,7 @@ function printDailyLog(project, dailyLog) {
 
                 try {
                     doc.render(templateData);
+                    removeEmptyPhotoLogCells(doc.getZip());
                 } catch (error) {
                     console.error('Docxtemplater render error:', error);
                     if (error.properties && error.properties.errors) {
@@ -5067,6 +5125,7 @@ function saveCurrentProject() {
     
     currentProject.lastModified = new Date().toISOString();
     localStorage.setItem(STORAGE_KEY_PREFIX + currentProject.id, JSON.stringify(currentProject));
+    _publishCurrentProject();
 }
 
 // Ensure each project material's totalQuantity is at least as large as the sum of
@@ -5208,6 +5267,212 @@ function compressImageToBase64(file) {
     });
 }
 
+// ============================================
+// WORKER ROSTER DOCUMENT EXPORT
+// ============================================
+
+function buildWorkerRosterTemplateData(project) {
+    const workerRoster = project.workerRoster || [];
+    const parseDate = (dateValue) => {
+        if (!dateValue) return null;
+        let date;
+        if (typeof dateValue === 'number') {
+            date = new Date(dateValue);
+        } else if (typeof dateValue === 'string') {
+            date = new Date(dateValue + (dateValue.includes('T') ? '' : 'T00:00:00'));
+        } else {
+            return null;
+        }
+        return isNaN(date.getTime()) ? null : date;
+    };
+    const formatHeaderDate = (dateValue) => {
+        const date = parseDate(dateValue);
+        if (!date) return '';
+        const mm = String(date.getMonth() + 1).padStart(2, '0');
+        const dd = String(date.getDate()).padStart(2, '0');
+        const yyyy = date.getFullYear();
+        return `${mm}-${dd} ${yyyy}`;
+    };
+    const formatCertDate = (dateValue) => {
+        const date = parseDate(dateValue);
+        if (!date) return '';
+        const mm = String(date.getMonth() + 1).padStart(2, '0');
+        const dd = String(date.getDate()).padStart(2, '0');
+        const yy = String(date.getFullYear()).slice(-2);
+        return `${mm}/${dd}/${yy}`;
+    };
+    const formatDate = (dateValue) => {
+        if (!dateValue) return '';
+        const date = parseDate(dateValue);
+        if (!date) return '';
+        return `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}/${date.getFullYear()}`;
+    };
+
+    const ATTENDANCE_COLS = 10;
+    const sortedLogs = (project.dailyLogs || []).slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    const distinctDates = [];
+    const workersByDate = new Map();
+    for (const log of sortedLogs) {
+        const d = log.date || '';
+        if (!d) continue;
+        if (!workersByDate.has(d)) {
+            workersByDate.set(d, { ids: new Set(), names: new Set() });
+            distinctDates.push(d);
+        }
+        const bucket = workersByDate.get(d);
+        for (const w of (log.workers || [])) {
+            if (w && w.id) bucket.ids.add(String(w.id));
+            if (w && w.name) bucket.names.add(String(w.name).trim().toLowerCase());
+        }
+    }
+    const usedDates = distinctDates.slice(0, ATTENDANCE_COLS);
+    const dateHeaders = {};
+    for (let i = 0; i < ATTENDANCE_COLS; i++) {
+        dateHeaders['date' + (i + 1)] = formatHeaderDate(usedDates[i]);
+    }
+
+    const buildMarks = (worker) => {
+        const idStr = worker && worker.id ? String(worker.id) : '';
+        const nameKey = (worker && worker.name) ? String(worker.name).trim().toLowerCase() : '';
+        const marks = {};
+        for (let i = 0; i < ATTENDANCE_COLS; i++) {
+            const d = usedDates[i];
+            let present = false;
+            if (d) {
+                const bucket = workersByDate.get(d);
+                if (bucket) {
+                    present = (idStr && bucket.ids.has(idStr)) ||
+                              (!!nameKey && bucket.names.has(nameKey));
+                }
+            }
+            marks['mark' + (i + 1)] = present ? 'X' : '';
+        }
+        return marks;
+    };
+
+    const roster = workerRoster.map(w => {
+        const dateOrBlank = (dateVal, exp) => {
+            const fmt = formatCertDate(dateVal);
+            return exp ? fmt : '';
+        };
+        const dateOrBlankRed = (dateVal, exp) => {
+            const fmt = formatCertDate(dateVal);
+            return exp ? '' : fmt;
+        };
+        const aheraExpired = isDateExpired(w.aheraExpiration);
+        const medicalExpired = isDateExpired(w.medicalExpiration);
+        const respiratorExpired = isDateExpired(w.respiratorFitExpiration);
+        const leadExpired = isDateExpired(w.leadExpiration);
+        const leadMedExpired = isDateExpired(w.leadMedExpiration);
+        return {
+            workerName: w.name || '',
+            ...buildMarks(w),
+            aheraExp: dateOrBlankRed(w.aheraExpiration, aheraExpired),
+            aheraExpired: dateOrBlank(w.aheraExpiration, aheraExpired),
+            sOrW: w.certificationType === 'S' ? 'S' : 'W',
+            medicalExp: dateOrBlankRed(w.medicalExpiration, medicalExpired),
+            medicalExpired: dateOrBlank(w.medicalExpiration, medicalExpired),
+            respiratorExp: dateOrBlankRed(w.respiratorFitExpiration, respiratorExpired),
+            respiratorExpired: dateOrBlank(w.respiratorFitExpiration, respiratorExpired),
+            leadExp: dateOrBlankRed(w.leadExpiration, leadExpired),
+            leadExpired: dateOrBlank(w.leadExpiration, leadExpired),
+            leadMedExp: dateOrBlankRed(w.leadMedExpiration, leadMedExpired),
+            leadMedExpired: dateOrBlank(w.leadMedExpiration, leadMedExpired)
+        };
+    });
+
+    const COLS_PER_ROW = 2;
+    const dailyRoster = sortedLogs.map(log => {
+        const workers = log.workers || [];
+        const names = workers.map(w => w.name || 'Worker');
+        const rows = [];
+        for (let i = 0; i < names.length; i += COLS_PER_ROW) {
+            const chunk = names.slice(i, i + COLS_PER_ROW);
+            rows.push({ cell1: chunk[0] || '', cell2: chunk[1] || '' });
+        }
+        if (rows.length === 0) rows.push({ cell1: '', cell2: '' });
+        return {
+            date: formatDate(log.date) || '',
+            workerList: workers.map((w, i) => ({ dailyWorkersName: (w.name || 'Worker') + (i < workers.length - 1 ? '\n' : '') })),
+            workerRows: rows
+        };
+    });
+
+    return {
+        client: project.clientName || '',
+        pjNumber: project.projectNumber || '',
+        ...dateHeaders,
+        roster,
+        dailyRoster
+    };
+}
+
+async function exportWorkerRosterDoc(project) {
+    project = project || currentProject;
+    if (!project) {
+        showNotification('No project loaded.', true);
+        return;
+    }
+    const workers = project.workerRoster || [];
+    if (workers.length === 0) {
+        showNotification('Add workers to the roster before exporting.', true);
+        return;
+    }
+
+    const DocxtemplaterClass = window.Docxtemplater || (typeof Docxtemplater !== 'undefined' ? Docxtemplater : null);
+    const PizZipClass = window.PizZip || (typeof PizZip !== 'undefined' ? PizZip : null);
+    if (!DocxtemplaterClass || !PizZipClass) {
+        showNotification('Document generation library is not loaded. Please refresh the page.', true);
+        return;
+    }
+
+    try {
+        showNotification('Generating worker roster…');
+        const templateData = buildWorkerRosterTemplateData(project);
+        const cacheBuster = `?t=${Date.now()}`;
+        const response = await fetch('templates/Worker Roster Template.docx' + cacheBuster, {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache' }
+        });
+        if (!response.ok) {
+            showNotification('Worker Roster template not found.', true);
+            return;
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const zip = new PizZipClass(arrayBuffer);
+        const docOptions = {
+            paragraphLoop: true,
+            linebreaks: true,
+            delimiters: { start: '{', end: '}' }
+        };
+        const signatureImageModule = typeof createSignatureImageModule === 'function' ? createSignatureImageModule() : null;
+        if (signatureImageModule) docOptions.modules = [signatureImageModule];
+        const doc = new DocxtemplaterClass(zip, docOptions);
+        doc.render(templateData);
+        const blob = doc.getZip().generate({
+            type: 'blob',
+            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        });
+        const fileName = `${(project.projectNumber || 'Project').replace(/[^\w\-]+/g, '_')}_Worker_Roster.docx`;
+        if (typeof saveAs !== 'undefined') {
+            saveAs(blob, fileName);
+        } else {
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(url);
+        }
+        showNotification('Worker roster exported.');
+    } catch (e) {
+        console.error('Worker roster export failed', e);
+        showNotification('Failed to export worker roster. Check the console.', true);
+    }
+}
+
 // Export functions for onclick handlers
 window.openAddSpaceFromHeader = openAddSpaceFromHeader;
 window.openAddSpaceModal = openAddSpaceModal;
@@ -5219,7 +5484,12 @@ window.openAddMaterialToSpaceModal = openAddMaterialToSpaceModal;
 window.deleteMaterialFromSpace = deleteMaterialFromSpace;
 window.openEditMaterialModal = openEditMaterialModal;
 window.deleteMaterial = deleteMaterial;
+window.openBulkSampleModal = openBulkSampleModal;
+window.openPrintBulkSamplesModal = openPrintBulkSamplesModal;
 window.openEditContainmentModal = openEditContainmentModal;
 window.deleteContainment = deleteContainment;
 window.openEditAirSampleModal = openEditAirSampleModal;
 window.deleteAirSample = deleteAirSample;
+window.openPrintAirSamplesModal = openPrintAirSamplesModal;
+window.openEditWorkerModal = openEditWorkerModal;
+window.exportWorkerRosterDoc = exportWorkerRosterDoc;

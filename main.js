@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs').promises;
 
@@ -6,6 +7,43 @@ const fs = require('fs').promises;
 const DEFAULT_ZOOM_FACTOR = 0.75;
 
 let mainWindow;
+let updateCheckInProgress = false;
+
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
+
+function sendUpdateStatus(status, data = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('update-status', { status, ...data });
+}
+
+function setupAutoUpdater() {
+  autoUpdater.on('checking-for-update', () => {
+    updateCheckInProgress = true;
+    sendUpdateStatus('checking');
+  });
+  autoUpdater.on('update-available', (info) => {
+    sendUpdateStatus('available', { version: info?.version || '' });
+  });
+  autoUpdater.on('update-not-available', () => {
+    updateCheckInProgress = false;
+    sendUpdateStatus('not-available');
+  });
+  autoUpdater.on('download-progress', (progress) => {
+    sendUpdateStatus('downloading', {
+      percent: Math.round(progress?.percent || 0)
+    });
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    updateCheckInProgress = false;
+    sendUpdateStatus('downloaded', { version: info?.version || '' });
+  });
+  autoUpdater.on('error', (error) => {
+    updateCheckInProgress = false;
+    console.error('Auto update error:', error);
+    sendUpdateStatus('error', { message: error?.message || 'Update check failed' });
+  });
+}
 
 /**
  * Show page zoom in the window title (e.g. "AsbTrack Oversight — 75%") so Ctrl+/Ctrl- zoom is visible
@@ -107,12 +145,50 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
+  setupAutoUpdater();
+
+  if (app.isPackaged) {
+    setTimeout(() => {
+      autoUpdater.checkForUpdates().catch((error) => {
+        console.error('Initial update check failed:', error);
+        sendUpdateStatus('error', { message: error?.message || 'Update check failed' });
+      });
+    }, 3000);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
   });
+});
+
+ipcMain.handle('check-for-updates', async () => {
+  if (!app.isPackaged) {
+    return { success: false, error: 'Updates only run in the packaged app.' };
+  }
+  if (updateCheckInProgress) {
+    return { success: true, checking: true };
+  }
+  try {
+    updateCheckInProgress = true;
+    const result = await autoUpdater.checkForUpdates();
+    return { success: true, updateInfo: result?.updateInfo || null };
+  } catch (error) {
+    updateCheckInProgress = false;
+    console.error('Manual update check failed:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('install-update', async () => {
+  try {
+    autoUpdater.quitAndInstall(false, true);
+    return { success: true };
+  } catch (error) {
+    console.error('Install update failed:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 app.on('window-all-closed', () => {
