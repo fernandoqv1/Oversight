@@ -144,7 +144,7 @@ a { color:inherit; text-decoration:none; }
 .btn-primary { background:var(--accent); color:white; border:none; }
 .btn-primary:hover { background:var(--accent-strong); }
 .btn-primary.small { padding:4px 10px; font-size:12px; }
-.btn-primary:disabled { opacity:0.5; cursor:not-allowed; }
+.btn-primary:disabled, .btn-ghost:disabled, .icon-btn:disabled { opacity:0.45; cursor:not-allowed; pointer-events:none; }
 .btn-ghost { background:var(--surface); color:var(--text-2); border:1px solid var(--border); }
 .btn-ghost:hover { background:var(--surface-hover); border-color:var(--border-strong); color:var(--text); }
 .btn-ghost.small { padding:4px 10px; font-size:12px; }
@@ -292,6 +292,8 @@ a { color:inherit; text-decoration:none; }
 .kpi-ok { color:var(--ok); }
 .cdetail-next { display:flex; align-items:center; gap:10px; padding:12px 18px; background:var(--accent-soft); border-radius:var(--radius-lg); font-size:13px; border:1px solid color-mix(in oklch,var(--accent) 22%,transparent); }
 .cdetail-next > svg { color:var(--accent); flex-shrink:0; }
+.cdetail-next--done { background:color-mix(in oklch,#16a34a 12%,var(--surface)); border-color:color-mix(in oklch,#16a34a 28%,transparent); }
+.cdetail-next--done > svg { color:#16a34a; }
 .cnext-label { color:var(--text-muted); }
 .cnext-due { margin-left:auto; color:var(--text-2); }
 .cdetail-cols { display:grid; grid-template-columns:1.4fr 1fr; gap:16px; }
@@ -445,7 +447,8 @@ a { color:inherit; text-decoration:none; }
 /* DOCS GRID */
 .doc-template-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:14px; margin-bottom:20px; }
 .doc-tpl { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:14px 16px; cursor:pointer; transition:border-color 120ms, transform 120ms; display:flex; flex-direction:column; gap:6px; text-align:left; }
-.doc-tpl:hover { border-color:var(--accent); transform:translateY(-1px); }
+.doc-tpl:hover:not(:disabled) { border-color:var(--accent); transform:translateY(-1px); }
+.doc-tpl:disabled { opacity:0.45; cursor:not-allowed; }
 .doc-tpl .icon { width:32px; height:32px; border-radius:8px; background:var(--accent-soft); color:var(--accent); display:grid; place-items:center; }
 .doc-tpl .title { font-size:14px; font-weight:600; margin-top:4px; }
 .doc-tpl .desc { font-size:12px; color:var(--text-muted); line-height:1.45; }
@@ -791,11 +794,11 @@ a { color:inherit; text-decoration:none; }
         <nav class="proj-tabs" id="proj-tabs" role="tablist">
           <button class="proj-tab" data-tab="overview" data-active="true" role="tab"><span>Overview</span></button>
           <button class="proj-tab" data-tab="containments" role="tab"><span>Containments</span> <span class="tab-count mono" id="tabcount-containments">0</span></button>
-          <button class="proj-tab" data-tab="samples" role="tab"><span>Air samples</span> <span class="tab-count mono" id="tabcount-samples">0</span></button>
+          <button class="proj-tab" data-tab="samples" role="tab"><span>Samples</span> <span class="tab-count mono" id="tabcount-samples">0</span></button>
           <button class="proj-tab" data-tab="logs" role="tab"><span>Daily logs</span> <span class="tab-count mono" id="tabcount-logs">0</span></button>
           <button class="proj-tab" data-tab="materials" role="tab"><span>Materials &amp; spaces</span> <span class="tab-count mono" id="tabcount-materials">0</span></button>
           <button class="proj-tab" data-tab="team" role="tab"><span>Workers</span> <span class="tab-count mono" id="tabcount-workers">0</span></button>
-          <button class="proj-tab" data-tab="docs" role="tab"><span>Documents</span></button>
+          <button class="proj-tab" data-tab="docs" role="tab"><span>Chain of custody</span></button>
         </nav>
 
         <div class="proj-content">
@@ -840,6 +843,7 @@ a { color:inherit; text-decoration:none; }
 </div>
 
 <script src="./js/inspector-profile.js"></script>
+<script src="./js/main.js"></script>
 <script src="./js/project.js"></script>
 <script src="./js/shell.js"></script>
 </body>
