@@ -151,6 +151,23 @@
   function sampleDisplayId(sample) {
     return sample.sampleId || sample.sampleID || sample.sampleNumber || sample.id || '—';
   }
+  function projectSamplesList(p) {
+    const air = (p.airSamples || []).map(s => ({ ...s, _kind: 'air' }));
+    const bulk = (p.bulkSamples || []).map(s => ({
+      ...s,
+      _kind: 'bulk',
+      type: 'bulk',
+      collectionDate: s.date
+    }));
+    return air.concat(bulk);
+  }
+  function sampleSortValue(s) {
+    if (s._kind === 'bulk') return activitySortValue(s.date);
+    return activitySortValue(s.collectionDate || s.date || s.startTime);
+  }
+  function sampleCount(p) {
+    return (p.airSamples || []).length + (p.bulkSamples || []).length;
+  }
   function timeToMinutes(value) {
     const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
     if (!match) return null;
@@ -210,14 +227,52 @@
     if (mins !== null) return mins;
     return Number(entry.createdAt || 0);
   }
+  const CONTAINMENT_STAGE = {
+    preparation: 'Containment Preparation',
+    active: 'Active Abatement',
+    clearance: 'Containment Clearance',
+    teardown: 'Containment Teardown',
+    completed: 'Abatement Completed'
+  };
+  function normalizeContainmentStage(stage) {
+    const map = {
+      Preparation: CONTAINMENT_STAGE.preparation,
+      Active: CONTAINMENT_STAGE.active,
+      Clearance: CONTAINMENT_STAGE.clearance,
+      Teardown: CONTAINMENT_STAGE.teardown,
+      Completed: CONTAINMENT_STAGE.completed,
+      'Containment Complete': CONTAINMENT_STAGE.completed
+    };
+    return map[stage] || stage || CONTAINMENT_STAGE.preparation;
+  }
+  function isContainmentComplete(stage) {
+    const normalized = normalizeContainmentStage(stage);
+    if (normalized === CONTAINMENT_STAGE.completed) return true;
+    const s = String(stage || '').toLowerCase();
+    return s.includes('abatement completed') || (/\bcompleted\b/.test(s) && !s.includes('preparation'));
+  }
+  function containmentStageIndex(stage) {
+    const s = String(stage || '').toLowerCase();
+    if (isContainmentComplete(stage)) return 4;
+    if (s.includes('preparation')) return 0;
+    if (s.includes('teardown')) return 3;
+    if (s.includes('clearance')) return 2;
+    if (s.includes('active')) return 1;
+    return 0;
+  }
   function stageClass(stage) {
     if (!stage) return 'stage-prep';
+    if (isContainmentComplete(stage)) return 'stage-done';
+    const normalized = normalizeContainmentStage(stage);
+    if (normalized === CONTAINMENT_STAGE.preparation) return 'stage-prep';
+    if (normalized === CONTAINMENT_STAGE.active) return 'stage-active';
+    if (normalized === CONTAINMENT_STAGE.clearance) return 'stage-clear';
+    if (normalized === CONTAINMENT_STAGE.teardown) return 'stage-down';
     const s = String(stage).toLowerCase();
     if (s.includes('preparation')) return 'stage-prep';
-    if (s.includes('active')) return 'stage-active';
-    if (s.includes('clearance')) return 'stage-clear';
     if (s.includes('teardown')) return 'stage-down';
-    if (s.includes('completed')) return 'stage-done';
+    if (s.includes('clearance')) return 'stage-clear';
+    if (s.includes('active')) return 'stage-active';
     return 'stage-prep';
   }
   function getProjects() {
@@ -241,6 +296,35 @@
     const allDone = conts.length > 0 && conts.every(c => /completed/i.test(c.stage || ''));
     if (allDone) return 'done';
     return 'active';
+  }
+  function projectArchiveGate(p) {
+    if (!p) return { canArchive: false, reason: 'No project loaded.' };
+    if (p.archived) return { canArchive: false, reason: 'This project is already archived.' };
+    if (typeof window.calculateMaterialCompletion !== 'function') {
+      return { canArchive: false, reason: 'Cannot verify material completion.' };
+    }
+    const { percent, allAbated, allAssigned } = window.calculateMaterialCompletion(p);
+    if (allAbated) return { canArchive: true, percent, reason: 'Archive this project' };
+    const conts = p.containments || [];
+    const allContDone = conts.length === 0 || conts.every(c => isContainmentComplete(c.stage));
+    if (!allContDone) {
+      return { canArchive: false, percent, reason: 'All containments must be at Abatement Completed to archive.' };
+    }
+    if (!allAssigned) {
+      return { canArchive: false, percent, reason: 'Assign all materials to containments before archiving.' };
+    }
+    return {
+      canArchive: false,
+      percent,
+      reason: `All site materials must be 100% abated to archive (${percent}% removed).`
+    };
+  }
+  function syncProjectArchiveButton(p) {
+    const btn = document.getElementById('header-archive-project-btn');
+    if (!btn) return;
+    const gate = projectArchiveGate(p);
+    btn.disabled = !gate.canArchive;
+    btn.title = gate.reason;
   }
   function projectProgress(p) {
     if (typeof window.calculateMaterialCompletion === 'function') {
@@ -655,6 +739,10 @@
         <div class="proj-th"><span>Project / Site</span><span>Project #</span><span>Address</span><span>Cont.</span><span>Samples</span><span>Progress</span><span></span></div>
         ${filtered.map(p => {
           const prog = projectProgress(p);
+          const dl = projectArchiveGate(p);
+          const dlTitle = dl.canArchive
+            ? 'Download project files (Word documents ZIP)'
+            : dl.reason;
           return `<div class="proj-tr" data-href="project.html?id=${esc(p.id)}">
             <div class="proj-cell-main"><span class="proj-dot" data-status="${projectStatus(p)}"></span><div><div class="proj-cell-site">${esc(siteName(p))}</div><div class="proj-cell-addr muted small">${esc(p.siteAddress || '—')}</div></div></div>
             <div class="proj-cell mono">${esc(p.projectNumber || '—')}</div>
@@ -664,8 +752,8 @@
             <div class="proj-cell"><div class="bar"><span style="width:${prog}%"></span></div><span class="due-pill mono">${prog}%</span></div>
             <div class="proj-cell" style="justify-content:flex-end;gap:4px;">
               <button class="icon-btn small" title="Edit" data-action="edit" data-id="${esc(p.id)}">${ICONS.pencil}</button>
-              <button class="icon-btn small" title="Export" data-action="export" data-id="${esc(p.id)}">${ICONS.download}</button>
-              <button class="icon-btn small" title="Archive" data-action="archive" data-id="${esc(p.id)}" data-name="${esc(siteName(p))}">${ICONS.folder}</button>
+              <button class="icon-btn small" title="Export to Excel" data-action="export" data-id="${esc(p.id)}">${ICONS.download}</button>
+              <button class="icon-btn small" title="${esc(dlTitle)}" data-action="download-project" data-id="${esc(p.id)}" data-name="${esc(siteName(p))}" ${dl.canArchive ? '' : 'disabled'}>${ICONS.folder}</button>
               <button class="icon-btn small" title="Delete" data-action="delete" data-id="${esc(p.id)}">${ICONS.trash}</button>
             </div>
           </div>`;
@@ -686,19 +774,18 @@
       e.stopPropagation();
       if (typeof window.handleExportProject === 'function') window.handleExportProject(b.dataset.id);
     }));
-    view.querySelectorAll('[data-action="archive"]').forEach(b => b.addEventListener('click', (e) => {
+    view.querySelectorAll('[data-action="download-project"]').forEach(b => b.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (typeof window.archiveProject === 'function') {
-        window.archiveProject(b.dataset.id, b.dataset.name);
+      const p = getProjects().find(project => project.id === b.dataset.id);
+      const gate = p ? projectArchiveGate(p) : { canArchive: false, reason: 'Project not found.' };
+      if (!gate.canArchive) {
+        showShellNote(gate.reason);
+        return;
+      }
+      if (typeof window.downloadArchivedProject === 'function') {
+        window.downloadArchivedProject(b.dataset.id, b.dataset.name);
       } else {
-        const p = getProjects().find(project => project.id === b.dataset.id);
-        if (!p || !confirm(`Archive "${siteName(p)}"? This will move it to the Archive list.`)) return;
-        p.archived = true;
-        p.archivedAt = new Date().toISOString();
-        p.lastModified = new Date().toISOString();
-        localStorage.setItem('oversight_project_' + p.id, JSON.stringify(p));
-        renderSidebarProjects(null);
-        renderProjectsView();
+        showShellNote('Project download is not available.');
       }
     }));
     view.querySelectorAll('[data-action="delete"]').forEach(b => b.addEventListener('click', (e) => {
@@ -762,6 +849,19 @@
   function archiveCurrentProject() {
     const p = getCurrentProject();
     if (!p?.id) return;
+    const gate = projectArchiveGate(p);
+    if (!gate.canArchive) {
+      showShellNote(gate.reason);
+      return;
+    }
+    if (typeof window.archiveProject === 'function') {
+      window.archiveProject(p.id, siteName(p));
+      try {
+        const raw = localStorage.getItem('oversight_project_' + p.id);
+        if (raw && JSON.parse(raw).archived) location.href = 'index.html?view=archive';
+      } catch (e) {}
+      return;
+    }
     if (!confirm(`Archive "${siteName(p)}"? It will move to the Archive list.`)) return;
     p.archived = true;
     p.archivedAt = new Date().toISOString();
@@ -839,9 +939,10 @@
     const prog = projectProgress(p);
     if (progBar) progBar.style.width = prog + '%';
     if (progVal) progVal.textContent = prog + '%';
+    syncProjectArchiveButton(p);
     // Tab counts
     setCount('tabcount-containments', (p.containments || []).length);
-    setCount('tabcount-samples', (p.airSamples || []).length);
+    setCount('tabcount-samples', sampleCount(p));
     setCount('tabcount-logs', (p.dailyLogs || []).length);
     setCount('tabcount-materials', (p.materials || []).length);
     setCount('tabcount-workers', (p.workerRoster || []).length);
@@ -872,11 +973,12 @@
     const wrap = document.getElementById('tab-overview');
     if (!wrap) return;
     const conts = p.containments || [];
-    const samples = p.airSamples || [];
+    const airSamples = p.airSamples || [];
+    const samples = projectSamplesList(p);
     const logs = p.dailyLogs || [];
     const workers = p.workerRoster || [];
     const materials = p.materials || [];
-    const pendingSamples = samples.filter(s => s.startTime && !s.stopTime).length;
+    const pendingSamples = airSamples.filter(s => s.startTime && !s.stopTime).length;
     const recent = getProjectActivity(p).slice(0, 10);
     const STAGES = ['Preparation','Active','Clearance','Teardown','Completed'];
     wrap.innerHTML = `
@@ -886,7 +988,6 @@
         <div class="kpi"><div class="kpi-l">Daily logs</div><div class="kpi-v"><span class="kpi-num">${logs.length}</span></div></div>
         <div class="kpi"><div class="kpi-l">Workers</div><div class="kpi-v"><span class="kpi-num">${workers.length}</span></div></div>
         <div class="kpi"><div class="kpi-l">Materials</div><div class="kpi-v"><span class="kpi-num">${materials.length}</span></div></div>
-        <div class="kpi"><div class="kpi-l">Documents</div><div class="kpi-v"><span class="kpi-num">${(p.documents || []).length}</span></div></div>
       </div>
       <div class="ovr-grid">
         <section class="panel">
@@ -894,12 +995,7 @@
           ${conts.length === 0
             ? '<div class="empty-row" style="padding:24px;">No containments yet.</div>'
             : `<div class="lifecycle">${conts.map(c => {
-                const cur = (c.stage || '').toLowerCase();
-                let stIdx = 0;
-                if (cur.includes('active')) stIdx = 1;
-                else if (cur.includes('clearance')) stIdx = 2;
-                else if (cur.includes('teardown')) stIdx = 3;
-                else if (cur.includes('completed')) stIdx = 4;
+                const stIdx = containmentStageIndex(c.stage);
                 return `<div class="lifecycle-row">
                   <div class="lc-head">
                     <span class="lc-code mono">${esc(c.containmentNumber || c.code || '—')}</span>
@@ -931,6 +1027,9 @@
     (p.airSamples || []).forEach(s => {
       if (s.stopTime) out.push({ when: toActivityDate(s.date, s.stopTime), who:'AIR', type:'sample', text:`Sample ${sampleDisplayId(s)} stopped` });
       else if (s.startTime) out.push({ when: toActivityDate(s.date, s.startTime), who:'AIR', type:'sample', text:`Sample ${sampleDisplayId(s)} started` });
+    });
+    (p.bulkSamples || []).forEach(s => {
+      out.push({ when: s.date, who:'BLK', type:'sample', text:`Bulk sample ${sampleDisplayId(s)} — ${s.materialName || 'material'}` });
     });
     (p.dailyLogs || []).forEach(l => {
       (l.entries || []).forEach(e => {
@@ -1013,19 +1112,21 @@
         passed: !!v.passed
       }))
     ].sort((a, b) => activitySortValue(b.when) - activitySortValue(a.when));
+    const stageDone = isContainmentComplete(c.stage);
+    const displayStage = normalizeContainmentStage(c.stage);
     return `
       <header class="cdetail-head">
         <div>
           <div class="cdetail-row">
             <span class="pill-num mono">${esc(c.containmentNumber || '—')}</span>
-            <span class="stage-badge ${stageClass(c.stage)}"><span class="stage-dot"></span>${esc(c.stage || '—')}</span>
+            <span class="stage-badge ${stageClass(c.stage)}"><span class="stage-dot"></span>${esc(displayStage)}</span>
           </div>
           <h2 class="cdetail-title">${esc(c.name || 'Unnamed')}</h2>
           <div class="cdetail-meta">${c.location ? `<span>${ICONS.bldg} ${esc(c.location)}</span>` : ''}${c.contractor ? `<span>${ICONS.user} ${esc(c.contractor)}</span>` : ''}</div>
         </div>
         <div class="cdetail-actions">
           <button class="btn-ghost" data-action="edit-cont" data-id="${esc(c.id)}">${ICONS.pencil} Edit</button>
-          <button class="btn-primary" data-action="advance-cont" data-id="${esc(c.id)}">${ICONS.arrow} Advance stage</button>
+          ${stageDone ? '' : `<button class="btn-primary" data-action="advance-cont" data-id="${esc(c.id)}">${ICONS.arrow} Advance stage</button>`}
         </div>
       </header>
       <div class="cdetail-kpis">
@@ -1033,13 +1134,13 @@
         <div class="cdet-kpi"><div class="cdet-kpi-l">Samples</div><div class="cdet-kpi-v">${samples.length}</div></div>
         <div class="cdet-kpi"><div class="cdet-kpi-l">Complete</div><div class="cdet-kpi-v kpi-ok">${completed}</div></div>
         <div class="cdet-kpi"><div class="cdet-kpi-l">Daily logs</div><div class="cdet-kpi-v">${logs.length}</div></div>
-        <div class="cdet-kpi"><div class="cdet-kpi-l">Stage</div><div class="cdet-kpi-v" style="font-size:12px;">${esc(c.stage || '—')}</div></div>
+        <div class="cdet-kpi"><div class="cdet-kpi-l">Stage</div><div class="cdet-kpi-v" style="font-size:12px;">${esc(displayStage)}</div></div>
       </div>
-      <div class="cdetail-next">
-        ${ICONS.alert}
-        <span class="cnext-label">Next action:</span>
+      <div class="cdetail-next${stageDone ? ' cdetail-next--done' : ''}">
+        ${stageDone ? ICONS.check : ICONS.alert}
+        <span class="cnext-label">${stageDone ? 'Status:' : 'Next action:'}</span>
         <span><b>${esc(nextActionFor(c))}</b></span>
-        <span class="cnext-due muted small">${esc(c.dueDate ? 'Due ' + fmtDateFull(c.dueDate) : '')}</span>
+        ${stageDone ? '' : `<span class="cnext-due muted small">${esc(c.dueDate ? 'Due ' + fmtDateFull(c.dueDate) : '')}</span>`}
       </div>
       <div class="cdetail-cols">
         <section class="panel">
@@ -1066,32 +1167,49 @@
     `;
   }
   function nextActionFor(c) {
-    const s = (c.stage || '').toLowerCase();
-    if (!s || s.includes('preparation')) return 'Complete pre-abatement visual inspection';
-    if (s.includes('active')) return 'Daily monitoring + collect personal/area samples';
-    if (s.includes('clearance')) return 'Run clearance samples + visual inspection';
-    if (s.includes('teardown')) return 'Tear down containment and document';
-    return 'Containment complete';
+    if (isContainmentComplete(c.stage)) return 'Abatement complete — no further action required';
+    const stage = normalizeContainmentStage(c.stage);
+    if (stage === CONTAINMENT_STAGE.preparation) return 'Complete pre-abatement visual inspection';
+    if (stage === CONTAINMENT_STAGE.active) return 'Daily monitoring + collect personal/area samples';
+    if (stage === CONTAINMENT_STAGE.clearance) return 'Run clearance samples + visual inspection';
+    if (stage === CONTAINMENT_STAGE.teardown) return 'Complete teardown, then advance to Abatement Completed';
+    return 'Review containment stage';
   }
 
   // ---------- SAMPLES TAB ----------
   let samplesFilterType = 'all';
   let samplesFilterCont = 'all';
+  function renderSamplesMaterialsPanel(allMats) {
+    if (!allMats.length) return '';
+    return `<section class="panel" style="margin-bottom:16px;"><div class="panel-head"><h2 class="panel-title">Site materials · ${allMats.length}</h2><span class="muted small">Double-click a material to record a bulk sample</span></div><ul class="mat-list">${allMats.map(m => `<li class="mat-row" data-material-id="${esc(m.id)}" title="Double-click to add bulk sample"><div class="mat-name">${esc(m.name)}</div><div class="mat-qty-line muted small mono">${formatQty(m.totalQuantity || 0)} ${esc(displayUnit(m.unit, 'units'))}${m.type ? ` <span class="mat-type-tag">${esc(m.type)}</span>` : ''}</div></li>`).join('')}</ul></section>`;
+  }
+
   function renderTabSamples(p) {
     const wrap = document.getElementById('tab-samples');
     if (!wrap) return;
     if (samplesFilterType === 'background') samplesFilterType = 'all';
-    let samples = (p.airSamples || []).slice();
-    if (samplesFilterType !== 'all') samples = samples.filter(s => (s.type || '').toLowerCase().includes(samplesFilterType));
-    if (samplesFilterCont !== 'all') samples = samples.filter(s => s.containmentId === samplesFilterCont || s.containmentName === samplesFilterCont);
-    samples.sort((a, b) => new Date(b.collectionDate || b.startTime || 0) - new Date(a.collectionDate || a.startTime || 0));
-    const running = samples.filter(s => s.startTime && !s.stopTime).length;
-    const complete = samples.filter(s => s.stopTime).length;
+    const allMats = p.materials || [];
     const conts = p.containments || [];
+    let samples = projectSamplesList(p);
+    if (samplesFilterType === 'bulk') {
+      samples = samples.filter(s => s._kind === 'bulk');
+    } else if (samplesFilterType !== 'all') {
+      samples = samples.filter(s => s._kind === 'air' && (s.type || '').toLowerCase().includes(samplesFilterType));
+    }
+    if (samplesFilterCont !== 'all') {
+      samples = samples.filter(s => s._kind === 'air' && (s.containmentId === samplesFilterCont || s.containmentName === samplesFilterCont));
+    }
+    samples.sort((a, b) => sampleSortValue(b) - sampleSortValue(a));
+    const airInView = samples.filter(s => s._kind === 'air');
+    const running = airInView.filter(s => s.startTime && !s.stopTime).length;
+    const complete = airInView.filter(s => s.stopTime).length + samples.filter(s => s._kind === 'bulk').length;
+    const hasBulk = (p.bulkSamples || []).length > 0;
     wrap.innerHTML = `
+      ${renderSamplesMaterialsPanel(allMats)}
       <div class="filter-bar">
         <div class="seg" id="samp-type">
           <button class="seg-btn" data-value="all" data-active="${samplesFilterType === 'all'}">All</button>
+          <button class="seg-btn" data-value="bulk" data-active="${samplesFilterType === 'bulk'}">Bulk</button>
           <button class="seg-btn" data-value="area" data-active="${samplesFilterType === 'area'}">Area</button>
           <button class="seg-btn" data-value="personal" data-active="${samplesFilterType === 'personal'}">Personal</button>
           <button class="seg-btn" data-value="clearance" data-active="${samplesFilterType === 'clearance'}">Clearance</button>
@@ -1101,17 +1219,31 @@
           ${conts.map(c => `<option value="${esc(c.id)}" ${samplesFilterCont === c.id ? 'selected' : ''}>${esc(c.name || c.containmentNumber || '—')}</option>`).join('')}
         </select>
         <div class="filter-spacer"></div>
-        <button class="btn-ghost" id="print-air-samples-btn">${ICONS.doc} Print request</button>
-        <button class="btn-primary" id="new-air-sample-btn">${ICONS.plus} Add sample</button>
+        <button class="btn-ghost" id="print-air-samples-btn">${ICONS.doc} Air COC</button>
+        ${hasBulk ? `<button class="btn-ghost" id="print-bulk-samples-btn">${ICONS.doc} Bulk COC</button>` : ''}
+        <button class="btn-primary" id="new-air-sample-btn">${ICONS.plus} Add air sample</button>
       </div>
       <div class="samples-table">
         <div class="samp-th"><span>Sample #</span><span>Type</span><span>Cont.</span><span>Material</span><span>Flow</span><span>Start</span><span>Stop</span><span class="r">Vol (L)</span><span>Status</span></div>
         ${samples.length === 0 ? '<div class="empty-row" style="padding:32px;">No samples match the filter.</div>'
           : samples.map(s => {
-              const running = s.startTime && !s.stopTime;
+              if (s._kind === 'bulk') {
+                return `<div class="samp-tr" data-id="${esc(s.id)}" data-kind="bulk" data-material-id="${esc(s.materialId || '')}">
+                  <span class="mono">${esc(sampleDisplayId(s))}</span>
+                  <span>Bulk</span>
+                  <span class="muted small">—</span>
+                  <span class="muted small">${esc(s.materialName || '—')}</span>
+                  <span class="mono small">—</span>
+                  <span class="mono small">${fmtDateFull(s.date)}</span>
+                  <span class="mono small">—</span>
+                  <span class="r mono">—</span>
+                  <span><span class="samp-status status-complete">Recorded</span></span>
+                </div>`;
+              }
+              const runningRow = s.startTime && !s.stopTime;
               const done = !!s.stopTime;
               const vol = sampleVolume(s);
-              return `<div class="samp-tr" data-id="${esc(s.id)}">
+              return `<div class="samp-tr" data-id="${esc(s.id)}" data-kind="air">
                 <span class="mono">${esc(sampleDisplayId(s))}</span>
                 <span>${esc(s.type || '—')}</span>
                 <span class="muted small">${esc(s.containmentName || (conts.find(c => c.id === s.containmentId)?.name) || '—')}</span>
@@ -1120,7 +1252,7 @@
                 <span class="mono small">${formatSampleTime(s, 'startTime')}</span>
                 <span class="mono small">${formatSampleTime(s, 'stopTime')}</span>
                 <span class="r mono">${vol === null ? '—' : esc(vol)}</span>
-                <span>${done ? '<span class="samp-status status-complete">Done</span>' : running ? '<span class="running-pip"><span class="run-dot"></span>Running</span>' : '<span class="samp-status status-collected">Queued</span>'}</span>
+                <span>${done ? '<span class="samp-status status-complete">Done</span>' : runningRow ? '<span class="running-pip"><span class="run-dot"></span>Running</span>' : '<span class="samp-status status-collected">Queued</span>'}</span>
               </div>`;
             }).join('')}
       </div>
@@ -1128,10 +1260,20 @@
         <div class="samp-sum"><div class="samp-sum-l">Total</div><div class="samp-sum-v">${samples.length}</div></div>
         <div class="samp-sum samp-sum-info"><div class="samp-sum-l">Running</div><div class="samp-sum-v">${running}</div></div>
         <div class="samp-sum"><div class="samp-sum-l">Complete</div><div class="samp-sum-v">${complete}</div></div>
-        <div class="samp-sum samp-sum-warn"><div class="samp-sum-l">Pending</div><div class="samp-sum-v">${samples.length - running - complete}</div></div>
+        <div class="samp-sum samp-sum-warn"><div class="samp-sum-l">Pending</div><div class="samp-sum-v">${Math.max(0, airInView.length - running - airInView.filter(s => s.stopTime).length)}</div></div>
       </div>
     `;
+    wrap.querySelectorAll('.mat-row[data-material-id]').forEach(row => {
+      row.addEventListener('dblclick', () => {
+        if (typeof window.openBulkSampleModal === 'function') window.openBulkSampleModal(row.dataset.materialId);
+      });
+    });
     wrap.querySelectorAll('.samp-tr[data-id]').forEach(r => r.addEventListener('click', () => {
+      if (r.dataset.kind === 'bulk') {
+        const matId = r.dataset.materialId;
+        if (matId && typeof window.openPrintBulkSamplesModal === 'function') window.openPrintBulkSamplesModal(matId);
+        return;
+      }
       if (typeof window.openEditAirSampleModal === 'function') window.openEditAirSampleModal(r.dataset.id);
     }));
     wrap.querySelectorAll('#samp-type button').forEach(b => b.addEventListener('click', () => { samplesFilterType = b.dataset.value; renderTabSamples(getCurrentProject()); }));
@@ -1141,6 +1283,9 @@
     });
     wrap.querySelector('#print-air-samples-btn')?.addEventListener('click', () => {
       if (typeof window.openPrintAirSamplesModal === 'function') window.openPrintAirSamplesModal();
+    });
+    wrap.querySelector('#print-bulk-samples-btn')?.addEventListener('click', () => {
+      if (typeof window.openPrintBulkSamplesModal === 'function') window.openPrintBulkSamplesModal();
     });
   }
 
@@ -1446,34 +1591,22 @@
   function renderTabDocs(p) {
     const wrap = document.getElementById('tab-docs');
     if (!wrap) return;
+    const airCount = (p.airSamples || []).length;
+    const bulkCount = (p.bulkSamples || []).length;
     wrap.innerHTML = `
-      <div class="page-head"><div><h2 class="panel-title" style="font-size:14px;">Document templates</h2><p class="page-sub">Generate Word documents from project data.</p></div></div>
+      <div class="page-head"><div><h2 class="panel-title" style="font-size:14px;">Chain of custody</h2><p class="page-sub">Print lab submission forms during the project. Daily logs, visual inspections, and containment summaries are generated when you export or archive the project.</p></div></div>
       <div class="doc-template-grid">
-        <button class="doc-tpl" data-tpl="daily-log"><div class="icon">${ICONS.doc}</div><div class="title">Daily log</div><div class="desc">Per-day field log with crew, activities, photos.</div></button>
-        <button class="doc-tpl" data-tpl="visual-inspection"><div class="icon">${ICONS.check}</div><div class="title">Visual inspection</div><div class="desc">Pre / post / clearance inspection form.</div></button>
-        <button class="doc-tpl" data-tpl="containment-summary"><div class="icon">${ICONS.bldg}</div><div class="title">Containment summary</div><div class="desc">Complete summary for a containment.</div></button>
-        <button class="doc-tpl" data-tpl="air-sample-request"><div class="icon">${ICONS.bell}</div><div class="title">Air sample request</div><div class="desc">Chain of custody / lab submission.</div></button>
-        <button class="doc-tpl" data-tpl="bulk-coc"><div class="icon">${ICONS.doc}</div><div class="title">Bulk chain of custody</div><div class="desc">Print the bulk sample Chain of Custody.</div></button>
+        <button class="doc-tpl" data-tpl="air-sample-request" ${airCount === 0 ? 'disabled title="Add air samples first"' : ''}><div class="icon">${ICONS.bell}</div><div class="title">Air sample chain of custody</div><div class="desc">${airCount} air sample${airCount === 1 ? '' : 's'} · lab submission / pump request.</div></button>
+        <button class="doc-tpl" data-tpl="bulk-coc" ${bulkCount === 0 ? 'disabled title="Record bulk samples first"' : ''}><div class="icon">${ICONS.doc}</div><div class="title">Bulk chain of custody</div><div class="desc">${bulkCount} bulk sample${bulkCount === 1 ? '' : 's'} · material COC form.</div></button>
       </div>
     `;
-    wrap.querySelectorAll('[data-tpl="daily-log"]').forEach(b => b.addEventListener('click', () => {
-      if (typeof window.openProjectDailyLogModal === 'function') window.openProjectDailyLogModal();
-    }));
-    wrap.querySelectorAll('[data-tpl="air-sample-request"]').forEach(b => b.addEventListener('click', () => {
+    wrap.querySelectorAll('[data-tpl="air-sample-request"]:not([disabled])').forEach(b => b.addEventListener('click', () => {
       if (typeof window.openPrintAirSamplesModal === 'function') window.openPrintAirSamplesModal();
+      else showShellNote('Air sample COC print is not available.');
     }));
-    wrap.querySelectorAll('[data-tpl="bulk-coc"]').forEach(b => b.addEventListener('click', () => {
-      if (typeof window.openPrintBulkSamplesModal === 'function') {
-        window.openPrintBulkSamplesModal();
-      } else {
-        showShellNote('Bulk Chain of Custody print is not available on this page.');
-      }
-    }));
-    wrap.querySelectorAll('[data-tpl="containment-summary"]').forEach(b => b.addEventListener('click', () => {
-      switchTab('containments');
-    }));
-    wrap.querySelectorAll('[data-tpl="visual-inspection"]').forEach(b => b.addEventListener('click', () => {
-      switchTab('containments');
+    wrap.querySelectorAll('[data-tpl="bulk-coc"]:not([disabled])').forEach(b => b.addEventListener('click', () => {
+      if (typeof window.openPrintBulkSamplesModal === 'function') window.openPrintBulkSamplesModal();
+      else showShellNote('Bulk chain of custody print is not available.');
     }));
   }
 

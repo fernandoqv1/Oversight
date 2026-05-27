@@ -2,8 +2,12 @@ node_modules/
 dist/
 dist-packaged/
 dist-build/
+dist-publish/
+dist-publish2/
 dist-release/
 .cursor/
 *.log
 .env
 .env.*
+templates/~$*.docx
+oversight_example/

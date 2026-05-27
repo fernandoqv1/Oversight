@@ -996,7 +996,13 @@ function archiveProject(projectId, projectName) {
     const { allAbated } = calculateMaterialCompletion(project);
     
     if (!allAbated) {
-        showNotification('All containments must be at Abatement Completed to archive.', 'error');
+        const { percent, allAssigned } = calculateMaterialCompletion(project);
+        const conts = project.containments || [];
+        const allContDone = conts.length === 0 || conts.every(c => isAllContainmentsCompleted(c.stage));
+        let msg = `All site materials must be 100% abated to archive (${percent}% removed).`;
+        if (!allContDone) msg = 'All containments must be at Abatement Completed to archive.';
+        else if (!allAssigned) msg = 'Assign all materials to containments before archiving.';
+        showNotification(msg, 'error');
         return;
     }
     
@@ -1663,6 +1669,7 @@ async function downloadArchivedProject(projectId, projectName) {
 window.deleteProject = deleteProject;
 window.handleExportProject = handleExportProject;
 window.editProjectFromDashboard = editProjectFromDashboard;
+window.calculateMaterialCompletion = calculateMaterialCompletion;
 window.archiveProject = archiveProject;
 window.unarchiveProject = unarchiveProject;
 window.downloadArchivedProject = downloadArchivedProject;
