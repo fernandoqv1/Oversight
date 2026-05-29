@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-packaged/
 dist-build/
+dist-build-*/
 dist-publish/
 dist-publish2/
 dist-release/
