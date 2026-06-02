@@ -1,7 +1,7 @@
 // Project Details Logic - Oversight Desktop
 // Following HANDOFF.md guidelines for building → space → material hierarchy
+// STORAGE_KEY_PREFIX is defined in js/main.js (loaded before this file on project.html)
 
-const STORAGE_KEY_PREFIX = 'oversight_project_';
 let currentProject = null;
 let currentSubview = null; // null = main, 'workerRoster', 'dailyLog'
 
@@ -5473,7 +5473,16 @@ async function exportWorkerRosterDoc(project) {
     }
 }
 
-// Export functions for onclick handlers
+// Export functions for onclick handlers and shell.js (js/shell.js calls window.*Modal)
+window.openEditProjectModal = openEditProjectModal;
+window.openAddBuildingModal = openAddBuildingModal;
+window.openAddMaterialModal = openAddMaterialModal;
+window.openAddContainmentModal = openAddContainmentModal;
+window.openAddAirSampleModal = openAddAirSampleModal;
+window.openProjectDailyLogModal = openProjectDailyLogModal;
+window.openProjectDailyLogEntryModal = openProjectDailyLogEntryModal;
+window.openProjectDailyLogEntryEditModal = openProjectDailyLogEntryEditModal;
+window.saveCurrentProject = saveCurrentProject;
 window.openAddSpaceFromHeader = openAddSpaceFromHeader;
 window.openAddSpaceModal = openAddSpaceModal;
 window.openEditBuildingModal = openEditBuildingModal;

@@ -912,8 +912,55 @@
     } catch (e) { return null; }
   }
 
+  function canOpenProjectFolder(p) {
+    const folderPath = typeof p?.projectFolderPath === 'string' ? p.projectFolderPath.trim() : '';
+    return !!(folderPath && window.electronAPI?.openFolder);
+  }
+
+  async function openLinkedProjectFolder(folderPath) {
+    const path = (folderPath || '').trim();
+    if (!path || !window.electronAPI?.openFolder) return;
+    const result = await window.electronAPI.openFolder(path);
+    if (!result?.success && result?.error) {
+      const msg = result.error || 'Folder not found or not accessible';
+      if (typeof window.showNotification === 'function') {
+        window.showNotification(msg, 'error');
+      }
+    }
+  }
+
+  function renderProjHeadNum(p) {
+    const row = document.querySelector('.proj-head-row');
+    let el = document.getElementById('proj-head-num');
+    if (!row) return;
+
+    const label = p.projectNumber || '—';
+    const canOpen = canOpenProjectFolder(p);
+    const folderPath = typeof p.projectFolderPath === 'string' ? p.projectFolderPath.trim() : '';
+    const wantTag = canOpen ? 'button' : 'span';
+
+    if (!el || el.tagName.toLowerCase() !== wantTag) {
+      const neu = document.createElement(wantTag);
+      neu.id = 'proj-head-num';
+      neu.className = 'pill-num mono' + (canOpen ? ' pill-num-link' : '');
+      if (el) row.replaceChild(neu, el);
+      else row.insertBefore(neu, row.firstChild);
+      el = neu;
+    }
+
+    el.textContent = label;
+    el.classList.toggle('pill-num-link', canOpen);
+    if (canOpen) {
+      el.type = 'button';
+      el.title = `Open project folder: ${folderPath}`;
+      el.setAttribute('aria-label', `Open project folder for ${label}`);
+    } else {
+      el.removeAttribute('title');
+      el.removeAttribute('aria-label');
+    }
+  }
+
   function renderProjectHead(p) {
-    const num = document.getElementById('proj-head-num');
     const title = document.getElementById('oversight-project-number');
     const meta = document.getElementById('proj-head-meta');
     const crumb = document.getElementById('crumb-project');
@@ -921,7 +968,7 @@
     const statusLabel = document.getElementById('proj-head-status-label');
     const progBar = document.getElementById('proj-head-progress-bar');
     const progVal = document.getElementById('proj-head-progress-val');
-    if (num) num.textContent = p.projectNumber || '—';
+    renderProjHeadNum(p);
     if (title) title.textContent = siteName(p);
     if (crumb) crumb.textContent = siteName(p);
     const status = projectStatus(p);
@@ -991,7 +1038,7 @@
       </div>
       <div class="ovr-grid">
         <section class="panel">
-          <div class="panel-head"><h2 class="panel-title">Containment lifecycle</h2><button class="btn-link small" data-action="new-cont">+ New containment</button></div>
+          <div class="panel-head"><h2 class="panel-title">Containment Stages</h2><button class="btn-link small" data-action="new-cont">+ New containment</button></div>
           ${conts.length === 0
             ? '<div class="empty-row" style="padding:24px;">No containments yet.</div>'
             : `<div class="lifecycle">${conts.map(c => {
@@ -1102,6 +1149,7 @@
     const logs = (p.dailyLogs || []).flatMap(l => (l.entries || []).filter(e => e.containmentId === c.id || e.containmentName === c.name).map(e => ({ entry:e, date:l.date })));
     const mats = c.materials || [];
     const completed = samples.filter(s => s.stopTime).length;
+    const pendingSamples = samples.length - completed;
     const historyItems = [
       ...(c.stageHistory || []).map(h => ({ kind:'stage', when:h.date, label:h.stage || 'Stage updated', meta:h.inspectorName || '' })),
       ...(c.visualInspections || []).map(v => ({
@@ -1133,7 +1181,7 @@
         <div class="cdet-kpi"><div class="cdet-kpi-l">Materials</div><div class="cdet-kpi-v">${mats.length}</div></div>
         <div class="cdet-kpi"><div class="cdet-kpi-l">Samples</div><div class="cdet-kpi-v">${samples.length}</div></div>
         <div class="cdet-kpi"><div class="cdet-kpi-l">Complete</div><div class="cdet-kpi-v kpi-ok">${completed}</div></div>
-        <div class="cdet-kpi"><div class="cdet-kpi-l">Daily logs</div><div class="cdet-kpi-v">${logs.length}</div></div>
+        <div class="cdet-kpi"><div class="cdet-kpi-l">Pending</div><div class="cdet-kpi-v">${pendingSamples}</div></div>
         <div class="cdet-kpi"><div class="cdet-kpi-l">Stage</div><div class="cdet-kpi-v" style="font-size:12px;">${esc(displayStage)}</div></div>
       </div>
       <div class="cdetail-next${stageDone ? ' cdetail-next--done' : ''}">
@@ -1635,6 +1683,13 @@
     wireSidebarToggle();
     wireInspectorBtn();
     wireTweaks();
+    document.querySelector('.proj-head-row')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('#proj-head-num.pill-num-link');
+      if (!btn) return;
+      e.preventDefault();
+      const proj = getCurrentProject();
+      if (proj?.projectFolderPath) openLinkedProjectFolder(proj.projectFolderPath);
+    });
     const params = new URLSearchParams(location.search);
     const tab = params.get('tab');
     if (tab) currentTab = tab;

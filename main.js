@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs').promises;
 
 /** Default page zoom for all app windows (1.0 = browser 100%) */
-const DEFAULT_ZOOM_FACTOR = 0.75;
+const DEFAULT_ZOOM_FACTOR = 0.675;
 
 let mainWindow;
 let updateCheckInProgress = false;

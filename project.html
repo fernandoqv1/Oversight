@@ -162,6 +162,9 @@ a { color:inherit; text-decoration:none; }
 .proj-head-main { flex:1; min-width:0; }
 .proj-head-row { display:flex; align-items:center; gap:10px; }
 .pill-num { font-size:12px; padding:3px 8px; background:var(--bg-sunken); border:1px solid var(--border); border-radius:5px; color:var(--text-2); font-family:ui-monospace,'IBM Plex Mono',monospace; }
+button.pill-num.pill-num-link { cursor:pointer; font:inherit; line-height:inherit; transition:color 120ms ease, border-color 120ms ease, background 120ms ease; }
+button.pill-num.pill-num-link:hover { color:var(--accent); border-color:var(--accent); background:var(--accent-bg, rgba(99,102,241,0.08)); text-decoration:underline; }
+button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .status-pill { display:inline-flex; align-items:center; gap:6px; font-size:12px; padding:3px 9px; border-radius:5px; }
 .status-pill .dot { width:6px; height:6px; border-radius:50%; }
 .status-pill.active { background:var(--ok-bg); color:var(--ok); }
@@ -842,6 +845,9 @@ a { color:inherit; text-decoration:none; }
   </div>
 </div>
 
+<script src="./lib/file-saver.min.js"></script>
+<script src="./lib/xlsx.full.min.js"></script>
+<script src="./js/excel.js"></script>
 <script src="./js/inspector-profile.js"></script>
 <script src="./js/main.js"></script>
 <script src="./js/project.js"></script>
