@@ -273,13 +273,8 @@ function openInspectorProfileModal(options = {}) {
     
     modal.innerHTML = `
         <div class="modal-content" style="background:white;border-radius:1rem;padding:2rem;max-width:540px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem;">
-                <h3 style="font-size:1.25rem;font-weight:600;color:#111827;">Inspector Profile</h3>
-                <button class="profile-close-btn" style="background:none;border:none;cursor:pointer;padding:4px;color:#6b7280;">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
-                    </svg>
-                </button>
+            <div style="margin-bottom:1.5rem;">
+                <h3 style="font-size:1.25rem;font-weight:600;color:#111827;margin:0;">Inspector Profile</h3>
             </div>
             <div style="display:flex;flex-direction:column;gap:1rem;">
                 ${isStartupPrompt ? '<p class="profile-startup-notice">Please enter your inspector information before using Oversight.</p>' : ''}
@@ -386,7 +381,6 @@ function openInspectorProfileModal(options = {}) {
         mouseDownOnBackdrop = false;
     });
     
-    modal.querySelector('.profile-close-btn').addEventListener('click', () => modal.remove());
     modal.querySelector('.profile-cancel-btn').addEventListener('click', () => modal.remove());
     
     // ========== Signature Tab Switching ==========
@@ -623,12 +617,14 @@ function _escHtml(str) {
 // <img src=...>. Anything else collapses to a 1x1 transparent PNG so a
 // tampered signature blob can never carry script through an attribute.
 const _SAFE_IMG_FALLBACK = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAen63NgAAAAASUVORK5CYII=';
+const _SAFE_IMG_HDR_RE = /^data:image\/(png|jpe?g|gif|webp|bmp|svg\+xml);base64,/i;
 function _safeImageSrc(value) {
     if (typeof value !== 'string') return _SAFE_IMG_FALLBACK;
     const trimmed = value.trim();
-    if (!/^data:image\/(png|jpe?g|gif|webp|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
-        return _SAFE_IMG_FALLBACK;
-    }
+    const m = _SAFE_IMG_HDR_RE.exec(trimmed);
+    if (!m) return _SAFE_IMG_FALLBACK;
+    const payload = trimmed.slice(m[0].length);
+    if (!payload.length || /[^A-Za-z0-9+/=\s]/.test(payload)) return _SAFE_IMG_FALLBACK;
     return trimmed.replace(/"/g, '');
 }
 

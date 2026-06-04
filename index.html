@@ -445,6 +445,9 @@ a { color:inherit; text-decoration:none; }
 .modal-material-row { display:flex; align-items:center; gap:12px; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--surface-2); }
 .modal-material-row > input[type="checkbox"] { flex-shrink:0; width:1rem; height:1rem; margin-top:0; }
 .modal-material-row .modal-check-label { padding-left:4px; }
+.modal-material-row input[type="number"] { width:6.5rem !important; flex-shrink:0; }
+.modal-material-row input[type="text"] { width:auto !important; flex:1; min-width:0; }
+.modal-material-row select { width:auto !important; flex-shrink:0; }
 .modal-check-group { display:flex; flex-wrap:wrap; gap:8px 12px; }
 .modal-check-group .modal-check-row { flex:1 1 200px; min-width:0; }
 .sample-set-row .sample-set-location { margin-top:8px; margin-left:26px; width:calc(100% - 26px); max-width:100%; box-sizing:border-box; }
@@ -613,12 +616,17 @@ a { color:inherit; text-decoration:none; }
 <script src="./lib/jszip.min.js"></script>
 <script src="./lib/file-saver.min.js"></script>
 <script src="./lib/xlsx.full.min.js"></script>
-<script src="./lib/pizzip.min.js" onload="if(typeof PizZip!=='undefined')window.PizZip=PizZip;"></script>
+<script src="./lib/pizzip.min.js"></script>
 <script src="./lib/pizzip-utils.js"></script>
-<script src="./lib/docxtemplater.js" onload="if(typeof Docxtemplater!=='undefined')window.Docxtemplater=Docxtemplater;"></script>
-<script src="./lib/imagemodule.js" onload="if(typeof ImageModule!=='undefined')window.ImageModule=ImageModule;"></script>
+<script src="./lib/docxtemplater.js"></script>
+<script src="./lib/imagemodule.js"></script>
 <script>
-(function(){let n=0;function check(){if(typeof PizZip!=='undefined'&&typeof window.PizZip==='undefined')window.PizZip=PizZip;if(typeof Docxtemplater!=='undefined')window.Docxtemplater=Docxtemplater;else if(typeof docxtemplater!=='undefined')window.Docxtemplater=docxtemplater;if(!(window.PizZip&&window.Docxtemplater)&&n++<10)setTimeout(check,100);}setTimeout(check,50);})();
+(function(){
+  if(typeof PizZip!=='undefined')window.PizZip=PizZip;
+  if(typeof Docxtemplater!=='undefined')window.Docxtemplater=Docxtemplater;
+  else if(typeof docxtemplater!=='undefined')window.Docxtemplater=docxtemplater;
+  if(typeof ImageModule!=='undefined')window.ImageModule=ImageModule;
+})();
 </script>
 
 <script src="./js/excel.js"></script>
