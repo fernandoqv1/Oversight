@@ -1,12 +1,12 @@
 {
   "name": "oversight-desktop",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Oversight Desktop - Standalone offline project management application",
   "main": "main.js",
   "scripts": {
     "start": "node scripts/start-dev.js",
     "build": "electron-builder",
-    "build:win": "electron-builder --win --config.win.signAndEditExecutable=false",
+    "build:win": "electron-builder --win --publish never --config.win.signAndEditExecutable=false",
     "build:dir": "electron-builder --win --dir",
     "release": "electron-builder --win --publish always",
     "postinstall": "node scripts/postinstall.js"
@@ -43,21 +43,27 @@
       "output": "dist"
     },
     "files": [
-      "**/*",
-      "!dist/**/*",
-      "!dist-packaged/**/*",
-      "!dist-build/**/*",
-      "!dist-release/**/*",
-      "!oversight/**/*",
-      "!oversight_example/**/*",
-      "!example_oversight/**/*",
-      "!asbtract_template/**/*",
+      "!dist/**",
+      "!dist-*/**",
+      "!dist-packaged/**",
+      "!dist-build/**",
+      "!dist-release*/**",
+      "!dist-nsis-only/**",
+      "!oversight/**",
+      "!oversight_example/**",
+      "!example_oversight/**",
+      "!asbtract_template/**",
       "!templates/~$*.docx",
       "!*.log",
-      "!.git/**/*",
-      "!.cursor/**/*"
+      "!build-log*.txt",
+      "!.git/**",
+      "!.cursor/**",
+      "!scripts/**",
+      "!_orig*",
+      "!**/{README.md,RELEASE_GUIDE.md,HANDOFF.md,AGENT_PROMPT.md,SETUP.md,QUICK_START.md,DOCUMENT_GENERATION.md,EXPORT_FIXES.md,UPDATES.md,CHANGELOG.md}"
     ],
     "win": {
+      "artifactName": "Oversight-Desktop-Setup-${version}.${ext}",
       "target": [
         {
           "target": "nsis",
