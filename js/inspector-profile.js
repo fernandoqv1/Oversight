@@ -87,6 +87,16 @@ function getInspectorProfile() {
     }
 }
 
+function isInspectorProfileComplete() {
+    const profile = getInspectorProfile();
+    return !!(String(profile.name || '').trim() && String(profile.initials || '').trim());
+}
+
+function promptInspectorProfileIfNeeded() {
+    if (isInspectorProfileComplete()) return;
+    requestAnimationFrame(() => openInspectorProfileModal({ startup: true }));
+}
+
 function saveInspectorProfile(profile) {
     localStorage.setItem(INSPECTOR_PROFILE_KEY, JSON.stringify(profile));
     
@@ -245,8 +255,9 @@ function updateProfileButton() {
     }
 }
 
-function openInspectorProfileModal() {
+function openInspectorProfileModal(options = {}) {
     const profile = getInspectorProfile();
+    const isStartupPrompt = !!options.startup;
     
     // Remove any existing modal
     document.querySelector('.inspector-profile-modal')?.remove();
@@ -271,13 +282,14 @@ function openInspectorProfileModal() {
                 </button>
             </div>
             <div style="display:flex;flex-direction:column;gap:1rem;">
-                <div style="display:flex;align-items:center;gap:1rem;padding:1rem;background:#f3f4f6;border-radius:0.75rem;">
+                ${isStartupPrompt ? '<p class="profile-startup-notice">Please enter your inspector information before using Oversight.</p>' : ''}
+                <div class="profile-summary" style="display:flex;align-items:center;gap:1rem;padding:1rem;background:#f3f4f6;border-radius:0.75rem;">
                     <div style="width:48px;height:48px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:1.125rem;" id="profile-avatar">
                         ${profile.initials || '?'}
                     </div>
                     <div>
-                        <p style="font-weight:600;color:#111827;">${profile.name || 'Inspector Name'}</p>
-                        <p style="font-size:0.875rem;color:#6b7280;">${profile.company || 'Company not set'}</p>
+                        <p class="profile-summary-name">${_escHtml(profile.name || 'Inspector Name')}</p>
+                        <p class="profile-summary-meta">${_escHtml(profile.company || 'Company not set')}</p>
                     </div>
                 </div>
                 <div>
@@ -314,11 +326,11 @@ function openInspectorProfileModal() {
                 <!-- Signature Section -->
                 <div style="border-top:1px solid #e5e7eb;padding-top:1rem;">
                     <label style="display:block;font-size:0.875rem;font-weight:600;color:#374151;margin-bottom:0.5rem;">Signature (Optional)</label>
-                    <p style="font-size:0.75rem;color:#6b7280;margin-bottom:0.75rem;">Upload an image or draw your signature. This will be placed on generated documents.</p>
+                    <p class="profile-hint" style="font-size:0.75rem;color:#6b7280;margin-bottom:0.75rem;">Upload an image or draw your signature. This will be placed on generated documents.</p>
                     
                     <!-- Signature Preview -->
                     <div id="sig-preview-area" style="display:${hasSignature ? 'flex' : 'none'};flex-direction:column;align-items:center;justify-content:center;margin-bottom:0.75rem;padding:0.75rem;border:1px solid #d1d5db;border-radius:0.5rem;background:#fafafa;">
-                        <p style="font-size:0.75rem;color:#6b7280;margin-bottom:0.5rem;">Current Signature:</p>
+                        <p class="profile-hint" style="font-size:0.75rem;color:#6b7280;margin-bottom:0.5rem;">Current Signature:</p>
                         <img id="sig-preview-img" src="${hasSignature ? _safeImageSrc(currentSignatureBase64) : ''}" alt="Signature" style="max-width:100%;max-height:80px;display:block;margin:0 auto;${hasSignature ? '' : 'display:none;'}">
                         <div style="margin-top:0.5rem;">
                             <button id="sig-remove-btn" type="button" style="padding:0.25rem 0.75rem;border:1px solid #ef4444;border-radius:0.375rem;background:white;color:#ef4444;font-size:0.75rem;cursor:pointer;">Remove Signature</button>
@@ -623,9 +635,10 @@ function _safeImageSrc(value) {
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
     updateProfileButton();
-    
+    promptInspectorProfileIfNeeded();
+
     const profileBtn = document.getElementById('inspector-profile-btn');
     if (profileBtn) {
-        profileBtn.addEventListener('click', openInspectorProfileModal);
+        profileBtn.addEventListener('click', () => openInspectorProfileModal());
     }
 });

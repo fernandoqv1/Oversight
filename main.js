@@ -355,3 +355,28 @@ ipcMain.handle('read-template', async (event, templatePath) => {
     return { success: false, error: error.message };
   }
 });
+
+ipcMain.handle('convert-image-for-upload', async (_event, byteArray, fileName) => {
+  try {
+    if (!Array.isArray(byteArray) || byteArray.length === 0) {
+      return { success: false, error: 'Empty image data' };
+    }
+    const ext = String(fileName || '').split('.').pop()?.toLowerCase() || '';
+    const isHeic = ext === 'heic' || ext === 'heif';
+    if (!isHeic) {
+      return { success: false, error: 'Not a HEIC/HEIF file' };
+    }
+    const heicConvert = require('heic-convert');
+    const input = Buffer.from(byteArray);
+    const output = await heicConvert({
+      buffer: input,
+      format: 'JPEG',
+      quality: 0.92
+    });
+    const jpeg = Buffer.isBuffer(output) ? output : Buffer.from(output);
+    return { success: true, base64: jpeg.toString('base64'), mimeType: 'image/jpeg' };
+  } catch (error) {
+    console.error('HEIC convert error:', error);
+    return { success: false, error: error.message || 'HEIC could not be converted' };
+  }
+});

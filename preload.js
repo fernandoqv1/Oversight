@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportProject: (projectData, filename) => ipcRenderer.invoke('export-project', projectData, filename),
   importProject: () => ipcRenderer.invoke('import-project'),
   readTemplate: (templatePath) => ipcRenderer.invoke('read-template', templatePath),
+  convertImageForUpload: (byteArray, fileName) => ipcRenderer.invoke('convert-image-for-upload', byteArray, fileName),
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   openFolder: (folderPath) => ipcRenderer.invoke('open-folder', folderPath),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
