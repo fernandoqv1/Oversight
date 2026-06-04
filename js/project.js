@@ -50,7 +50,36 @@ const respiratorOptions = ['Half-Face', 'Full-Face', 'PAPR'];
 
 /** Returns containment name with " Containment" suffix for document display (matches folder naming). */
 function getContainmentDisplayName(name) {
-    return `${(name || 'Containment').trim()} Containment`;
+    const base = (name || 'Containment').trim().replace(/\s+Containment$/i, '');
+    return base ? `${base} Containment` : 'Containment';
+}
+
+const LS_LAST_BUILDING_PREFIX = 'oversight_last_building_';
+
+function getLastBuildingId(projectId) {
+    if (!projectId) return '';
+    try {
+        return localStorage.getItem(LS_LAST_BUILDING_PREFIX + projectId) || '';
+    } catch {
+        return '';
+    }
+}
+
+function setLastBuildingId(projectId, buildingId) {
+    if (!projectId || !buildingId) return;
+    try {
+        localStorage.setItem(LS_LAST_BUILDING_PREFIX + projectId, buildingId);
+    } catch {
+        /* ignore */
+    }
+}
+
+function applyLastBuildingSelection(selectEl) {
+    if (!selectEl || !currentProject?.id) return;
+    const last = getLastBuildingId(currentProject.id);
+    if (last && Array.from(selectEl.options).some(o => o.value === last)) {
+        selectEl.value = last;
+    }
 }
 
 const LS_PROJECT_DETAILS_HIDDEN_PREFIX = 'oversightDesktop_pdHidden_';
@@ -460,7 +489,7 @@ function renderContainments() {
             <div class="flex justify-between items-stretch gap-3">
                 <div class="flex-1 min-w-0">
                     <div class="flex items-center gap-2 flex-wrap mb-1">
-                        <span class="font-medium text-gray-800">${escapeHtml(containment.name)}</span>
+                        <span class="font-medium text-gray-800">${escapeHtml(getContainmentDisplayName(containment.name))}</span>
                         <span class="text-sm text-gray-500">${containment.buildingName || ''}</span>
                         ${regulatedBadge}
                     </div>
@@ -980,8 +1009,10 @@ function openAddSpaceFromHeader() {
         </div>`,
         () => {
             const sel = document.getElementById(selectId);
+            if (sel) applyLastBuildingSelection(sel);
             const id = sel && sel.value;
             if (!id) return false;
+            setLastBuildingId(currentProject.id, id);
             setTimeout(() => openAddSpaceModal(id), 0);
             return true;
         }
@@ -1012,15 +1043,15 @@ function openSpaceMaterialModal(building, existingSpace) {
             const remaining = (pm.totalQuantity || 0) - getAssignedQuantity(pm.id) + (assigned ? parseFloat(assigned.quantity) || 0 : 0);
             
             return `
-                <div class="flex items-center gap-3 p-2 border rounded-lg bg-gray-50">
-                    <input type="checkbox" id="mat-check-${pm.id}" class="h-4 w-4 rounded border-gray-300 text-indigo-600" 
+                <div class="modal-material-row">
+                    <input type="checkbox" id="mat-check-${pm.id}" class="h-4 w-4 rounded border-gray-300 text-indigo-600"
                            ${assigned ? 'checked' : ''} onchange="toggleMaterialRow('${pm.id}')">
-                    <div class="flex-1">
-                        <label for="mat-check-${pm.id}" class="font-medium text-gray-800 text-sm cursor-pointer">${escapeHtml(pm.name)}</label>
-                        <span class="text-xs text-gray-500 ml-2">(${remaining > 0 ? remaining : 0} ${displayUnit(pm.unit)} remaining)</span>
-                    </div>
+                    <label for="mat-check-${pm.id}" class="modal-check-label" style="flex:1;">
+                        <span class="modal-check-title">${escapeHtml(pm.name)}</span>
+                        <span class="modal-check-subtitle">(${remaining > 0 ? remaining : 0} ${displayUnit(pm.unit)} remaining)</span>
+                    </label>
                     <div class="flex items-center gap-2" id="mat-qty-row-${pm.id}" style="${assigned ? '' : 'opacity: 0.4'}">
-                        <input type="number" id="mat-qty-${pm.id}" class="p-2 border rounded text-sm" 
+                        <input type="number" id="mat-qty-${pm.id}" class="p-2 border rounded text-sm"
                                style="width: 6.5rem;" maxlength="6" max="999999"
                                placeholder="Qty" value="${qty}" ${assigned ? '' : 'disabled'} min="0" step="any">
                         <span class="text-xs text-gray-500 w-8">${displayUnit(pm.unit)}</span>
@@ -1034,8 +1065,7 @@ function openSpaceMaterialModal(building, existingSpace) {
     modal.className = 'modal active';
     modal.innerHTML = `
         <div class="modal-content" style="max-width: 600px;">
-            <h3 class="text-xl font-semibold mb-4">${isEdit ? 'Edit Space' : `Add Space to ${escapeHtml(building.name)}`}</h3>
-            
+            <h3>${isEdit ? 'Edit Space' : `Add Space to ${escapeHtml(building.name)}`}</h3>
             <div class="space-y-4">
                 <div class="grid grid-cols-2 gap-4">
                     <div>
@@ -1053,7 +1083,7 @@ function openSpaceMaterialModal(building, existingSpace) {
                 <div class="border-t pt-4">
                     <h4 class="font-medium text-gray-800 mb-2">Assign Materials to This Space</h4>
                     <p class="text-xs text-gray-500 mb-3">Check materials and enter quantities found in this space.</p>
-                    <div id="space-materials-list" class="space-y-2 max-h-64 overflow-y-auto">
+                    <div id="space-materials-list" class="modal-selection-box max-h-64 overflow-y-auto">
                         ${buildMaterialRows(isEdit ? existingSpace.materials : [])}
                     </div>
                     <div id="space-new-materials" class="space-y-2 mt-2"></div>
@@ -1065,9 +1095,9 @@ function openSpaceMaterialModal(building, existingSpace) {
                 </div>
             </div>
             
-            <div class="flex justify-end gap-3 mt-6">
-                <button class="btn btn-secondary modal-cancel-btn">Cancel</button>
-                <button class="btn btn-primary modal-save-btn">Save Space</button>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary modal-cancel-btn">Cancel</button>
+                <button type="button" class="btn btn-primary modal-save-btn">Save Space</button>
             </div>
         </div>
     `;
@@ -1263,10 +1293,7 @@ function openAddMaterialModal() {
                     </select>
                 </div>
             </div>
-            <div class="flex items-center">
-                <input type="checkbox" id="new-material-friable" class="h-4 w-4 rounded border-gray-300 text-indigo-600 mr-2">
-                <label for="new-material-friable" class="text-sm text-gray-700">Friable Material</label>
-            </div>
+            ${buildModalCheckboxRow('new-material-friable', '', '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
         const name = document.getElementById('new-material-name').value.trim();
@@ -1319,10 +1346,7 @@ function openEditMaterialModal(materialId) {
                 <label class="block text-sm font-medium text-gray-700 mb-1">HMR# (optional)</label>
                 <input type="text" id="edit-material-hmr" class="w-full p-3 border rounded-lg" placeholder="e.g., 01" value="${escapeHtml(material.hmrNumber || '')}">
             </div>
-            <div class="flex items-center">
-                <input type="checkbox" id="edit-material-friable" class="h-4 w-4 rounded border-gray-300 text-indigo-600 mr-2" ${material.friable ? 'checked' : ''}>
-                <label for="edit-material-friable" class="text-sm text-gray-700">Friable Material</label>
-            </div>
+            ${buildModalCheckboxRow('edit-material-friable', '', material.friable ? 'checked' : '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
         const name = document.getElementById('edit-material-name').value.trim();
@@ -1534,15 +1558,14 @@ function openPrintBulkSamplesModal(materialId) {
     const inspectorName = primarySample.inspectorName || (typeof getInspectorProfile === 'function' ? getInspectorProfile().name : '') || '';
     const inspectorEmail = (typeof getInspectorProfile === 'function' ? getInspectorProfile().email : '') || '';
 
-    const sampleCheckboxesHtml = bulkSamples.map(sample => `
-        <label class="flex items-start gap-3 p-3 rounded-lg cursor-pointer" style="background:#f9fafb;">
-            <input type="checkbox" class="print-bulk-sample-checkbox mt-0.5 h-4 w-4" value="${sample.id}" checked>
-            <div class="flex-1 min-w-0">
-                <p class="font-medium text-sm" style="color:#111827;">${escapeHtml(sample.sampleId || sample.id || 'No ID')}</p>
-                <p class="text-xs" style="color:#6b7280;">Bulk Asbestos · ${escapeHtml(sample.location || '')}</p>
-            </div>
-        </label>
-    `).join('');
+    const sampleCheckboxesHtml = bulkSamples.map(sample => buildModalSelectionOption(
+        `print-bulk-sample-${sample.id}`,
+        'print-bulk-sample-checkbox',
+        sample.id,
+        true,
+        escapeHtml(sample.sampleId || sample.id || 'No ID'),
+        `Bulk Asbestos · ${escapeHtml(sample.location || '')}`
+    )).join('');
 
     const modal = createModal('Print Bulk Sample Chain of Custody', `
         <p class="text-sm text-gray-600 mb-4">Material: <strong>${escapeHtml(material.name)}</strong>. Select samples and complete the form to generate the lab submission.</p>
@@ -1556,7 +1579,7 @@ function openPrintBulkSamplesModal(materialId) {
                         <button type="button" id="print-bulk-select-none" class="text-xs font-medium" style="color:#4f46e5;">Select None</button>
                     </div>
                 </div>
-                <div id="print-bulk-samples-list" class="grid grid-cols-1 gap-2 max-h-48 overflow-y-auto p-1" style="border:1px solid #e5e7eb; border-radius:8px;">
+                <div id="print-bulk-samples-list" class="modal-selection-box max-h-48 overflow-y-auto">
                     ${sampleCheckboxesHtml}
                 </div>
                 <p id="print-bulk-sample-count" class="text-xs text-gray-500 mt-2"><strong>${bulkSamples.length}</strong> sample${bulkSamples.length > 1 ? 's' : ''} selected</p>
@@ -1864,58 +1887,45 @@ function openVisualInspectionModal(inspectionType, containmentName) {
         modal.className = 'modal active';
 
         modal.innerHTML = `
-            <div class="modal-content space-y-6" style="max-width: 640px;">
-                <div class="flex items-start justify-between">
-                    <div>
-                        <h3 class="text-2xl font-semibold text-gray-900">${inspectionTitle}</h3>
-                        <p class="text-sm text-gray-600 mt-1">Containment: ${escapeHtml(containmentName || 'Containment')}</p>
-                    </div>
-                    <button class="text-gray-400 hover:text-gray-600 text-2xl leading-none" id="visual-inspection-modal-close">&times;</button>
-                </div>
+            <div class="modal-content" style="max-width: 640px;">
+                <h3>${inspectionTitle}</h3>
                 <form id="visual-inspection-form" class="space-y-4">
+                    <p class="text-sm text-gray-600" style="margin-top:0;">Containment: ${escapeHtml(getContainmentDisplayName(containmentName || 'Containment'))}</p>
                     <div>
                         <label for="visual-inspection-inspector" class="block text-sm font-medium text-gray-700 mb-1">Inspector Name</label>
                         <input type="text" id="visual-inspection-inspector" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspector name" value="${escapeHtml((typeof getInspectorProfile === 'function' ? getInspectorProfile() : {}).name || '')}" required>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Findings</label>
-                        <div class="space-y-3 mt-2">
-                            <label class="flex items-center gap-3 cursor-pointer">
-                                <input type="radio" name="visual-inspection-finding" value="pass" class="h-4 w-4 text-green-600 border-gray-300 focus:ring-green-500" required>
-                                <span class="text-sm font-medium text-green-700">Pass</span>
-                            </label>
-                            <label class="flex items-center gap-3 cursor-pointer">
-                                <input type="radio" name="visual-inspection-finding" value="fail" class="h-4 w-4 text-red-600 border-gray-300 focus:ring-red-500" required>
-                                <span class="text-sm font-medium text-red-700">Fail</span>
-                            </label>
+                        <div class="space-y-2 mt-2">
+                            ${buildModalRadioRow('visual-inspection-pass', 'visual-inspection-finding', 'pass', '<span class="text-sm font-medium text-green-700">Pass</span>')}
+                            ${buildModalRadioRow('visual-inspection-fail', 'visual-inspection-finding', 'fail', '<span class="text-sm font-medium text-red-700">Fail</span>')}
                         </div>
                     </div>
                     ${isPreStartInspection ? `
-                    <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                        <label class="flex items-start gap-3 cursor-pointer">
-                            <input type="checkbox" id="visual-inspection-regulated-area" class="h-5 w-5 mt-0.5 text-amber-600 border-gray-300 rounded focus:ring-amber-500">
-                            <div>
-                                <span class="text-sm font-medium text-amber-800">Regulated Area</span>
-                                <p class="text-xs text-amber-600 mt-1">Check this if the containment is a regulated area. Negative pressure readings will not be required for daily logs, and clearance air samples will not be automatically created.</p>
-                            </div>
-                        </label>
+                    <div class="notice-box notice-box--warn">
+                        ${buildModalCheckboxRow(
+                            'visual-inspection-regulated-area',
+                            '',
+                            '',
+                            '<span class="modal-check-title">Regulated Area</span><span class="modal-check-subtitle">Check this if the containment is a regulated area. Negative pressure readings will not be required for daily logs, and clearance air samples will not be automatically created.</span>'
+                        )}
                     </div>
                     ` : ''}
                     <div>
                         <label for="visual-inspection-comments" class="block text-sm font-medium text-gray-700 mb-1">Comments</label>
                         <textarea id="visual-inspection-comments" rows="4" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspection comments..."></textarea>
                     </div>
-                    <div class="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                        <button type="button" class="btn btn-secondary btn-sm" id="visual-inspection-cancel-btn">Cancel</button>
-                        <button type="submit" class="btn btn-primary btn-sm">Save Inspection</button>
-                    </div>
                 </form>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary modal-cancel-btn" id="visual-inspection-cancel-btn">Cancel</button>
+                    <button type="submit" form="visual-inspection-form" class="btn btn-primary modal-save-btn">Save Inspection</button>
+                </div>
             </div>
         `;
 
         document.body.appendChild(modal);
 
-        const closeBtn = modal.querySelector('#visual-inspection-modal-close');
         const cancelBtn = modal.querySelector('#visual-inspection-cancel-btn');
         const form = modal.querySelector('#visual-inspection-form');
 
@@ -1926,7 +1936,6 @@ function openVisualInspectionModal(inspectionType, containmentName) {
             closeModal();
         };
 
-        closeBtn.addEventListener('click', handleCancel);
         cancelBtn.addEventListener('click', handleCancel);
         // Track mouse down position to prevent closing when dragging from inside modal
         let mouseDownOnBackdrop = false;
@@ -2028,6 +2037,92 @@ function createClearanceAirSamples(containment, inspectionData) {
     console.log(`Created 5 clearance air samples for containment: ${containmentName}`);
 }
 
+function buildModalCheckboxRow(id, inputClass, extraAttrs, labelHtml, rowClass = '', labelClass = '') {
+    const inputCls = inputClass ? ` class="${inputClass}"` : '';
+    return `<div class="modal-check-row ${rowClass}">
+        <input type="checkbox" id="${id}"${inputCls} ${extraAttrs}>
+        <label for="${id}" class="modal-check-label ${labelClass}">${labelHtml}</label>
+    </div>`;
+}
+
+function buildModalRadioRow(id, name, value, labelHtml, checked = false, rowClass = '') {
+    return `<div class="modal-check-row ${rowClass}">
+        <input type="radio" id="${id}" name="${name}" value="${value}" class="h-4 w-4" ${checked ? 'checked' : ''}>
+        <label for="${id}" class="modal-check-label">${labelHtml}</label>
+    </div>`;
+}
+
+function buildModalSelectionOption(id, checkboxClass, valueAttr, checked, titleHtml, subtitleHtml = '') {
+    const sub = subtitleHtml ? `<span class="modal-check-subtitle">${subtitleHtml}</span>` : '';
+    const label = `<span class="modal-check-title">${titleHtml}</span>${sub}`;
+    const attrs = valueAttr !== undefined && valueAttr !== null && valueAttr !== ''
+        ? `value="${escapeHtml(String(valueAttr))}" ${checked ? 'checked' : ''}`
+        : (checked ? 'checked' : '');
+    return `<div class="modal-selection-option">${buildModalCheckboxRow(id, checkboxClass, attrs, label)}</div>`;
+}
+
+function buildContainmentSpacePickerCard(space, options = {}) {
+    const {
+        isInOther = false,
+        otherContainments = [],
+        isSpaceChecked = false,
+        preselMatNames = null,
+        defaultAllMaterialsChecked = true
+    } = options;
+
+    const warningBadge = isInOther
+        ? `<span class="modal-check-warn" title="Already in: ${escapeHtml(otherContainments.join(', '))}">⚠️ In ${otherContainments.length} containment${otherContainments.length > 1 ? 's' : ''}</span>`
+        : '';
+
+    const spaceCbId = `containment-space-cb-${space.id}`;
+    const spaceLabel = `<span class="modal-check-title">${escapeHtml(space.name)}</span>${warningBadge}`;
+
+    let materialsHtml;
+    if (!(space.materials || []).length) {
+        materialsHtml = '<p class="modal-check-sublist-empty">No materials assigned</p>';
+    } else {
+        materialsHtml = `<div class="modal-check-sublist" data-space-id="${escapeHtml(space.id)}">${
+            (space.materials || []).map((m, idx) => {
+                const isMatChecked = isSpaceChecked && preselMatNames
+                    ? preselMatNames.has(m.name)
+                    : defaultAllMaterialsChecked;
+                const matCbId = `containment-mat-cb-${space.id}-${idx}`;
+                const pill = `<span class="modal-check-pill">${escapeHtml(m.name)} \u00b7 ${parseFloat(m.quantity || 0).toLocaleString()} ${escapeHtml(displayUnit(m.unit))}</span>`;
+                return buildModalCheckboxRow(
+                    matCbId,
+                    'containment-material-cb',
+                    `data-space-id="${escapeHtml(space.id)}" data-material-index="${idx}" ${isMatChecked ? 'checked' : ''}`,
+                    pill
+                );
+            }).join('')
+        }</div>`;
+    }
+
+    return `
+        <div class="modal-selection-item${isInOther ? ' modal-selection-item--warn' : ''}">
+            ${buildModalCheckboxRow(
+                spaceCbId,
+                'containment-space-cb',
+                `data-space-id="${escapeHtml(space.id)}" data-space-name="${escapeHtml(space.name)}" ${isSpaceChecked ? 'checked' : ''}`,
+                spaceLabel,
+                '',
+                'modal-check-label--strong'
+            )}
+            ${materialsHtml}
+        </div>`;
+}
+
+function wireContainmentSpacePickerList(spacesList) {
+    spacesList.querySelectorAll('.containment-space-cb').forEach(cb => {
+        cb.addEventListener('change', () => {
+            const sid = cb.dataset.spaceId;
+            spacesList.querySelectorAll(`.containment-material-cb[data-space-id="${sid}"]`).forEach(mc => {
+                mc.checked = cb.checked;
+            });
+        });
+    });
+}
+
 function openAddContainmentModal() {
     // Get all buildings and spaces for selection
     const buildingOptions = (currentProject.buildings || []).map(b => 
@@ -2038,10 +2133,10 @@ function openAddContainmentModal() {
         <div class="space-y-4">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
-                <div class="relative w-full border border-gray-300 rounded-lg bg-white overflow-hidden" style="min-height: 2.75rem;">
+                <div class="containment-name-wrap">
                     <span id="new-containment-mirror" class="absolute whitespace-pre pointer-events-none" style="visibility:hidden;left:-9999px;top:0" aria-hidden="true"></span>
-                    <input type="text" id="new-containment-name" class="w-full p-3 pr-28 border-0 focus:ring-0 bg-transparent" placeholder="e.g., Floor 2 Abatement" style="box-shadow: none;">
-                    <span id="new-containment-suffix" class="absolute text-gray-400 pointer-events-none" style="display: none; top: 50%; transform: translateY(-50%); padding-left: 0.25em;">Containment</span>
+                    <input type="text" id="new-containment-name" class="containment-name-input" placeholder="e.g., North" autocomplete="off">
+                    <span id="new-containment-suffix" class="containment-name-suffix" style="display:none;"> Containment</span>
                 </div>
             </div>
             <div>
@@ -2053,7 +2148,7 @@ function openAddContainmentModal() {
             </div>
             <div id="new-containment-spaces-section" class="hidden">
                 <label class="block text-sm font-medium text-gray-700 mb-2">Select Spaces</label>
-                <div id="new-containment-spaces-list" class="max-h-64 overflow-y-auto space-y-2 border rounded-lg p-3 bg-gray-50">
+                <div id="new-containment-spaces-list" class="modal-selection-box max-h-64 overflow-y-auto">
                     <p class="text-sm text-gray-500">Select a building first</p>
                 </div>
             </div>
@@ -2084,6 +2179,7 @@ function openAddContainmentModal() {
             alert('Please select a building');
             return false;
         }
+        setLastBuildingId(currentProject.id, buildingId);
         
         // Get selected spaces and the inspector-selected materials within each
         const selectedSpaceCheckboxes = document.querySelectorAll('#new-containment-spaces-list .containment-space-cb:checked');
@@ -2189,14 +2285,19 @@ function openAddContainmentModal() {
                 const pad = parseFloat(window.getComputedStyle(nameInput).paddingLeft) || 12;
                 suffixSpan.style.left = `${pad + mirrorSpan.offsetWidth}px`;
                 suffixSpan.style.font = window.getComputedStyle(nameInput).font;
+                suffixSpan.style.fontSize = window.getComputedStyle(nameInput).fontSize;
+                suffixSpan.textContent = ' Containment';
                 suffixSpan.style.display = 'inline';
             };
             nameInput.addEventListener('input', updateSuffix);
             nameInput.addEventListener('focus', updateSuffix);
+            updateSuffix();
         }
         const buildingSelect = document.getElementById('new-containment-building');
         if (buildingSelect) {
+            applyLastBuildingSelection(buildingSelect);
             buildingSelect.addEventListener('change', function() {
+                if (this.value) setLastBuildingId(currentProject.id, this.value);
                 const buildingId = this.value;
                 const spacesSection = document.getElementById('new-containment-spaces-section');
                 const spacesList = document.getElementById('new-containment-spaces-list');
@@ -2232,50 +2333,15 @@ function openAddContainmentModal() {
                 spacesList.innerHTML = building.spaces.map(space => {
                     const isInOther = spacesInOtherContainments.has(space.name);
                     const otherContainments = isInOther ? spacesInOtherContainments.get(space.name) : [];
-                    
-                    const warningBadge = isInOther
-                        ? `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 ml-2" title="Already in: ${otherContainments.join(', ')}">⚠️ In ${otherContainments.length} containment${otherContainments.length > 1 ? 's' : ''}</span>`
-                        : '';
-                    
-                    const materialsHtml = (space.materials || []).length > 0
-                        ? `<div class="space-materials-section mt-2 ml-7 space-y-1" data-space-id="${space.id}">
-                            ${(space.materials || []).map((m, idx) => `
-                                <label class="flex items-center gap-2 text-xs cursor-pointer">
-                                    <input type="checkbox" class="containment-material-cb h-3.5 w-3.5 text-indigo-600 border-gray-300 rounded"
-                                           data-space-id="${space.id}" data-material-index="${idx}" checked>
-                                    <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-xs font-medium">
-                                        ${escapeHtml(m.name)} \u00b7 ${parseFloat(m.quantity || 0).toLocaleString()} ${escapeHtml(displayUnit(m.unit))}
-                                    </span>
-                                </label>
-                            `).join('')}
-                          </div>`
-                        : '<p class="text-xs text-gray-400 mt-1 ml-7">No materials assigned</p>';
-                    
-                    return `
-                        <div class="bg-white border rounded-lg p-3 transition ${isInOther ? 'border-amber-300 bg-amber-50/30' : 'border-gray-200 hover:border-indigo-300'}">
-                            <label class="flex items-start gap-3 cursor-pointer">
-                                <input type="checkbox" class="containment-space-cb mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded" data-space-id="${space.id}" data-space-name="${escapeHtml(space.name)}">
-                                <div class="flex-1 min-w-0">
-                                    <div class="flex items-center flex-wrap">
-                                        <p class="text-sm font-medium text-gray-800">${escapeHtml(space.name)}</p>
-                                        ${warningBadge}
-                                    </div>
-                                </div>
-                            </label>
-                            ${materialsHtml}
-                        </div>
-                    `;
-                }).join('');
-                
-                // Cascade space checkbox toggling to all of its material checkboxes
-                spacesList.querySelectorAll('.containment-space-cb').forEach(cb => {
-                    cb.addEventListener('change', () => {
-                        const sid = cb.dataset.spaceId;
-                        spacesList.querySelectorAll(`.containment-material-cb[data-space-id="${sid}"]`).forEach(mc => {
-                            mc.checked = cb.checked;
-                        });
+                    return buildContainmentSpacePickerCard(space, {
+                        isInOther,
+                        otherContainments,
+                        isSpaceChecked: false,
+                        defaultAllMaterialsChecked: true
                     });
-                });
+                }).join('');
+
+                wireContainmentSpacePickerList(spacesList);
                 
                 spacesSection.classList.remove('hidden');
             });
@@ -2344,7 +2410,7 @@ function openEditContainmentModal(containmentId) {
             </div>
             <div id="edit-containment-spaces-section" class="${containment.buildingId ? '' : 'hidden'}">
                 <label class="block text-sm font-medium text-gray-700 mb-2">Select Spaces</label>
-                <div id="edit-containment-spaces-list" class="max-h-64 overflow-y-auto space-y-2 border rounded-lg p-3 bg-gray-50">
+                <div id="edit-containment-spaces-list" class="modal-selection-box max-h-64 overflow-y-auto">
                     ${containment.buildingId ? '<p class="text-sm text-gray-500">Loading spaces...</p>' : '<p class="text-sm text-gray-500">Select a building first</p>'}
                 </div>
             </div>
@@ -2383,6 +2449,7 @@ function openEditContainmentModal(containmentId) {
             showEditContainmentStatus('Please select a building.', true);
             return false;
         }
+        setLastBuildingId(currentProject.id, buildingId);
         
         // Get selected spaces and the inspector-selected materials within each
         const selectedSpaceCheckboxes = document.querySelectorAll('#edit-containment-spaces-list .containment-space-cb:checked');
@@ -2636,61 +2703,18 @@ function openEditContainmentModal(containmentId) {
         spacesList.innerHTML = building.spaces.map(space => {
             const isInOther = spacesInOtherContainments.has(space.name);
             const otherContainments = isInOther ? spacesInOtherContainments.get(space.name) : [];
-            // Check if this space is preselected by matching name or id
             const isPreselected = preselectedNames.has(space.name) || preselectedNames.has(space.id);
-            // Set of material names previously included for this space; null/undefined => default to all checked
             const preselMatNames = preselectedMatsMap?.get(space.name) || preselectedMatsMap?.get(space.id);
-            
-            const warningBadge = isInOther
-                ? `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 ml-2" title="Already in: ${otherContainments.join(', ')}">⚠️ In ${otherContainments.length} containment${otherContainments.length > 1 ? 's' : ''}</span>`
-                : '';
-            
-            const materialsHtml = (space.materials || []).length > 0
-                ? `<div class="space-materials-section mt-2 ml-7 space-y-1" data-space-id="${space.id}">
-                    ${(space.materials || []).map((m, idx) => {
-                        // If space is preselected, only check materials that were previously included.
-                        // If space is not preselected, default to all-checked (so when user re-checks the space, all materials apply).
-                        const isMatChecked = isPreselected
-                            ? !!(preselMatNames && preselMatNames.has(m.name))
-                            : true;
-                        return `
-                            <label class="flex items-center gap-2 text-xs cursor-pointer">
-                                <input type="checkbox" class="containment-material-cb h-3.5 w-3.5 text-indigo-600 border-gray-300 rounded"
-                                       data-space-id="${space.id}" data-material-index="${idx}" ${isMatChecked ? 'checked' : ''}>
-                                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-xs font-medium">
-                                    ${escapeHtml(m.name)} \u00b7 ${parseFloat(m.quantity || 0).toLocaleString()} ${escapeHtml(displayUnit(m.unit))}
-                                </span>
-                            </label>
-                        `;
-                    }).join('')}
-                  </div>`
-                : '<p class="text-xs text-gray-400 mt-1 ml-7">No materials assigned</p>';
-            
-            return `
-                <div class="bg-white border rounded-lg p-3 transition ${isInOther ? 'border-amber-300 bg-amber-50/30' : 'border-gray-200 hover:border-indigo-300'}">
-                    <label class="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" class="containment-space-cb mt-1 h-4 w-4 text-indigo-600 border-gray-300 rounded" data-space-id="${space.id}" data-space-name="${escapeHtml(space.name)}" ${isPreselected ? 'checked' : ''}>
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-center flex-wrap">
-                                <p class="text-sm font-medium text-gray-800">${escapeHtml(space.name)}</p>
-                                ${warningBadge}
-                            </div>
-                        </div>
-                    </label>
-                    ${materialsHtml}
-                </div>
-            `;
-        }).join('');
-        
-        // Cascade space checkbox toggling to its child material checkboxes
-        spacesList.querySelectorAll('.containment-space-cb').forEach(cb => {
-            cb.addEventListener('change', () => {
-                const sid = cb.dataset.spaceId;
-                spacesList.querySelectorAll(`.containment-material-cb[data-space-id="${sid}"]`).forEach(mc => {
-                    mc.checked = cb.checked;
-                });
+            return buildContainmentSpacePickerCard(space, {
+                isInOther,
+                otherContainments,
+                isSpaceChecked: isPreselected,
+                preselMatNames: isPreselected ? preselMatNames : null,
+                defaultAllMaterialsChecked: true
             });
-        });
+        }).join('');
+
+        wireContainmentSpacePickerList(spacesList);
         
         spacesSection.classList.remove('hidden');
     };
@@ -2704,7 +2728,9 @@ function openEditContainmentModal(containmentId) {
                 renderSpacesForBuilding(containment.buildingId, preselectedSpaceNames, preselectedMaterialsBySpace);
             }
             
+            applyLastBuildingSelection(buildingSelect);
             buildingSelect.addEventListener('change', function() {
+                if (this.value) setLastBuildingId(currentProject.id, this.value);
                 renderSpacesForBuilding(this.value, preselectedSpaceNames, preselectedMaterialsBySpace);
             });
         }
@@ -2720,7 +2746,7 @@ function deleteContainment(containmentId) {
 
 function openAddAirSampleModal() {
     const containmentOptions = (currentProject.containments || []).map(c => 
-        `<option value="${c.id}">${escapeHtml(c.name)}</option>`
+        `<option value="${c.id}">${escapeHtml(getContainmentDisplayName(c.name))}</option>`
     ).join('');
     
     const suggestedId = getNextAirSampleId('Area');
@@ -2730,7 +2756,6 @@ function openAddAirSampleModal() {
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Date Sampled</label>
                 <input type="date" id="new-sample-date" class="w-full p-3 border rounded-lg" value="${getTodayLocal()}">
-                <p class="text-xs text-gray-500 mt-0.5">This date determines which daily log the sample appears in.</p>
             </div>
             <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -2768,12 +2793,12 @@ function openAddAirSampleModal() {
                         <input type="time" id="new-sample-start-time" class="w-full p-3 border rounded-lg" onchange="updateSampleCalc('new')">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Stop Time</label>
-                        <input type="time" id="new-sample-stop-time" class="w-full p-3 border rounded-lg" onchange="updateSampleCalc('new')">
-                    </div>
-                    <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Start Flow Rate (L/min)</label>
                         <input type="number" id="new-sample-start-flow" class="w-full p-3 border rounded-lg" placeholder="2.0" step="0.1" value="2.0" onchange="updateSampleCalc('new')">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Stop Time</label>
+                        <input type="time" id="new-sample-stop-time" class="w-full p-3 border rounded-lg" onchange="updateSampleCalc('new')">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Stop Flow Rate (L/min)</label>
@@ -2851,7 +2876,7 @@ function openEditAirSampleModal(sampleId) {
     if (!sample) return;
     
     const containmentOptions = (currentProject.containments || []).map(c => 
-        `<option value="${c.id}" ${c.id === sample.containmentId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`
+        `<option value="${c.id}" ${c.id === sample.containmentId ? 'selected' : ''}>${escapeHtml(getContainmentDisplayName(c.name))}</option>`
     ).join('');
 
     const hasSetAlready = !!sample.sampleSetId;
@@ -2863,12 +2888,14 @@ function openEditAirSampleModal(sampleId) {
     });
     const sampleSetPickerRows = otherSamples.sort((a, b) => (a.sampleId || '').localeCompare(b.sampleId || '')).map(s => {
         const inSet = hasSetAlready && s.sampleSetId === sample.sampleSetId;
-        return `<div class="sample-set-row p-2 rounded-lg hover:bg-gray-50" data-sample-id="${s.id}">
-            <label class="sample-set-label flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" class="sample-set-cb h-4 w-4 text-indigo-600 border-gray-300 rounded" value="${s.id}" ${inSet ? 'checked' : ''}>
-                <span class="text-sm font-medium text-gray-800">${escapeHtml(s.sampleId || s.id)}</span>
-                <span class="text-xs text-gray-500">${s.type || 'Area'}</span>
-            </label>
+        const cbId = `sample-set-cb-${s.id}`;
+        return `<div class="sample-set-row modal-selection-option" data-sample-id="${s.id}">
+            ${buildModalCheckboxRow(
+                cbId,
+                'sample-set-cb',
+                `value="${escapeHtml(s.id)}" ${inSet ? 'checked' : ''}`,
+                `<span class="modal-check-title">${escapeHtml(s.sampleId || s.id)}</span><span class="modal-check-subtitle">${escapeHtml(s.type || 'Area')}</span>`
+            )}
             <input type="text" class="sample-set-location border rounded ${inSet ? '' : 'hidden'}" data-sample-id="${s.id}" value="${escapeHtml(s.location || '')}" placeholder="Location / Comments" style="padding:0.3rem 0.5rem; font-size:0.875rem;">
         </div>`;
     }).join('');
@@ -2915,7 +2942,6 @@ function openEditAirSampleModal(sampleId) {
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Date Sampled</label>
                         <input type="date" id="edit-sample-date" class="w-full border rounded" style="padding:0.3rem 0.5rem; font-size:0.875rem;" value="${sample.date || ''}">
-                        <p class="text-xs text-gray-400" style="margin-top:1px; font-size:0.7rem; line-height:1.2;">This date determines which daily log the sample appears in.</p>
                     </div>
                 </div>
                 
@@ -2927,12 +2953,12 @@ function openEditAirSampleModal(sampleId) {
                             <input type="time" id="edit-sample-start-time" class="w-full border rounded" style="padding:0.3rem 0.5rem; font-size:0.875rem;" value="${sample.startTime || ''}" onchange="updateSampleCalc('edit')">
                         </div>
                         <div>
-                            <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Stop Time</label>
-                            <input type="time" id="edit-sample-stop-time" class="w-full border rounded" style="padding:0.3rem 0.5rem; font-size:0.875rem;" value="${sample.stopTime || ''}" onchange="updateSampleCalc('edit')">
-                        </div>
-                        <div>
                             <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Start Flow Rate (L/min)</label>
                             <input type="number" id="edit-sample-start-flow" class="w-full border rounded" style="padding:0.3rem 0.5rem; font-size:0.875rem;" value="${sample.startFlowRate || ''}" step="0.1" onchange="updateSampleCalc('edit')">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Stop Time</label>
+                            <input type="time" id="edit-sample-stop-time" class="w-full border rounded" style="padding:0.3rem 0.5rem; font-size:0.875rem;" value="${sample.stopTime || ''}" onchange="updateSampleCalc('edit')">
                         </div>
                         <div>
                             <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Stop Flow Rate (L/min)</label>
@@ -2960,19 +2986,20 @@ function openEditAirSampleModal(sampleId) {
 
                 ${otherSamples.length > 0 ? `
                 <div style="border-top: 1px solid #e5e7eb; padding-top: 0.3rem; margin-top: 0.15rem;">
-                    <label class="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" id="edit-sample-set-toggle" class="h-4 w-4 text-indigo-600 border-gray-300 rounded" ${hasSetAlready ? 'checked' : ''}>
-                        <span style="font-size:0.8rem;" class="font-medium text-gray-700">Apply to Sample Set</span>
-                    </label>
-                    <p class="text-gray-500" style="margin-top:2px; margin-left:1.5rem; font-size:0.7rem;">Sync date, times, and flow rates to selected samples.</p>
+                    ${buildModalCheckboxRow(
+                        'edit-sample-set-toggle',
+                        '',
+                        hasSetAlready ? 'checked' : '',
+                        '<span class="modal-check-title" style="font-size:0.8rem;">Apply to Sample Set</span><span class="modal-check-subtitle" style="font-size:0.7rem;">Sync date, times, and flow rates to selected samples.</span>'
+                    )}
                 </div>
                 ` : ''}
             </div>
 
             ${otherSamples.length > 0 ? `
-            <div id="edit-sample-set-panel" class="${hasSetAlready ? '' : 'hidden'}" style="flex: 1 1 440px; min-width: 380px; border-left: 1px solid #e5e7eb; padding-left: 1rem;">
+            <div id="edit-sample-set-panel" class="${hasSetAlready ? '' : 'hidden is-collapsed'}" style="flex: 1 1 440px; min-width: 380px; border-left: 1px solid #e5e7eb; padding-left: 1rem;">
                 <h4 style="font-size:0.85rem; font-weight:600; color:#1f2937; margin-bottom:0.35rem;">Sample Set</h4>
-                <div id="edit-sample-set-picker" class="max-h-80 overflow-y-auto space-y-1 pr-1">
+                <div id="edit-sample-set-picker" class="modal-selection-box max-h-80 overflow-y-auto">
                     ${sampleSetPickerRows}
                 </div>
             </div>
@@ -3127,10 +3154,12 @@ function openEditAirSampleModal(sampleId) {
                 applyFormColLayout(expanded);
                 requestAnimationFrame(sizeSetLocationInputs);
             };
+            if (panel) panel.classList.toggle('is-collapsed', !hasSetAlready);
             applyWidth(hasSetAlready);
             toggle.addEventListener('change', () => {
                 const show = toggle.checked;
                 panel.classList.toggle('hidden', !show);
+                panel.classList.toggle('is-collapsed', !show);
                 applyWidth(show);
             });
         }
@@ -3203,7 +3232,7 @@ function renderOverviewCard() {
                 <div class="overview-item">
                     <div class="flex items-start justify-between gap-2">
                         <div class="flex-1 min-w-0">
-                            <div class="overview-item-name">${escapeHtml(c.name)}</div>
+                            <div class="overview-item-name">${escapeHtml(getContainmentDisplayName(c.name))}</div>
                             <div class="overview-item-detail">${escapeHtml(c.buildingName || '')}</div>
                             <span class="overview-item-stage ${getStageClass(normalizeStage(c.stage))}">${normalizeStage(c.stage)}</span>
                         </div>
@@ -3525,15 +3554,10 @@ function openEditWorkerModal(worker) {
     modal.className = 'modal active';
 
     modal.innerHTML = `
-        <div class="modal-content space-y-6" style="max-width: 600px;">
-            <div class="flex items-start justify-between">
-                <div>
-                    <h3 class="text-2xl font-semibold text-gray-900">Edit Worker</h3>
-                    <p class="text-sm text-gray-600 mt-1">Update information for ${escapeHtml(worker.name)}</p>
-                </div>
-                <button class="text-gray-400 hover:text-gray-600 text-2xl leading-none" id="edit-worker-modal-close">&times;</button>
-            </div>
+        <div class="modal-content" style="max-width: 600px;">
+            <h3>Edit Worker</h3>
             <form id="edit-worker-form" class="space-y-4">
+                <p class="text-sm text-gray-600" style="margin-top:0;">Update information for ${escapeHtml(worker.name)}</p>
                 <div>
                     <label for="edit-worker-name" class="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
                     <input type="text" id="edit-worker-name" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${escapeHtml(worker.name)}" required>
@@ -3547,42 +3571,45 @@ function openEditWorkerModal(worker) {
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
-                        <label for="edit-worker-ahera-exp" class="block text-sm font-medium text-gray-700 mb-1">AHERA Expiration</label>
+                        <label for="edit-worker-ahera-exp" class="block text-sm font-medium text-gray-700 mb-1">AHERA Training</label>
                         <input type="date" id="edit-worker-ahera-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.aheraExpiration || ''}" required>
                     </div>
                     <div>
-                        <label for="edit-worker-medical-exp" class="block text-sm font-medium text-gray-700 mb-1">Medical Expiration</label>
+                        <label for="edit-worker-medical-exp" class="block text-sm font-medium text-gray-700 mb-1">Asbestos Medical</label>
                         <input type="date" id="edit-worker-medical-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.medicalExpiration || ''}" required>
                     </div>
                     <div>
-                        <label for="edit-worker-respirator-exp" class="block text-sm font-medium text-gray-700 mb-1">Respirator Fit Test Expiration</label>
+                        <label for="edit-worker-respirator-exp" class="block text-sm font-medium text-gray-700 mb-1">Respirator Fit Test</label>
                         <input type="date" id="edit-worker-respirator-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.respiratorFitExpiration || ''}" required>
                     </div>
                     <div>
-                        <label for="edit-worker-lead-exp" class="block text-sm font-medium text-gray-700 mb-1">Lead Training Expiration</label>
+                        <label for="edit-worker-lead-exp" class="block text-sm font-medium text-gray-700 mb-1">Lead Training</label>
                         <input type="date" id="edit-worker-lead-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.leadExpiration || ''}">
                     </div>
                     <div>
-                        <label for="edit-worker-lead-med-exp" class="block text-sm font-medium text-gray-700 mb-1">Lead Medical Expiration</label>
+                        <label for="edit-worker-lead-med-exp" class="block text-sm font-medium text-gray-700 mb-1">Lead Medical</label>
                         <input type="date" id="edit-worker-lead-med-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.leadMedExpiration || ''}">
                     </div>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-2">Respirator Type</label>
-                    <div class="flex flex-wrap gap-4">
-                        ${respiratorOptions.map(option => `
-                            <label class="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-                                <input type="checkbox" value="${option}" class="edit-respirator-type-checkbox h-4 w-4 text-indigo-600 border-gray-300 rounded" ${worker.respiratorTypes?.includes(option) ? 'checked' : ''}>
-                                <span>${option}</span>
-                            </label>
-                        `).join('')}
+                    <div class="modal-check-group">
+                        ${respiratorOptions.map(option => {
+                            const rid = `edit-resp-${option.replace(/[^a-zA-Z0-9]+/g, '-')}`;
+                            return buildModalCheckboxRow(
+                                rid,
+                                'edit-respirator-type-checkbox',
+                                `value="${escapeHtml(option)}" ${worker.respiratorTypes?.includes(option) ? 'checked' : ''}`,
+                                escapeHtml(option)
+                            );
+                        }).join('')}
                     </div>
                 </div>
-                <div class="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                    <button type="button" class="btn btn-secondary btn-sm" id="edit-worker-cancel-btn">Cancel</button>
-                    <button type="submit" class="btn btn-primary btn-sm">Save Changes</button>
-                </div>
             </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary modal-cancel-btn" id="edit-worker-cancel-btn">Cancel</button>
+                <button type="submit" form="edit-worker-form" class="btn btn-primary modal-save-btn">Save Changes</button>
+            </div>
         </div>
     `;
     document.body.appendChild(modal);
@@ -3602,7 +3629,6 @@ function openEditWorkerModal(worker) {
         }
         mouseDownOnBackdrop = false;
     });
-    modal.querySelector('#edit-worker-modal-close')?.addEventListener('click', closeModal);
     modal.querySelector('#edit-worker-cancel-btn')?.addEventListener('click', closeModal);
 
     modal.querySelector('#edit-worker-form')?.addEventListener('submit', (event) => {
@@ -3662,90 +3688,90 @@ function getTomorrowLocal() {
     return `${year}-${month}-${day}`;
 }
 
-function openProjectDailyLogModal() {
+function renderDailyLogWorkerCheckboxList(workerRoster, selectedIds) {
+    const selected = new Set(selectedIds || []);
+    if (!workerRoster.length) {
+        return '<p class="text-sm text-gray-500">No workers in the roster. Add workers on the Workers tab, or set the onsite total below and assign names later via Header.</p>';
+    }
+    return workerRoster.map(worker => {
+        const expiredItems = [];
+        if (isDateExpired(worker.aheraExpiration)) expiredItems.push('AHERA');
+        if (isDateExpired(worker.medicalExpiration)) expiredItems.push('Asbestos Med');
+        if (isDateExpired(worker.respiratorFitExpiration)) expiredItems.push('Resp. Fit');
+        if (isDateExpired(worker.leadExpiration)) expiredItems.push('Lead Trn');
+        if (isDateExpired(worker.leadMedExpiration)) expiredItems.push('Lead Med');
+        const expiredWarning = expiredItems.length > 0
+            ? `<span class="text-red-600 text-xs font-medium ml-1">(Expired: ${expiredItems.join(', ')})</span>`
+            : '';
+        return buildModalSelectionOption(
+            `daily-log-worker-${worker.id}`,
+            'daily-log-worker-checkbox',
+            worker.id,
+            selected.has(worker.id),
+            `${escapeHtml(worker.name)} (${worker.certificationType || 'W'})${expiredWarning}`
+        );
+    }).join('');
+}
+
+function openProjectDailyLogModal(logId) {
     if (!currentProject) {
         showNotification('Project data unavailable.', true);
         return;
     }
 
     const workerRoster = currentProject.workerRoster || [];
+    const existingLog = logId ? (currentProject.dailyLogs || []).find(l => l.id === logId) : null;
+    const isEdit = !!existingLog;
+    const today = getTodayLocal();
+    const selectedIds = (existingLog?.workers || []).map(w => w.id);
+    const defaultTotal = existingLog?.workersTotal ?? (selectedIds.length || workerRoster.length || 0);
 
     const modal = document.createElement('div');
     modal.className = 'modal active';
-    const today = getTodayLocal();
 
     modal.innerHTML = `
-        <div class="modal-content space-y-6" style="max-width: 640px;">
-            <div class="flex items-start justify-between">
-                <div>
-                    <h3 class="text-2xl font-semibold text-gray-900">Create Daily Log</h3>
-                    <p class="text-sm text-gray-600 mt-1">Project: ${escapeHtml(currentProject.projectNumber || 'Oversight Project')}</p>
-                </div>
-                <button class="text-gray-400 hover:text-gray-600 text-2xl leading-none" id="daily-log-modal-close">&times;</button>
-            </div>
+        <div class="modal-content" style="max-width: 640px;">
+            <h3>${isEdit ? 'Edit Daily Log' : 'Create Daily Log'}</h3>
             <form id="daily-log-form" class="space-y-4">
+                <p class="text-sm text-gray-600" style="margin-top:0;">Project: ${escapeHtml(currentProject.projectNumber || 'Oversight Project')}</p>
+                ${isEdit ? '<p class="text-xs text-gray-500">Selected workers should match the onsite total.</p>' : '<p class="text-xs text-gray-500">You may set the onsite total first and assign workers later via Header.</p>'}
                 <div>
                     <label for="daily-log-date" class="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                    <input type="date" id="daily-log-date" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" value="${today}" required>
+                    <input type="date" id="daily-log-date" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" value="${existingLog?.date || today}" required>
                 </div>
                 <div>
                     <label for="daily-log-inspector" class="block text-sm font-medium text-gray-700 mb-1">Inspector Name</label>
-                    <input type="text" id="daily-log-inspector" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspector name" value="${escapeHtml((typeof getInspectorProfile === 'function' ? getInspectorProfile() : {}).name || '')}" required>
-                </div>
-                <div>
-                    <p class="block text-sm font-medium text-gray-700 mb-2">Workers Onsite</p>
-                    <div class="max-h-48 overflow-y-auto space-y-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
-                        ${workerRoster.length ? workerRoster.map(worker => {
-                            const expiredItems = [];
-                            if (isDateExpired(worker.aheraExpiration)) expiredItems.push('AHERA');
-                            if (isDateExpired(worker.medicalExpiration)) expiredItems.push('Medical');
-                            if (isDateExpired(worker.respiratorFitExpiration)) expiredItems.push('Resp. Fit');
-                            if (isDateExpired(worker.leadExpiration)) expiredItems.push('Lead');
-                            if (isDateExpired(worker.leadMedExpiration)) expiredItems.push('Lead Med');
-                            const expiredWarning = expiredItems.length > 0
-                                ? `<span class="text-red-600 text-xs font-medium ml-1">(Expired: ${expiredItems.join(', ')})</span>`
-                                : '';
-                            return `
-                            <label class="flex items-center gap-2 text-sm text-gray-700">
-                                <input type="checkbox" class="daily-log-worker-checkbox h-4 w-4 text-indigo-600 border-gray-300 rounded" value="${worker.id}">
-                                <span>${escapeHtml(worker.name)} (${worker.certificationType || 'W'})${expiredWarning}</span>
-                            </label>`;
-                        }).join('') : '<p class="text-sm text-gray-500">No workers in the roster. Add workers via Worker Roster first, or specify the total number onsite below.</p>'}
-                    </div>
+                    <input type="text" id="daily-log-inspector" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspector name" value="${escapeHtml(existingLog?.inspectorName || (typeof getInspectorProfile === 'function' ? getInspectorProfile() : {}).name || '')}" required>
                 </div>
                 <div>
                     <label for="daily-log-workers-total" class="block text-sm font-medium text-gray-700 mb-1">Workers Onsite Total</label>
-                    <input type="number" id="daily-log-workers-total" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" min="0" value="${workerRoster.length || 0}" required>
+                    <input type="number" id="daily-log-workers-total" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" min="0" value="${defaultTotal}" required>
                 </div>
-                <div class="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                    <button type="button" class="btn btn-secondary btn-sm" id="daily-log-cancel-btn">Cancel</button>
-                    <button type="submit" class="btn btn-primary btn-sm">Create Daily Log</button>
+                <div>
+                    <p class="block text-sm font-medium text-gray-700 mb-2">Workers on site (names)</p>
+                    <div class="modal-selection-box max-h-48 overflow-y-auto">
+                        ${renderDailyLogWorkerCheckboxList(workerRoster, selectedIds)}
+                    </div>
                 </div>
             </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary modal-cancel-btn" id="daily-log-cancel-btn">Cancel</button>
+                <button type="submit" form="daily-log-form" class="btn btn-primary modal-save-btn">${isEdit ? 'Save Changes' : 'Create Daily Log'}</button>
+            </div>
         </div>
     `;
 
     document.body.appendChild(modal);
 
     const closeModal = () => modal.remove();
-    
-    // Track mouse down position to prevent closing when dragging from inside modal
     let mouseDownOnBackdrop = false;
-    
-    modal.addEventListener('mousedown', (e) => {
-        mouseDownOnBackdrop = (e.target === modal);
-    });
-    
+    modal.addEventListener('mousedown', (e) => { mouseDownOnBackdrop = (e.target === modal); });
     modal.addEventListener('click', (event) => {
-        if (event.target === modal && mouseDownOnBackdrop) {
-            closeModal();
-        }
+        if (event.target === modal && mouseDownOnBackdrop) closeModal();
         mouseDownOnBackdrop = false;
     });
-    modal.querySelector('#daily-log-modal-close')?.addEventListener('click', closeModal);
     modal.querySelector('#daily-log-cancel-btn')?.addEventListener('click', closeModal);
 
-    // Auto-update workers total based on checkboxes
     const workerCheckboxes = Array.from(modal.querySelectorAll('.daily-log-worker-checkbox'));
     const workersTotalInput = modal.querySelector('#daily-log-workers-total');
     workerCheckboxes.forEach(cb => cb.addEventListener('change', () => {
@@ -3764,6 +3790,12 @@ function openProjectDailyLogModal() {
 
         const selectedWorkerIds = workerCheckboxes.filter(cb => cb.checked).map(cb => cb.value);
         const workersTotal = parseInt(workersTotalInput.value, 10) || 0;
+        const selectedCount = selectedWorkerIds.length;
+
+        if (isEdit && workersTotal > 0 && selectedCount !== workersTotal) {
+            showNotification(`Select exactly ${workersTotal} worker${workersTotal === 1 ? '' : 's'} to match the onsite total (${selectedCount} selected).`, true);
+            return;
+        }
 
         const workersOnsite = selectedWorkerIds.map(id => workerRoster.find(w => w.id === id)).filter(Boolean).map(w => ({
             id: w.id,
@@ -3771,10 +3803,21 @@ function openProjectDailyLogModal() {
             certificationType: w.certificationType
         }));
 
-        // Capture active containments at the time of log creation
+        if (isEdit) {
+            existingLog.date = dateValue;
+            existingLog.inspectorName = inspectorName;
+            existingLog.workers = workersOnsite;
+            existingLog.workersTotal = workersTotal;
+            saveCurrentProject();
+            showNotification('Daily log updated.');
+            closeModal();
+            renderProject();
+            return;
+        }
+
         const activeContainmentNames = (currentProject.containments || [])
             .filter(c => ACTIVE_CONTAINMENT_STAGES.includes(normalizeStage(c.stage)))
-            .map(c => c.name || 'Unnamed Containment');
+            .map(c => c.name || 'Unnamed');
 
         const dailyLog = {
             id: generateId(),
@@ -3790,10 +3833,92 @@ function openProjectDailyLogModal() {
         if (!currentProject.dailyLogs) currentProject.dailyLogs = [];
         currentProject.dailyLogs.push(dailyLog);
         saveCurrentProject();
-        showNotification('Daily log created.');
+        if (workersTotal > 0 && selectedCount !== workersTotal) {
+            showNotification('Daily log created. Use Header to assign worker names until the count matches the onsite total.');
+        } else {
+            showNotification('Daily log created.');
+        }
         closeModal();
         navigateToSubview('dailyLog');
     });
+}
+
+function buildNegativePressureHtml(containments, readingsById) {
+    if (!containments.length) return '';
+    const readings = readingsById || {};
+    return `
+        <div class="notice-box notice-box--info" style="display:flex;flex-direction:column;gap:10px;">
+            <div>
+                <p style="margin:0;font-weight:600;color:var(--text);text-transform:none;letter-spacing:0;">Negative Pressure Readings (Optional)</p>
+                <p style="margin:6px 0 0;">Record negative pressure in Inches of Water Column (inWC) for each containment in Active Abatement.</p>
+            </div>
+            ${containments.map(c => {
+                const val = readings[c.id];
+                const valueAttr = val !== undefined && val !== null && val !== '' ? ` value="${val}"` : '';
+                return `
+                <div class="np-row">
+                    <label class="np-name">${escapeHtml(getContainmentDisplayName(c.name || 'Containment'))}</label>
+                    <input type="number"
+                        class="negative-pressure-input np-input"
+                        data-containment-id="${c.id}"
+                        data-containment-name="${escapeHtml(c.name || 'Containment')}"
+                        step="0.0001"
+                        max="0"
+                        placeholder="-0.00"${valueAttr}>
+                    <span class="np-unit">inWC</span>
+                </div>`;
+            }).join('')}
+        </div>
+    `;
+}
+
+async function preparePhotoFilesForUpload(files) {
+    const out = [];
+    for (const file of files) {
+        let useFile = file;
+        const ext = (file.name || '').split('.').pop()?.toLowerCase() || '';
+        const isHeic = ext === 'heic' || ext === 'heif' || file.type === 'image/heic' || file.type === 'image/heif';
+        if (isHeic && window.electronAPI?.convertImageForUpload) {
+            try {
+                const buf = await file.arrayBuffer();
+                const converted = await window.electronAPI.convertImageForUpload(Array.from(new Uint8Array(buf)), file.name);
+                if (converted?.success && converted.base64) {
+                    const mime = converted.mimeType || 'image/jpeg';
+                    useFile = await fetch(`data:${mime};base64,${converted.base64}`).then(r => r.blob());
+                } else {
+                    showNotification(converted?.error || 'HEIC could not be converted; save as JPEG from Photos and retry.', true);
+                    continue;
+                }
+            } catch {
+                showNotification('HEIC could not be converted; save as JPEG from Photos and retry.', true);
+                continue;
+            }
+        }
+        out.push(useFile);
+    }
+    return out;
+}
+
+function bindLogPhotoPreviews(container, getFiles, setFiles) {
+    const render = () => {
+        const files = getFiles();
+        container.innerHTML = files.map((f, i) => `
+            <div class="relative inline-block">
+                <img src="${URL.createObjectURL(f)}" class="log-photo-preview" alt="Preview">
+                <button type="button" class="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white rounded-full text-xs leading-none hover:bg-red-600" data-photo-index="${i}">&times;</button>
+            </div>
+        `).join('');
+        container.querySelectorAll('[data-photo-index]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const idx = parseInt(btn.dataset.photoIndex, 10);
+                const next = getFiles().slice();
+                next.splice(idx, 1);
+                setFiles(next);
+                render();
+            });
+        });
+    };
+    return render;
 }
 
 function openProjectDailyLogEntryModal(logId) {
@@ -3807,42 +3932,15 @@ function openProjectDailyLogEntryModal(logId) {
         return STAGES_REQUIRING_PRESSURE.includes(stage) && !c.regulatedArea;
     });
 
-    const negativePressureHtml = containmentsRequiringPressure.length > 0 ? `
-        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
-            <div>
-                <p class="text-sm font-medium text-blue-800">Negative Pressure Readings (Optional)</p>
-                <p class="text-xs text-blue-600 mt-1">Record negative pressure in Inches of Water Column (inWC) for each containment in Active Abatement.</p>
-            </div>
-            ${containmentsRequiringPressure.map(c => `
-                <div class="flex items-center gap-3">
-                    <label class="flex-1 text-sm text-gray-700">${escapeHtml(c.name || 'Containment')}</label>
-                    <div class="flex items-center gap-2">
-                        <input type="number"
-                            class="negative-pressure-input w-28 border border-gray-300 rounded-lg p-2 text-right focus:ring-2 focus:ring-indigo-500"
-                            data-containment-id="${c.id}"
-                            data-containment-name="${escapeHtml(c.name || 'Containment')}"
-                            step="0.0001"
-                            max="0"
-                            placeholder="-0.00">
-                        <span class="text-xs text-gray-500">inWC</span>
-                    </div>
-                </div>
-            `).join('')}
-        </div>
-    ` : '';
+    const negativePressureHtml = buildNegativePressureHtml(containmentsRequiringPressure);
 
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.innerHTML = `
-        <div class="modal-content space-y-6" style="max-width: 600px;">
-            <div class="flex items-start justify-between">
-                <div>
-                    <h3 class="text-2xl font-semibold text-gray-900">Add Log Entry</h3>
-                    <p class="text-sm text-gray-600 mt-1">Project: ${escapeHtml(currentProject.projectNumber || 'Oversight Project')}</p>
-                </div>
-                <button class="text-gray-400 hover:text-gray-600 text-2xl leading-none" id="daily-log-entry-close">&times;</button>
-            </div>
+        <div class="modal-content" style="max-width: 600px;">
+            <h3>Add Log Entry</h3>
             <form id="daily-log-entry-form" class="space-y-4">
+                <p class="text-sm text-gray-600" style="margin-top:0;">Project: ${escapeHtml(currentProject.projectNumber || 'Oversight Project')}</p>
                 <div>
                     <label for="daily-log-entry-hour" class="block text-sm font-medium text-gray-700 mb-1">Hour</label>
                     <input type="time" id="daily-log-entry-hour" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" required>
@@ -3854,14 +3952,14 @@ function openProjectDailyLogEntryModal(logId) {
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Photos (max 5)</label>
-                    <input type="file" id="daily-log-entry-photos" accept="image/*" multiple class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    <input type="file" id="daily-log-entry-photos" accept="image/*,.heic,.heif" multiple class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
                     <div id="daily-log-entry-photo-previews" class="mt-2 flex flex-wrap gap-2"></div>
                 </div>
-                <div class="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                    <button type="button" class="btn btn-secondary btn-sm" id="daily-log-entry-cancel">Cancel</button>
-                    <button type="submit" class="btn btn-primary btn-sm">Add Entry</button>
-                </div>
             </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary modal-cancel-btn" id="daily-log-entry-cancel">Cancel</button>
+                <button type="submit" form="daily-log-entry-form" class="btn btn-primary modal-save-btn">Add Entry</button>
+            </div>
         </div>
     `;
 
@@ -3882,7 +3980,6 @@ function openProjectDailyLogEntryModal(logId) {
         }
         mouseDownOnBackdrop = false;
     });
-    modal.querySelector('#daily-log-entry-close')?.addEventListener('click', closeModal);
     modal.querySelector('#daily-log-entry-cancel')?.addEventListener('click', closeModal);
 
     const MAX_PHOTOS = 5;
@@ -3890,27 +3987,17 @@ function openProjectDailyLogEntryModal(logId) {
 
     const fileInput = modal.querySelector('#daily-log-entry-photos');
     const previewsEl = modal.querySelector('#daily-log-entry-photo-previews');
+    const renderPhotoPreviews = bindLogPhotoPreviews(
+        previewsEl,
+        () => selectedPhotoFiles,
+        (next) => { selectedPhotoFiles = next; }
+    );
 
-    const renderPhotoPreviews = () => {
-        previewsEl.innerHTML = selectedPhotoFiles.map((f, i) => `
-            <div class="relative inline-block">
-                <img src="${URL.createObjectURL(f)}" class="w-20 h-20 object-cover rounded border border-gray-200" alt="Preview">
-                <button type="button" class="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white rounded-full text-xs leading-none hover:bg-red-600" data-photo-index="${i}">&times;</button>
-            </div>
-        `).join('');
-        previewsEl.querySelectorAll('[data-photo-index]').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const idx = parseInt(btn.dataset.photoIndex, 10);
-                selectedPhotoFiles.splice(idx, 1);
-                renderPhotoPreviews();
-            });
-        });
-    };
-
-    fileInput.addEventListener('change', (e) => {
+    fileInput.addEventListener('change', async (e) => {
         const files = Array.from(e.target.files || []);
         if (files.length === 0) return;
-        selectedPhotoFiles = [...selectedPhotoFiles, ...files].slice(0, MAX_PHOTOS);
+        const prepared = await preparePhotoFilesForUpload(files);
+        selectedPhotoFiles = [...selectedPhotoFiles, ...prepared].slice(0, MAX_PHOTOS);
         fileInput.value = '';
         renderPhotoPreviews();
     });
@@ -3987,45 +4074,19 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
         return STAGES_REQUIRING_PRESSURE.includes(stage) && !c.regulatedArea;
     });
 
-    const negativePressureHtml = containmentsRequiringPressure.length > 0 ? `
-        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
-            <div>
-                <p class="text-sm font-medium text-blue-800">Negative Pressure Readings (Optional)</p>
-                <p class="text-xs text-blue-600 mt-1">Record negative pressure in Inches of Water Column (inWC) for each containment in Active Abatement.</p>
-            </div>
-            ${containmentsRequiringPressure.map(c => {
-                const reading = (entry.negativePressure || []).find(np => np.containmentId === c.id);
-                return `
-                <div class="flex items-center gap-3">
-                    <label class="flex-1 text-sm text-gray-700">${escapeHtml(c.name || 'Containment')}</label>
-                    <div class="flex items-center gap-2">
-                        <input type="number"
-                            class="negative-pressure-input w-28 border border-gray-300 rounded-lg p-2 text-right focus:ring-2 focus:ring-indigo-500"
-                            data-containment-id="${c.id}"
-                            data-containment-name="${escapeHtml(c.name || 'Containment')}"
-                            step="0.0001"
-                            max="0"
-                            value="${reading ? reading.pressure : ''}"
-                            placeholder="-0.00">
-                        <span class="text-xs text-gray-500">inWC</span>
-                    </div>
-                </div>
-            `}).join('')}
-        </div>
-    ` : '';
+    const readingsById = {};
+    (entry.negativePressure || []).forEach(np => {
+        if (np.containmentId) readingsById[np.containmentId] = np.pressure;
+    });
+    const negativePressureHtml = buildNegativePressureHtml(containmentsRequiringPressure, readingsById);
 
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.innerHTML = `
-        <div class="modal-content space-y-6" style="max-width: 600px;">
-            <div class="flex items-start justify-between">
-                <div>
-                    <h3 class="text-2xl font-semibold text-gray-900">Edit Log Entry</h3>
-                    <p class="text-sm text-gray-600 mt-1">Project: ${escapeHtml(currentProject.projectNumber || 'Oversight Project')}</p>
-                </div>
-                <button class="text-gray-400 hover:text-gray-600 text-2xl leading-none" id="daily-log-entry-edit-close">&times;</button>
-            </div>
+        <div class="modal-content" style="max-width: 600px;">
+            <h3>Edit Log Entry</h3>
             <form id="daily-log-entry-edit-form" class="space-y-4">
+                <p class="text-sm text-gray-600" style="margin-top:0;">Project: ${escapeHtml(currentProject.projectNumber || 'Oversight Project')}</p>
                 <div>
                     <label for="daily-log-entry-edit-hour" class="block text-sm font-medium text-gray-700 mb-1">Hour</label>
                     <input type="time" id="daily-log-entry-edit-hour" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" value="${escapeHtml(entry.hour || '')}" required>
@@ -4037,14 +4098,14 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Photos (max 5)</label>
-                    <input type="file" id="daily-log-entry-edit-photos" accept="image/*" multiple class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    <input type="file" id="daily-log-entry-edit-photos" accept="image/*,.heic,.heif" multiple class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
                     <div id="daily-log-entry-edit-photo-previews" class="mt-2 flex flex-wrap gap-2"></div>
                 </div>
-                <div class="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                    <button type="button" class="btn btn-secondary btn-sm" id="daily-log-entry-edit-cancel">Cancel</button>
-                    <button type="submit" class="btn btn-primary btn-sm">Save Changes</button>
-                </div>
             </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary modal-cancel-btn" id="daily-log-entry-edit-cancel">Cancel</button>
+                <button type="submit" form="daily-log-entry-edit-form" class="btn btn-primary modal-save-btn">Save Changes</button>
+            </div>
         </div>
     `;
 
@@ -4057,7 +4118,6 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
         if (e.target === modal && mouseDownOnBackdrop) closeModal();
         mouseDownOnBackdrop = false;
     });
-    modal.querySelector('#daily-log-entry-edit-close')?.addEventListener('click', closeModal);
     modal.querySelector('#daily-log-entry-edit-cancel')?.addEventListener('click', closeModal);
 
     const MAX_PHOTOS = 5;
@@ -4070,13 +4130,13 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
         const items = [];
         existingPhotos.forEach((p, i) => {
             items.push(`<div class="relative inline-block">
-                <img src="${safeImageSrc(p.base64)}" class="w-20 h-20 object-cover rounded border border-gray-200" alt="Photo">
+                <img src="${safeImageSrc(p.base64)}" class="log-photo-preview" alt="Photo">
                 <button type="button" class="remove-existing-photo absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white rounded-full text-xs leading-none hover:bg-red-600" data-index="${i}">&times;</button>
             </div>`);
         });
         newPhotoFiles.forEach((f, i) => {
             items.push(`<div class="relative inline-block">
-                <img src="${URL.createObjectURL(f)}" class="w-20 h-20 object-cover rounded border border-gray-200" alt="Preview">
+                <img src="${URL.createObjectURL(f)}" class="log-photo-preview" alt="Preview">
                 <button type="button" class="remove-new-photo absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white rounded-full text-xs leading-none hover:bg-red-600" data-index="${i}">&times;</button>
             </div>`);
         });
@@ -4095,12 +4155,13 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
         });
     };
 
-    modal.querySelector('#daily-log-entry-edit-photos').addEventListener('change', (e) => {
+    modal.querySelector('#daily-log-entry-edit-photos').addEventListener('change', async (e) => {
         const files = Array.from(e.target.files || []);
         if (files.length === 0) return;
         const total = existingPhotos.length + newPhotoFiles.length;
         const remaining = Math.max(0, MAX_PHOTOS - total);
-        newPhotoFiles = [...newPhotoFiles, ...files.slice(0, remaining)].slice(0, MAX_PHOTOS - existingPhotos.length);
+        const prepared = await preparePhotoFilesForUpload(files.slice(0, remaining));
+        newPhotoFiles = [...newPhotoFiles, ...prepared].slice(0, MAX_PHOTOS - existingPhotos.length);
         e.target.value = '';
         renderEditPhotoPreviews();
     });
@@ -4180,7 +4241,9 @@ function renderDailyLogView(project) {
     const logsHtml = dailyLogs.length
         ? dailyLogs.map(log => {
             const workersList = (log.workers || []).map(w => `${w.name || 'Worker'}${w.certificationType ? ` (${w.certificationType})` : ''}`).join(', ') || 'No workers listed';
-            const workLocation = (log.activeContainments || []).length > 0 ? log.activeContainments.join(', ') : 'N/A';
+            const workLocation = (log.activeContainments || []).length > 0
+                ? log.activeContainments.map(n => getContainmentDisplayName(n)).join(', ')
+                : 'N/A';
             const entriesHtml = (log.entries || []).length
                 ? log.entries.map(entry => `
                     <div class="bg-white border border-gray-100 rounded-lg p-4 mt-2">
@@ -4191,7 +4254,7 @@ function renderDailyLogView(project) {
                         <p class="text-sm text-gray-700 whitespace-pre-wrap">${escapeHtml(entry.description || entry.notes || '')}</p>
                         ${entry.negativePressure && entry.negativePressure.length > 0 ? `
                             <div class="mt-2 text-xs text-blue-700">
-                                ${entry.negativePressure.map(np => `<span class="mr-3">${escapeHtml(np.containmentName)}: ${np.pressure} inWC</span>`).join('')}
+                                ${entry.negativePressure.map(np => `<span class="mr-3">${escapeHtml(getContainmentDisplayName(np.containmentName))}: ${np.pressure} inWC</span>`).join('')}
                             </div>
                         ` : ''}
                         ${entry.photos && entry.photos.length > 0 ? `
@@ -4396,15 +4459,14 @@ function openPrintAirSamplesModal() {
 
     const sampleCheckboxesHtml = airSamples.map(sample => {
         const timeEl = calculateTimeElapsed(sample.startTime, sample.stopTime);
-        return `
-            <label class="flex items-start gap-3 p-3 rounded-lg cursor-pointer" style="background:#f9fafb;">
-                <input type="checkbox" class="print-sample-checkbox mt-0.5 h-4 w-4" value="${sample.id}" checked>
-                <div class="flex-1 min-w-0">
-                    <p class="font-medium text-sm" style="color:#111827;">${escapeHtml(sample.sampleId || sample.id || 'No ID')}</p>
-                    <p class="text-xs" style="color:#6b7280;">${sample.type || 'Unknown'} · ${sample.startTime || '--:--'} - ${sample.stopTime || '--:--'}${timeEl !== null ? ` (${timeEl} min)` : ''}</p>
-                </div>
-            </label>
-        `;
+        return buildModalSelectionOption(
+            `print-air-sample-${sample.id}`,
+            'print-sample-checkbox',
+            sample.id,
+            true,
+            escapeHtml(sample.sampleId || sample.id || 'No ID'),
+            `${sample.type || 'Unknown'} · ${sample.startTime || '--:--'} - ${sample.stopTime || '--:--'}${timeEl !== null ? ` (${timeEl} min)` : ''}`
+        );
     }).join('');
 
     const modal = createModal('Print Air Sample Request', `
@@ -4419,7 +4481,7 @@ function openPrintAirSamplesModal() {
                         <button type="button" id="print-air-select-none" class="text-xs font-medium" style="color:#4f46e5;">Select None</button>
                     </div>
                 </div>
-                <div id="print-air-samples-list" class="grid grid-cols-1 gap-2 max-h-48 overflow-y-auto p-1" style="border:1px solid #e5e7eb; border-radius:8px;">
+                <div id="print-air-samples-list" class="modal-selection-box max-h-48 overflow-y-auto">
                     ${sampleCheckboxesHtml}
                 </div>
                 <p id="print-air-sample-count" class="text-xs text-gray-500 mt-2"><strong>${airSamples.length}</strong> sample${airSamples.length > 1 ? 's' : ''} selected</p>
@@ -5502,3 +5564,4 @@ window.deleteAirSample = deleteAirSample;
 window.openPrintAirSamplesModal = openPrintAirSamplesModal;
 window.openEditWorkerModal = openEditWorkerModal;
 window.exportWorkerRosterDoc = exportWorkerRosterDoc;
+window.getContainmentDisplayName = getContainmentDisplayName;

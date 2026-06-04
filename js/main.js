@@ -515,7 +515,7 @@ function openNewProjectModal(existingProject = null) {
     const projectFolderPath = isEdit ? (existingProject.projectFolderPath || '') : '';
     
     const content = `
-        <div class="space-y-2">
+        <div class="space-y-4">
             <div class="grid grid-cols-2 gap-2">
                 <div>
                     <label class="block text-xs font-medium text-gray-700 mb-0.5">Project Number *</label>
@@ -688,16 +688,18 @@ function createModal(title, content, onSave) {
 
     const modal = document.createElement('div');
     modal.className = 'modal active';
-    modal.innerHTML = `
-        <div class="modal-content max-h-[90vh] overflow-y-auto">
-            <h3 class="text-lg font-semibold mb-3">${title}</h3>
-            ${content}
-            <div class="modal-footer flex justify-end gap-3 mt-4 pt-5 border-t">
-                <button type="button" class="btn btn-secondary modal-cancel-btn py-2.5 px-5">Cancel</button>
-                <button type="button" class="btn btn-primary modal-save-btn py-2.5 px-5">Save</button>
-                </div>
+    const modalContent = document.createElement('div');
+    modalContent.className = 'modal-content';
+    modalContent.style.maxWidth = '600px';
+    modalContent.innerHTML = `
+        <h3>${escapeHtml(title)}</h3>
+        ${content}
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-cancel-btn">Cancel</button>
+            <button type="button" class="btn btn-primary modal-save-btn">Save</button>
         </div>
     `;
+    modal.appendChild(modalContent);
     
     // Track mouse down position to prevent closing when dragging from inside modal
     let mouseDownOnBackdrop = false;
@@ -716,8 +718,8 @@ function createModal(title, content, onSave) {
         mouseDownOnBackdrop = false;
     });
     
-    modal.querySelector('.modal-cancel-btn').addEventListener('click', () => modal.remove());
-    modal.querySelector('.modal-save-btn').addEventListener('click', () => {
+    modalContent.querySelector('.modal-cancel-btn')?.addEventListener('click', () => modal.remove());
+    modalContent.querySelector('.modal-save-btn')?.addEventListener('click', () => {
         const result = onSave();
         if (result !== false) {
             modal.remove();

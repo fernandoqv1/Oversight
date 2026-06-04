@@ -1,6 +1,6 @@
 {
   "name": "oversight-desktop",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Oversight Desktop - Standalone offline project management application",
   "main": "main.js",
   "scripts": {
@@ -29,6 +29,7 @@
     "docxtemplater-image-module-free": "^1.1.1",
     "electron-updater": "^6.8.3",
     "file-saver": "^2.0.5",
+    "heic-convert": "^2.1.0",
     "jszip": "^3.10.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },

@@ -34,6 +34,13 @@
     if (s == null) return '';
     return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   }
+  function containmentLabel(name) {
+    if (typeof window.getContainmentDisplayName === 'function') {
+      return window.getContainmentDisplayName(name);
+    }
+    const n = (name || 'Containment').trim();
+    return n ? `${n} Containment` : 'Containment';
+  }
   function displayUnit(u, fallback) {
     if (u === 'SF') return 'ft\u00b2';
     return u || fallback || '';
@@ -400,9 +407,8 @@
       wrap.innerHTML = '<div style="padding:8px 12px;font-size:12px;color:var(--side-text-faint);">No active projects</div>';
     } else {
       wrap.innerHTML = all.slice(0, 12).map(p => {
-        const status = projectStatus(p);
         return `<a href="project.html?id=${esc(p.id)}" class="proj-item" data-active="${activeProjectId === p.id ? 'true' : 'false'}" title="${esc(siteName(p))}">
-          <span class="proj-dot" data-status="${status}"></span>
+          <span class="proj-dot" data-status="${projectStatus(p)}"></span>
           <span class="proj-text">
             <span class="proj-num">${esc(p.projectNumber || 'No #')}</span>
             <span class="proj-site">${esc(siteName(p))}</span>
@@ -442,12 +448,17 @@
       const name = document.getElementById('inspector-profile-name');
       const av = document.getElementById('ins-avatar');
       if (!raw) {
-        if (name) name.textContent = 'Set profile';
+        if (name) name.textContent = 'Set Profile';
         if (av) av.textContent = '?';
         return;
       }
       const p = JSON.parse(raw);
-      const fullName = p.name || p.fullName || 'Inspector';
+      const fullName = (p.name || p.fullName || '').trim();
+      if (!fullName) {
+        if (name) name.textContent = 'Set Profile';
+        if (av) av.textContent = '?';
+        return;
+      }
       if (name) name.textContent = fullName;
       if (av) {
         const parts = fullName.split(/\s+/).filter(Boolean);
@@ -642,7 +653,6 @@
     const view = document.getElementById('view-today');
     if (!view) return;
     const projs = getProjects().filter(p => !p.archived);
-    const attn = getAttentionItems();
     const running = getRunningAirSamples();
     const acts = getRecentActivity();
     const totalSamples = projs.reduce((n, p) => n + ((p.airSamples || []).length), 0);
@@ -660,11 +670,11 @@
         </div>
       </div>
       <div class="today-grid">
-        <section class="panel attn-panel">
-          <div class="panel-head"><h2 class="panel-title">Needs attention</h2><span class="muted small">${attn.length} item${attn.length === 1 ? '' : 's'}</span></div>
-          ${attn.length === 0
-            ? '<ul class="attn-list"><li class="empty-row">Nothing urgent. Good work.</li></ul>'
-            : `<ul class="attn-list">${attn.map(a => `<li class="attn-row" data-href="${esc(a.href)}"><div class="attn-sev" data-sev="${esc(a.sev)}">${ICONS.alert}</div><div class="attn-text"><div class="attn-label">${esc(a.label)}</div><div class="attn-meta">${esc(a.meta)}</div></div></li>`).join('')}</ul>`}
+        <section class="panel activity-panel">
+          <div class="panel-head"><h2 class="panel-title">Recent activity</h2></div>
+          ${acts.length === 0
+            ? '<ul class="activity-list"><li class="empty-row">Nothing yet today.</li></ul>'
+            : `<ul class="activity-list">${acts.map(a => `<li class="activity-row"><span class="act-marker act-${esc(a.type)}${a.status ? ` act-${esc(a.status)}` : ''}"></span><span class="act-time">${fmtDate(a.when)} ${fmtTime(a.when)}</span><span class="act-who">${esc(a.who)}</span><span class="act-text">${esc(a.text)}</span></li>`).join('')}</ul>`}
         </section>
         <section class="panel running-panel">
           <div class="panel-head"><h2 class="panel-title">Running samples</h2><span class="muted small">${running.length}</span></div>
@@ -674,12 +684,6 @@
                 const elapsed = ((Date.now() - new Date(r.sample.startTime).getTime()) / 36e5).toFixed(1);
                 return `<li class="running-row" data-href="project.html?id=${esc(r.project.id)}&tab=samples"><div class="run-head"><span class="code mono">${esc(sampleDisplayId(r.sample))}</span><span class="muted small">${esc(r.project.projectNumber || siteName(r.project))}</span></div><div class="run-meta"><span>Elapsed <b>${elapsed}h</b></span><span class="muted">${esc(r.sample.type || '')}</span></div><div class="progress"><span style="width:${Math.min(100, elapsed * 12)}%"></span></div></li>`;
               }).join('')}</ul>`}
-        </section>
-        <section class="panel activity-panel">
-          <div class="panel-head"><h2 class="panel-title">Recent activity</h2></div>
-          ${acts.length === 0
-            ? '<ul class="activity-list"><li class="empty-row">Nothing yet today.</li></ul>'
-            : `<ul class="activity-list">${acts.map(a => `<li class="activity-row"><span class="act-marker act-${esc(a.type)}${a.status ? ` act-${esc(a.status)}` : ''}"></span><span class="act-time">${fmtDate(a.when)} ${fmtTime(a.when)}</span><span class="act-who">${esc(a.who)}</span><span class="act-text">${esc(a.text)}</span></li>`).join('')}</ul>`}
         </section>
         <section class="panel snap-panel">
           <div class="panel-head"><h2 class="panel-title">Snapshot</h2></div>
@@ -1037,7 +1041,7 @@
         <div class="kpi"><div class="kpi-l">Materials</div><div class="kpi-v"><span class="kpi-num">${materials.length}</span></div></div>
       </div>
       <div class="ovr-grid">
-        <section class="panel">
+        <section class="panel panel-lifecycle">
           <div class="panel-head"><h2 class="panel-title">Containment Stages</h2><button class="btn-link small" data-action="new-cont">+ New containment</button></div>
           ${conts.length === 0
             ? '<div class="empty-row" style="padding:24px;">No containments yet.</div>'
@@ -1046,7 +1050,7 @@
                 return `<div class="lifecycle-row">
                   <div class="lc-head">
                     <span class="lc-code mono">${esc(c.containmentNumber || c.code || '—')}</span>
-                    <span class="lc-name">${esc(c.name || 'Unnamed')}</span>
+                    <span class="lc-name">${esc(containmentLabel(c.name || 'Unnamed'))}</span>
                     <span class="stage-badge ${stageClass(c.stage)}"><span class="stage-dot"></span>${esc(c.stage || '—')}</span>
                   </div>
                   <div class="lc-track">${STAGES.map((s, i) => {
@@ -1084,13 +1088,13 @@
       });
     });
     (p.containments || []).forEach(c => {
-      (c.stageHistory || []).forEach(h => out.push({ when:h.date, who:'STG', type:'stage', text:`${c.name || ''} → ${h.stage}` }));
+      (c.stageHistory || []).forEach(h => out.push({ when:h.changedAt || h.date, who:'STG', type:'stage', text:`${containmentLabel(c.name || '')} → ${h.stage}` }));
       (c.visualInspections || []).forEach(v => out.push({
         when: v.createdAt || v.date,
         who: 'VIS',
         type: 'inspection',
         status: v.passed ? 'pass' : 'fail',
-        text: `${c.name || ''} ${v.type || 'Visual'} inspection ${v.passed ? 'passed' : 'failed'}`
+        text: `${containmentLabel(c.name || '')} ${v.type || 'Visual'} inspection ${v.passed ? 'passed' : 'failed'}`
       }));
     });
     out.sort((a, b) => activitySortValue(b.when) - activitySortValue(a.when));
@@ -1115,7 +1119,7 @@
             ${conts.length === 0 ? '<div class="empty-row" style="padding:24px;">No containments yet.</div>'
               : conts.map(c => `<button class="md-row" data-active="${c.id === containSelectedId ? 'true' : 'false'}" data-id="${esc(c.id)}">
                   <div class="md-row-top"><span class="md-code mono">${esc(c.containmentNumber || c.code || '—')}</span><span class="stage-badge ${stageClass(c.stage)}"><span class="stage-dot"></span>${esc((c.stage || '').replace(/^Containment /, ''))}</span></div>
-                  <div class="md-row-name">${esc(c.name || 'Unnamed')}</div>
+                  <div class="md-row-name">${esc(containmentLabel(c.name || 'Unnamed'))}</div>
                   <div class="md-row-stats">
                     <span class="mini-stat">${ICONS.doc} ${(c.materials || []).length} mat</span>
                     <span class="mini-stat">${ICONS.bell} ${(c.airSamples || []).length} samp</span>
@@ -1151,7 +1155,7 @@
     const completed = samples.filter(s => s.stopTime).length;
     const pendingSamples = samples.length - completed;
     const historyItems = [
-      ...(c.stageHistory || []).map(h => ({ kind:'stage', when:h.date, label:h.stage || 'Stage updated', meta:h.inspectorName || '' })),
+      ...(c.stageHistory || []).map(h => ({ kind:'stage', when:h.changedAt || h.date, label:h.stage || 'Stage updated', meta:h.inspectorName || '' })),
       ...(c.visualInspections || []).map(v => ({
         kind:'inspection',
         when:v.createdAt || v.date,
@@ -1169,7 +1173,7 @@
             <span class="pill-num mono">${esc(c.containmentNumber || '—')}</span>
             <span class="stage-badge ${stageClass(c.stage)}"><span class="stage-dot"></span>${esc(displayStage)}</span>
           </div>
-          <h2 class="cdetail-title">${esc(c.name || 'Unnamed')}</h2>
+          <h2 class="cdetail-title">${esc(containmentLabel(c.name || 'Unnamed'))}</h2>
           <div class="cdetail-meta">${c.location ? `<span>${ICONS.bldg} ${esc(c.location)}</span>` : ''}${c.contractor ? `<span>${ICONS.user} ${esc(c.contractor)}</span>` : ''}</div>
         </div>
         <div class="cdetail-actions">
@@ -1191,11 +1195,6 @@
         ${stageDone ? '' : `<span class="cnext-due muted small">${esc(c.dueDate ? 'Due ' + fmtDateFull(c.dueDate) : '')}</span>`}
       </div>
       <div class="cdetail-cols">
-        <section class="panel">
-          <div class="panel-head"><h2 class="panel-title">Recent logs</h2></div>
-          ${logs.length === 0 ? '<div class="empty-row" style="padding:18px;">No log entries yet.</div>'
-            : `<ul class="log-list">${logs.slice(0, 6).map(L => `<li class="log-row"><div class="log-date"><div class="log-day mono">${new Date(L.date || L.entry.timestamp || Date.now()).getDate()}</div><div class="log-mon">${new Date(L.date || L.entry.timestamp || Date.now()).toLocaleString(undefined, { month:'short' })}</div></div><div><div class="log-meta"><span class="muted">${esc(L.entry.shift || '')}</span><span class="muted">${esc(L.entry.crewCount ? L.entry.crewCount + ' workers' : '')}</span></div><div class="log-note">${esc((L.entry.notes || '').slice(0, 180))}</div></div></li>`).join('')}</ul>`}
-        </section>
         <section class="panel">
           <div class="panel-head"><h2 class="panel-title">Samples</h2></div>
           ${samples.length === 0 ? '<div class="empty-row" style="padding:18px;">No samples.</div>'
@@ -1351,7 +1350,10 @@
         : `<div class="timeline">${logs.map(L => {
             const d = new Date(L.date);
             const entries = (L.entries || []).slice().sort((a, b) => entrySortValue(b) - entrySortValue(a));
-            return `<div class="tl-day"><div class="tl-day-head"><div class="tl-date"><div class="tl-d mono">${d.getDate()}</div><div class="tl-m">${d.toLocaleString(undefined, { month:'short' })}</div></div><div class="tl-rule"></div><button class="btn-ghost small" data-action="add-entry" data-log-id="${esc(L.id)}">+ Entry</button><button class="btn-ghost small" data-action="edit-log" data-log-id="${esc(L.id)}">${ICONS.pencil} Header</button></div>
+            const workersListed = (L.workers || []).length;
+            const workersTotal = L.workersTotal ?? workersListed;
+            const workersGap = workersTotal > workersListed;
+            return `<div class="tl-day"><div class="tl-day-head"><div class="tl-date"><div class="tl-d mono">${d.getDate()}</div><div class="tl-m">${d.toLocaleString(undefined, { month:'short' })}</div></div><div class="tl-rule"></div>${workersGap ? `<span class="tag" style="background:var(--warn-bg);color:var(--warn);" title="Assign workers via Header">${workersListed} of ${workersTotal} workers identified</span>` : ''}<button class="btn-ghost small" data-action="add-entry" data-log-id="${esc(L.id)}">+ Entry</button><button class="btn-ghost small" data-action="edit-log" data-log-id="${esc(L.id)}">${ICONS.pencil} Edit Header</button></div>
               <div class="tl-day-body">
                 ${entries.length === 0 ? '<div class="muted small" style="padding:8px 0;">No entries.</div>'
                   : entries.map(e => renderLogEntryCard(e, L.id)).join('')}
@@ -1472,6 +1474,7 @@
     return labels;
   }
   function workerDateCell(label, dateStr) {
+    if (!dateStr) return '';
     const exp = isWorkerDateExpired(dateStr);
     return `<div class="worker-date-cell"><span class="worker-date-lbl">${label}</span><span class="${exp ? 'expired' : ''}">${formatWorkerDateText(dateStr)}</span></div>`;
   }
@@ -1541,13 +1544,13 @@
               <select id="worker-type" required><option value="W">Worker (W)</option><option value="S">Supervisor (S)</option></select>
             </div>
           </div>
-          <div class="worker-field"><span class="worker-section-lbl">Expiration dates</span>
+          <div class="worker-field"><span class="worker-section-lbl">Certifications (expiration dates)</span>
             <div class="worker-dates-grid">
-              <div class="worker-field"><label for="worker-ahera-exp">AHERA</label><input type="date" id="worker-ahera-exp" required></div>
-              <div class="worker-field"><label for="worker-medical-exp">Medical</label><input type="date" id="worker-medical-exp" required></div>
-              <div class="worker-field"><label for="worker-respirator-exp">Respirator fit test</label><input type="date" id="worker-respirator-exp" required></div>
-              <div class="worker-field"><label for="worker-lead-exp">Lead training</label><input type="date" id="worker-lead-exp"></div>
-              <div class="worker-field"><label for="worker-lead-med-exp">Lead medical</label><input type="date" id="worker-lead-med-exp"></div>
+              <div class="worker-field"><label for="worker-ahera-exp">AHERA Training</label><input type="date" id="worker-ahera-exp" required></div>
+              <div class="worker-field"><label for="worker-medical-exp">Asbestos Medical</label><input type="date" id="worker-medical-exp" required></div>
+              <div class="worker-field"><label for="worker-respirator-exp">Respirator Fit Test</label><input type="date" id="worker-respirator-exp" required></div>
+              <div class="worker-field"><label for="worker-lead-exp">Lead Training</label><input type="date" id="worker-lead-exp"></div>
+              <div class="worker-field"><label for="worker-lead-med-exp">Lead Medical</label><input type="date" id="worker-lead-med-exp"></div>
             </div>
           </div>
           <div class="worker-field"><span class="worker-section-lbl">Respirator type</span><div class="worker-resp-checks">${certOpts}</div></div>
@@ -1555,7 +1558,7 @@
         </form>
       </section>` : ''}
       ${ws.length === 0 && !workerAddOpen
-        ? '<div class="empty-state"><div class="title">No workers on the roster</div><div class="sub">Add workers with AHERA type (S/W), certification expirations, and respirator types for document export.</div></div>'
+        ? '<div class="empty-state"><div class="title">No workers on the roster</div><div class="sub">Track AHERA Training, Asbestos Medical, Respirator Fit Test, and optional Lead Training / Lead Medical. Only filled certifications appear on each card.</div></div>'
         : `<div class="worker-roster-list">${ws.map(w => renderWorkerRosterCard(w)).join('')}</div>`}
     `;
 
@@ -1625,10 +1628,10 @@
       </div>
       <div class="worker-dates-grid compact">
         ${workerDateCell('AHERA', w.aheraExpiration)}
-        ${workerDateCell('Medical', w.medicalExpiration)}
-        ${workerDateCell('Respirator fit', w.respiratorFitExpiration)}
-        ${workerDateCell('Lead training', w.leadExpiration)}
-        ${workerDateCell('Lead medical', w.leadMedExpiration)}
+        ${workerDateCell('Asbestos Med', w.medicalExpiration)}
+        ${workerDateCell('Resp. Fit', w.respiratorFitExpiration)}
+        ${workerDateCell('Lead Trn', w.leadExpiration)}
+        ${workerDateCell('Lead Med', w.leadMedExpiration)}
       </div>
       <div class="worker-resp-line"><span class="lbl">Respirator</span> ${esc(respirators)}</div>
       ${hasExpired ? `<p class="worker-expired-note">Expired: ${esc(expiredLabels.join(', '))} — expired dates export in <span class="expired">red</span> on the roster document.</p>` : ''}
