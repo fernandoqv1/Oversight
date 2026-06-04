@@ -1,5 +1,4 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
-const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs').promises;
 
@@ -8,9 +7,21 @@ const DEFAULT_ZOOM_FACTOR = 0.675;
 
 let mainWindow;
 let updateCheckInProgress = false;
+let autoUpdater = null;
 
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
+function getAutoUpdater() {
+  if (!app.isPackaged) return null;
+  if (autoUpdater) return autoUpdater;
+  try {
+    autoUpdater = require('electron-updater').autoUpdater;
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    return autoUpdater;
+  } catch (error) {
+    console.error('electron-updater is not available:', error);
+    return null;
+  }
+}
 
 function sendUpdateStatus(status, data = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -18,27 +29,30 @@ function sendUpdateStatus(status, data = {}) {
 }
 
 function setupAutoUpdater() {
-  autoUpdater.on('checking-for-update', () => {
+  const updater = getAutoUpdater();
+  if (!updater) return;
+
+  updater.on('checking-for-update', () => {
     updateCheckInProgress = true;
     sendUpdateStatus('checking');
   });
-  autoUpdater.on('update-available', (info) => {
+  updater.on('update-available', (info) => {
     sendUpdateStatus('available', { version: info?.version || '' });
   });
-  autoUpdater.on('update-not-available', () => {
+  updater.on('update-not-available', () => {
     updateCheckInProgress = false;
     sendUpdateStatus('not-available');
   });
-  autoUpdater.on('download-progress', (progress) => {
+  updater.on('download-progress', (progress) => {
     sendUpdateStatus('downloading', {
       percent: Math.round(progress?.percent || 0)
     });
   });
-  autoUpdater.on('update-downloaded', (info) => {
+  updater.on('update-downloaded', (info) => {
     updateCheckInProgress = false;
     sendUpdateStatus('downloaded', { version: info?.version || '' });
   });
-  autoUpdater.on('error', (error) => {
+  updater.on('error', (error) => {
     updateCheckInProgress = false;
     console.error('Auto update error:', error);
     sendUpdateStatus('error', { message: error?.message || 'Update check failed' });
@@ -147,9 +161,10 @@ app.whenReady().then(() => {
   createWindow();
   setupAutoUpdater();
 
-  if (app.isPackaged) {
+  const updater = getAutoUpdater();
+  if (updater) {
     setTimeout(() => {
-      autoUpdater.checkForUpdates().catch((error) => {
+      updater.checkForUpdates().catch((error) => {
         console.error('Initial update check failed:', error);
         sendUpdateStatus('error', { message: error?.message || 'Update check failed' });
       });
@@ -167,12 +182,16 @@ ipcMain.handle('check-for-updates', async () => {
   if (!app.isPackaged) {
     return { success: false, error: 'Updates only run in the packaged app.' };
   }
+  const updater = getAutoUpdater();
+  if (!updater) {
+    return { success: false, error: 'Auto-update is not available in this build.' };
+  }
   if (updateCheckInProgress) {
     return { success: true, checking: true };
   }
   try {
     updateCheckInProgress = true;
-    const result = await autoUpdater.checkForUpdates();
+    const result = await updater.checkForUpdates();
     return { success: true, updateInfo: result?.updateInfo || null };
   } catch (error) {
     updateCheckInProgress = false;
@@ -182,8 +201,12 @@ ipcMain.handle('check-for-updates', async () => {
 });
 
 ipcMain.handle('install-update', async () => {
+  const updater = getAutoUpdater();
+  if (!updater) {
+    return { success: false, error: 'Auto-update is not available in this build.' };
+  }
   try {
-    autoUpdater.quitAndInstall(false, true);
+    updater.quitAndInstall(false, true);
     return { success: true };
   } catch (error) {
     console.error('Install update failed:', error);
