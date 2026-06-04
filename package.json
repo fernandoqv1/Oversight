@@ -4,14 +4,18 @@
   "description": "Oversight Desktop - Standalone offline project management application",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/start-dev.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win --config.win.signAndEditExecutable=false",
     "build:dir": "electron-builder --win --dir",
     "release": "electron-builder --win --publish always",
     "postinstall": "node scripts/postinstall.js"
   },
-  "keywords": ["oversight", "project-management", "electron"],
+  "keywords": [
+    "oversight",
+    "project-management",
+    "electron"
+  ],
   "author": "AsbTrack",
   "license": "ISC",
   "devDependencies": {
@@ -55,8 +59,18 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "signAndEditExecutable": false
     },

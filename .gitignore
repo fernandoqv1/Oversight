@@ -7,6 +7,7 @@ dist-publish/
 dist-publish2/
 .cursor/
 *.log
+build-log*.txt
 .env
 .env.*
 templates/~$*.docx
