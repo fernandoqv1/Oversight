@@ -21,6 +21,9 @@ function _shellRefresh() {
 // Storage values stay as legacy codes for backwards compatibility.
 function displayUnit(u, fallback) {
     if (u === 'SF') return 'ft\u00b2';
+    if (u === 'LF') return 'LF';
+    if (u === 'EA') return 'EA';
+    if (u === 'CF') return 'ft\u00b3';
     return u || fallback || '';
 }
 
@@ -52,6 +55,31 @@ const respiratorOptions = ['Half-Face', 'Full-Face', 'PAPR'];
 function getContainmentDisplayName(name) {
     const base = (name || 'Containment').trim().replace(/\s+Containment$/i, '');
     return base ? `${base} Containment` : 'Containment';
+}
+
+function wireContainmentNameSuffix(inputId, suffixId) {
+    const nameInput = document.getElementById(inputId);
+    const suffixSpan = document.getElementById(suffixId);
+    if (!nameInput || !suffixSpan) return;
+    const updateSuffix = () => {
+        const raw = nameInput.value;
+        if (!raw.trim()) {
+            suffixSpan.style.display = 'none';
+            return;
+        }
+        const style = window.getComputedStyle(nameInput);
+        const canvas = wireContainmentNameSuffix._canvas || (wireContainmentNameSuffix._canvas = document.createElement('canvas'));
+        const ctx = canvas.getContext('2d');
+        ctx.font = style.font || `${style.fontSize} ${style.fontFamily}`;
+        const textWidth = ctx.measureText(raw).width;
+        const pad = parseFloat(style.paddingLeft) || 12;
+        suffixSpan.style.left = `${pad + textWidth}px`;
+        suffixSpan.textContent = ' Containment';
+        suffixSpan.style.display = 'inline';
+    };
+    nameInput.addEventListener('input', updateSuffix);
+    nameInput.addEventListener('focus', updateSuffix);
+    updateSuffix();
 }
 
 const LS_LAST_BUILDING_PREFIX = 'oversight_last_building_';
@@ -1087,10 +1115,9 @@ function openSpaceMaterialModal(building, existingSpace) {
                         ${buildMaterialRows(isEdit ? existingSpace.materials : [])}
                     </div>
                     <div id="space-new-materials" class="space-y-2 mt-2"></div>
-                    <button type="button" id="add-inline-material-btn"
-                            class="text-sm font-medium text-indigo-600 hover:text-indigo-800 mt-2"
-                            style="background: transparent; border: none; padding: 0; cursor: pointer;">
-                        + Add Material
+                    <button type="button" id="add-inline-material-btn" class="modal-inline-add-btn">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                        Add Material
                     </button>
                 </div>
             </div>
@@ -1178,6 +1205,7 @@ function openSpaceMaterialModal(building, existingSpace) {
             const newName = row.querySelector('.new-mat-name')?.value.trim();
             if (!newName) return;
             const newQty = parseFloat(row.querySelector('.new-mat-qty')?.value) || 0;
+            const newUnit = row.querySelector('.new-mat-unit')?.value || 'SF';
 
             if (!currentProject.materials) currentProject.materials = [];
             const newMatId = generateId();
@@ -1185,7 +1213,7 @@ function openSpaceMaterialModal(building, existingSpace) {
                 id: newMatId,
                 name: newName,
                 totalQuantity: newQty,
-                unit: 'SF',
+                unit: newUnit,
                 friable: false
             });
 
@@ -1195,7 +1223,7 @@ function openSpaceMaterialModal(building, existingSpace) {
                     materialId: newMatId,
                     name: newName,
                     quantity: newQty,
-                    unit: 'SF'
+                    unit: newUnit
                 });
             }
         });
@@ -1224,17 +1252,16 @@ function openSpaceMaterialModal(building, existingSpace) {
     const newMatContainer = modal.querySelector('#space-new-materials');
     const addInlineMatBtn = modal.querySelector('#add-inline-material-btn');
     const buildNewMatRow = () => `
-        <div class="new-mat-row flex items-center gap-3 p-2 border rounded-lg bg-gray-50">
-            <button type="button" class="new-mat-remove text-red-600 hover:text-red-800 font-bold text-lg leading-none"
-                    style="background:transparent;border:none;cursor:pointer;width:1.25rem;" title="Remove">&times;</button>
-            <input type="text" class="new-mat-name flex-1 p-2 border rounded text-sm"
-                   placeholder="Material Name">
-            <div class="flex items-center gap-2">
-                <input type="number" class="new-mat-qty p-2 border rounded text-sm"
-                       style="width: 6.5rem;" maxlength="6" max="999999" min="0" step="any"
-                       placeholder="Quantity in ft\u00b2">
-                <span class="text-xs text-gray-500 w-8">ft\u00b2</span>
-            </div>
+        <div class="new-mat-row modal-material-row">
+            <button type="button" class="new-mat-remove" style="background:transparent;border:none;cursor:pointer;color:var(--text-muted);font-size:18px;line-height:1;padding:0;width:1.25rem;" title="Remove">&times;</button>
+            <input type="text" class="new-mat-name" style="flex:1;min-width:0;width:auto !important;" placeholder="Material Name">
+            <input type="number" class="new-mat-qty" style="width:5.5rem !important;flex-shrink:0;" min="0" step="any" placeholder="Qty">
+            <select class="new-mat-unit" style="width:auto !important;flex-shrink:0;padding:7px 8px;">
+                <option value="SF">ft\u00b2</option>
+                <option value="LF">LF</option>
+                <option value="EA">EA</option>
+                <option value="CF">ft\u00b3</option>
+            </select>
         </div>
     `;
     if (addInlineMatBtn && newMatContainer) {
@@ -1721,6 +1748,7 @@ async function printBulkSampleForm(project, material, bulkSamples, formData = {}
             spectialInstructions: formData.specialInstructions || '',
             inspectorEmail: formData.inspectorEmail || '',
             materialName: material.name,
+            materialUnit: displayUnit(material.unit, 'units'),
             samplesBulk: samplesData,
             samples: samplesData,
             image: signatureBase64 || '',
@@ -2091,7 +2119,7 @@ function buildContainmentSpacePickerCard(space, options = {}) {
                 return buildModalCheckboxRow(
                     matCbId,
                     'containment-material-cb',
-                    `data-space-id="${escapeHtml(space.id)}" data-material-index="${idx}" ${isMatChecked ? 'checked' : ''}`,
+                    `data-space-id="${escapeHtml(space.id)}" data-material-name="${escapeHtml(m.name)}" data-material-index="${idx}" ${isMatChecked ? 'checked' : ''}`,
                     pill
                 );
             }).join('')
@@ -2112,12 +2140,19 @@ function buildContainmentSpacePickerCard(space, options = {}) {
         </div>`;
 }
 
-function wireContainmentSpacePickerList(spacesList) {
+function wireContainmentSpacePickerList(spacesList, materialsInContainments) {
     spacesList.querySelectorAll('.containment-space-cb').forEach(cb => {
         cb.addEventListener('change', () => {
             const sid = cb.dataset.spaceId;
+            const spaceName = cb.dataset.spaceName || '';
             spacesList.querySelectorAll(`.containment-material-cb[data-space-id="${sid}"]`).forEach(mc => {
-                mc.checked = cb.checked;
+                if (cb.checked) {
+                    const matName = mc.dataset.materialName || '';
+                    const key = `${spaceName}::${matName}`;
+                    mc.checked = !(materialsInContainments && materialsInContainments.has(key));
+                } else {
+                    mc.checked = false;
+                }
             });
         });
     });
@@ -2134,7 +2169,6 @@ function openAddContainmentModal() {
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
                 <div class="containment-name-wrap">
-                    <span id="new-containment-mirror" class="absolute whitespace-pre pointer-events-none" style="visibility:hidden;left:-9999px;top:0" aria-hidden="true"></span>
                     <input type="text" id="new-containment-name" class="containment-name-input" placeholder="e.g., North" autocomplete="off">
                     <span id="new-containment-suffix" class="containment-name-suffix" style="display:none;"> Containment</span>
                 </div>
@@ -2268,31 +2302,7 @@ function openAddContainmentModal() {
     
     // Add event listener for building selection and ghost suffix (inline, next to typed text)
     setTimeout(() => {
-        const nameInput = document.getElementById('new-containment-name');
-        const suffixSpan = document.getElementById('new-containment-suffix');
-        const mirrorSpan = document.getElementById('new-containment-mirror');
-        if (nameInput && suffixSpan && mirrorSpan) {
-            const updateSuffix = () => {
-                const raw = nameInput.value;
-                if (!raw.trim()) {
-                    suffixSpan.style.display = 'none';
-                    return;
-                }
-                mirrorSpan.textContent = raw;
-                mirrorSpan.style.font = window.getComputedStyle(nameInput).font;
-                mirrorSpan.style.fontSize = window.getComputedStyle(nameInput).fontSize;
-                mirrorSpan.style.lineHeight = window.getComputedStyle(nameInput).lineHeight;
-                const pad = parseFloat(window.getComputedStyle(nameInput).paddingLeft) || 12;
-                suffixSpan.style.left = `${pad + mirrorSpan.offsetWidth}px`;
-                suffixSpan.style.font = window.getComputedStyle(nameInput).font;
-                suffixSpan.style.fontSize = window.getComputedStyle(nameInput).fontSize;
-                suffixSpan.textContent = ' Containment';
-                suffixSpan.style.display = 'inline';
-            };
-            nameInput.addEventListener('input', updateSuffix);
-            nameInput.addEventListener('focus', updateSuffix);
-            updateSuffix();
-        }
+        wireContainmentNameSuffix('new-containment-name', 'new-containment-suffix');
         const buildingSelect = document.getElementById('new-containment-building');
         if (buildingSelect) {
             applyLastBuildingSelection(buildingSelect);
@@ -2330,6 +2340,18 @@ function openAddContainmentModal() {
                     }
                 });
                 
+                // Determine which materials in each space are already in a containment
+                const materialsInContainments = new Map();
+                (currentProject.containments || []).forEach(containment => {
+                    (containment.spaces || []).forEach(cs => {
+                        const spaceName = cs.spaceName || cs.name;
+                        (cs.materials || []).forEach(mat => {
+                            const key = `${spaceName}::${mat.name}`;
+                            materialsInContainments.set(key, true);
+                        });
+                    });
+                });
+
                 spacesList.innerHTML = building.spaces.map(space => {
                     const isInOther = spacesInOtherContainments.has(space.name);
                     const otherContainments = isInOther ? spacesInOtherContainments.get(space.name) : [];
@@ -2337,11 +2359,11 @@ function openAddContainmentModal() {
                         isInOther,
                         otherContainments,
                         isSpaceChecked: false,
-                        defaultAllMaterialsChecked: true
+                        defaultAllMaterialsChecked: false
                     });
                 }).join('');
 
-                wireContainmentSpacePickerList(spacesList);
+                wireContainmentSpacePickerList(spacesList, materialsInContainments);
                 
                 spacesSection.classList.remove('hidden');
             });
@@ -2397,8 +2419,9 @@ function openEditContainmentModal(containmentId) {
         <div class="space-y-4">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
-                <div class="relative w-full border border-gray-300 rounded-lg bg-white overflow-hidden" style="min-height: 2.75rem;">
-                    <input type="text" id="edit-containment-name" class="w-full p-3 border-0 focus:ring-0 bg-transparent" value="${escapeHtml(containment.name)}" style="box-shadow: none;">
+                <div class="containment-name-wrap">
+                    <input type="text" id="edit-containment-name" class="containment-name-input" value="${escapeHtml(containment.name)}" autocomplete="off">
+                    <span id="edit-containment-suffix" class="containment-name-suffix" style="${containment.name ? '' : 'display:none;'}"> Containment</span>
                 </div>
             </div>
             <div>
@@ -2700,6 +2723,18 @@ function openEditContainmentModal(containmentId) {
             }
         });
         
+        // Determine which materials in each space are already in another containment
+        const materialsInOtherContainments = new Map();
+        (currentProject.containments || []).forEach(c => {
+            if (c.id === containmentId) return;
+            (c.spaces || []).forEach(cs => {
+                const spaceName = cs.spaceName || cs.name;
+                (cs.materials || []).forEach(mat => {
+                    materialsInOtherContainments.set(`${spaceName}::${mat.name}`, true);
+                });
+            });
+        });
+
         spacesList.innerHTML = building.spaces.map(space => {
             const isInOther = spacesInOtherContainments.has(space.name);
             const otherContainments = isInOther ? spacesInOtherContainments.get(space.name) : [];
@@ -2710,20 +2745,20 @@ function openEditContainmentModal(containmentId) {
                 otherContainments,
                 isSpaceChecked: isPreselected,
                 preselMatNames: isPreselected ? preselMatNames : null,
-                defaultAllMaterialsChecked: true
+                defaultAllMaterialsChecked: false
             });
         }).join('');
 
-        wireContainmentSpacePickerList(spacesList);
+        wireContainmentSpacePickerList(spacesList, materialsInOtherContainments);
         
         spacesSection.classList.remove('hidden');
     };
     
-    // Add event listener for building selection
+    // Add event listener for building selection and containment name suffix
     setTimeout(() => {
+        wireContainmentNameSuffix('edit-containment-name', 'edit-containment-suffix');
         const buildingSelect = document.getElementById('edit-containment-building');
         if (buildingSelect) {
-            // Initial render if building is already selected
             if (containment.buildingId) {
                 renderSpacesForBuilding(containment.buildingId, preselectedSpaceNames, preselectedMaterialsBySpace);
             }
@@ -5271,15 +5306,15 @@ function cleanupOrphanedModals() {
 // 1x1 transparent PNG placeholder so a malicious string can never reach
 // an <img src=...> attribute as code.
 const SAFE_IMAGE_FALLBACK = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAen63NgAAAAASUVORK5CYII=';
+const _SAFE_IMG_HEADER_RE = /^data:image\/(png|jpe?g|gif|webp|bmp|svg\+xml);base64,/i;
 function safeImageSrc(value) {
     if (typeof value !== 'string') return SAFE_IMAGE_FALLBACK;
-    // Strip surrounding whitespace and any HTML attribute terminators.
     const trimmed = value.trim();
-    if (!/^data:image\/(png|jpe?g|gif|webp|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
-        return SAFE_IMAGE_FALLBACK;
-    }
-    // Quote-escape just in case; the regex above already disallows quotes, but
-    // belt-and-suspenders for any future change.
+    const headerMatch = _SAFE_IMG_HEADER_RE.exec(trimmed);
+    if (!headerMatch) return SAFE_IMAGE_FALLBACK;
+    const payload = trimmed.slice(headerMatch[0].length);
+    if (payload.length === 0) return SAFE_IMAGE_FALLBACK;
+    if (/[^A-Za-z0-9+/=\s]/.test(payload)) return SAFE_IMAGE_FALLBACK;
     return trimmed.replace(/"/g, '');
 }
 

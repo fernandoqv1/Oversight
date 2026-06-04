@@ -13,13 +13,6 @@
     <link rel="apple-touch-icon" href="/icons/icon-192x192.svg">
     <link rel="stylesheet" href="dist/output.css">
     <link rel="stylesheet" href="./fonts/inter.css">
-    <script src="./lib/pizzip.min.js" onload="if (typeof PizZip !== 'undefined') window.PizZip = PizZip;"></script>
-    <script src="./lib/pizzip-utils.js"></script>
-    <script src="./lib/docxtemplater.js" onload="if (typeof Docxtemplater !== 'undefined') window.Docxtemplater = Docxtemplater;"></script>
-    <script src="./lib/imagemodule.js" onload="if (typeof ImageModule !== 'undefined') window.ImageModule = ImageModule;"></script>
-    <script>
-    (function(){let n=0;function check(){if(typeof PizZip!=='undefined'&&typeof window.PizZip==='undefined')window.PizZip=PizZip;if(typeof Docxtemplater!=='undefined')window.Docxtemplater=Docxtemplater;else if(typeof docxtemplater!=='undefined')window.Docxtemplater=docxtemplater;if(!(window.PizZip&&window.Docxtemplater)&&n++<10)setTimeout(check,100);}setTimeout(check,50);})();
-    </script>
     <style>
 /* ============================================================================
    OVERSIGHT REDESIGN — DESIGN SYSTEM (project.html)
@@ -602,11 +595,12 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
 .np-input { width:100%; text-align:right; }
 .np-unit { white-space:nowrap; font-size:12px; color:var(--text-muted); font-weight:500; }
 .log-photo-preview { max-width:240px; max-height:180px; width:auto; height:auto; object-fit:contain; border-radius:8px; border:1px solid var(--border); }
-.containment-name-wrap { position:relative; min-height:2.75rem; border:1px solid var(--border); border-radius:8px; background:var(--bg-sunken); overflow:hidden; }
+.containment-name-wrap { position:relative; min-height:2.75rem; border:1px solid var(--border); border-radius:8px; background:var(--bg-sunken); overflow:visible; display:flex; align-items:center; }
 .containment-name-wrap:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); background:var(--surface); }
-.containment-name-input { width:100%; padding:10px 12px; padding-right:7.5rem; border:0; background:transparent; color:var(--text); font-size:13px; position:relative; z-index:1; }
-.containment-name-input:focus { outline:none; }
-.containment-name-suffix { position:absolute; top:50%; transform:translateY(-50%); color:var(--text-muted); font-size:13px; pointer-events:none; z-index:0; white-space:pre; }
+.containment-name-wrap .containment-name-input { width:100% !important; padding:10px 12px !important; padding-right:7.5rem !important; border:0 !important; background:transparent !important; color:var(--text) !important; font-size:13px !important; position:relative; z-index:1; box-shadow:none !important; border-radius:0 !important; }
+.containment-name-wrap .containment-name-input:focus { outline:none !important; box-shadow:none !important; }
+.containment-name-suffix { position:absolute; top:50%; transform:translateY(-50%); color:var(--text-muted); font-size:13px; pointer-events:none; z-index:2; white-space:pre; opacity:0.7; }
+.modal-content .containment-name-wrap input[type=text] { border:0 !important; background:transparent !important; box-shadow:none !important; }
 .modal-content label:not(:has(input[type="checkbox"])):not(:has(input[type="radio"])) { font-size:11.5px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); display:block; margin-bottom:5px; }
 .modal-content label:has(> input[type="checkbox"]),
 .modal-content label:has(> input[type="radio"]) {
@@ -642,9 +636,14 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
 .modal-material-row { display:flex; align-items:center; gap:12px; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--surface-2); }
 .modal-material-row > input[type="checkbox"] { flex-shrink:0; width:1rem; height:1rem; margin-top:0; }
 .modal-material-row .modal-check-label { padding-left:4px; }
+.modal-material-row input[type="number"] { width:6.5rem !important; flex-shrink:0; }
+.modal-material-row input[type="text"] { width:auto !important; flex:1; min-width:0; }
+.modal-material-row select { width:auto !important; flex-shrink:0; }
 .modal-check-group { display:flex; flex-wrap:wrap; gap:8px 12px; }
 .modal-check-group .modal-check-row { flex:1 1 200px; min-width:0; }
 .sample-set-row .sample-set-location { margin-top:8px; margin-left:26px; width:calc(100% - 26px); max-width:100%; box-sizing:border-box; }
+.modal-inline-add-btn { display:inline-flex; align-items:center; gap:6px; margin-top:10px; padding:6px 14px; border-radius:7px; font-size:13px; font-weight:500; background:var(--surface); color:var(--accent); border:1px solid var(--accent); cursor:pointer; transition:background 120ms, color 120ms; }
+.modal-inline-add-btn:hover { background:var(--accent); color:#fff; }
 .modal-content input[type=text], .modal-content input[type=tel], .modal-content input[type=number], .modal-content input[type=date], .modal-content input[type=time], .modal-content input[type=email], .modal-content input[type=password], .modal-content select, .modal-content textarea { width:100%; background:var(--bg-sunken); border:1px solid var(--border); border-radius:7px; padding:7px 10px; font-size:13px; color:var(--text); transition:border-color 120ms, box-shadow 120ms; }
 .modal-content input[type=text]:focus, .modal-content input[type=tel]:focus, .modal-content input[type=number]:focus, .modal-content input[type=date]:focus, .modal-content input[type=time]:focus, .modal-content input[type=email]:focus, .modal-content select:focus, .modal-content textarea:focus { outline:none; border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px var(--accent-soft); }
 .modal-content .btn { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:7px; font-size:13px; font-weight:500; }
@@ -912,8 +911,20 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
   </div>
 </div>
 
+<script src="./lib/pizzip.min.js"></script>
+<script src="./lib/pizzip-utils.js"></script>
+<script src="./lib/docxtemplater.js"></script>
+<script src="./lib/imagemodule.js"></script>
 <script src="./lib/file-saver.min.js"></script>
 <script src="./lib/xlsx.full.min.js"></script>
+<script>
+(function(){
+  if(typeof PizZip!=='undefined')window.PizZip=PizZip;
+  if(typeof Docxtemplater!=='undefined')window.Docxtemplater=Docxtemplater;
+  else if(typeof docxtemplater!=='undefined')window.Docxtemplater=docxtemplater;
+  if(typeof ImageModule!=='undefined')window.ImageModule=ImageModule;
+})();
+</script>
 <script src="./js/excel.js"></script>
 <script src="./js/inspector-profile.js"></script>
 <script src="./js/main.js"></script>
