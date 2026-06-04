@@ -88,6 +88,9 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Oversight Desktop"
     },
+    "portable": {
+      "artifactName": "Oversight-Desktop-Portable-${version}.${ext}"
+    },
     "publish": [
       {
         "provider": "github",
