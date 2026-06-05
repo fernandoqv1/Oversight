@@ -25,6 +25,7 @@
     arrow: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>',
     trash: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>',
     folder: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+    excel: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="m9.5 12 5 6M14.5 12l-5 6"/></svg>',
   };
 
   // ============================================================
@@ -646,7 +647,7 @@
       });
     });
     acts.sort((a, b) => activitySortValue(b.when) - activitySortValue(a.when));
-    return acts.slice(0, 12);
+    return acts.slice(0, 5);
   }
 
   function renderTodayView() {
@@ -664,10 +665,6 @@
           <h1 class="page-title">Today</h1>
           <p class="page-sub">${new Date().toLocaleDateString(undefined, { weekday:'long', month:'long', day:'numeric' })} · ${projs.length} active project${projs.length === 1 ? '' : 's'}</p>
         </div>
-        <div class="head-actions">
-          <button class="btn-ghost" data-shell-action="new-log">+ Log entry</button>
-          <button class="btn-primary" data-shell-action="new-project">${ICONS.plus} New project</button>
-        </div>
       </div>
       <div class="today-grid">
         <section class="panel activity-panel">
@@ -680,7 +677,7 @@
           <div class="panel-head"><h2 class="panel-title">Running samples</h2><span class="muted small">${running.length}</span></div>
           ${running.length === 0
             ? '<ul class="running-list"><li class="empty-row">No samples currently running.</li></ul>'
-            : `<ul class="running-list">${running.map(r => {
+            : `<ul class="running-list">${running.slice(0, 5).map(r => {
                 const elapsed = ((Date.now() - new Date(r.sample.startTime).getTime()) / 36e5).toFixed(1);
                 return `<li class="running-row" data-href="project.html?id=${esc(r.project.id)}&tab=samples"><div class="run-head"><span class="code mono">${esc(sampleDisplayId(r.sample))}</span><span class="muted small">${esc(r.project.projectNumber || siteName(r.project))}</span></div><div class="run-meta"><span>Elapsed <b>${elapsed}h</b></span><span class="muted">${esc(r.sample.type || '')}</span></div><div class="progress"><span style="width:${Math.min(100, elapsed * 12)}%"></span></div></li>`;
               }).join('')}</ul>`}
@@ -705,15 +702,6 @@
     view.querySelectorAll('[data-href]').forEach(el => {
       el.addEventListener('click', () => { location.href = el.dataset.href; });
     });
-    view.querySelectorAll('[data-shell-action="new-project"]').forEach(b => b.addEventListener('click', () => {
-      if (typeof window.openNewProjectModal === 'function') window.openNewProjectModal();
-    }));
-    view.querySelectorAll('[data-shell-action="new-log"]').forEach(b => b.addEventListener('click', () => {
-      if (projs.length === 0) { showShellNote('Create a project first.'); return; }
-      // Open the most recently modified project's daily log
-      const p = projs.slice().sort((a, b) => new Date(b.lastModified || 0) - new Date(a.lastModified || 0))[0];
-      location.href = `project.html?id=${p.id}&tab=logs&new=1`;
-    }));
   }
 
   function renderProjectsView() {
@@ -756,7 +744,7 @@
             <div class="proj-cell"><div class="bar"><span style="width:${prog}%"></span></div><span class="due-pill mono">${prog}%</span></div>
             <div class="proj-cell" style="justify-content:flex-end;gap:4px;">
               <button class="icon-btn small" title="Edit" data-action="edit" data-id="${esc(p.id)}">${ICONS.pencil}</button>
-              <button class="icon-btn small" title="Export to Excel" data-action="export" data-id="${esc(p.id)}">${ICONS.download}</button>
+              <button class="icon-btn small" title="Export to Excel" data-action="export" data-id="${esc(p.id)}">${ICONS.excel}</button>
               <button class="icon-btn small" title="${esc(dlTitle)}" data-action="download-project" data-id="${esc(p.id)}" data-name="${esc(siteName(p))}" ${dl.canArchive ? '' : 'disabled'}>${ICONS.folder}</button>
               <button class="icon-btn small" title="Delete" data-action="delete" data-id="${esc(p.id)}">${ICONS.trash}</button>
             </div>
@@ -1252,7 +1240,6 @@
     const complete = airInView.filter(s => s.stopTime).length + samples.filter(s => s._kind === 'bulk').length;
     const hasBulk = (p.bulkSamples || []).length > 0;
     wrap.innerHTML = `
-      ${renderSamplesMaterialsPanel(allMats)}
       <div class="filter-bar">
         <div class="seg" id="samp-type">
           <button class="seg-btn" data-value="all" data-active="${samplesFilterType === 'all'}">All</button>
