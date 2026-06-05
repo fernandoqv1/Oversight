@@ -2037,6 +2037,7 @@ function createClearanceAirSamples(containment, inspectionData) {
     const defaultSampleDate = getTomorrowLocal();
     const containmentId = containment?.id || '';
     const containmentName = (containment?.name && containment.name.trim()) ? containment.name.trim() : 'Unknown Containment';
+    const clearanceSampleSetId = 'set_' + generateId();
 
     // Create 5 clearance samples - use containment dropdown, not location text
     for (let i = 1; i <= 5; i++) {
@@ -2056,7 +2057,8 @@ function createClearanceAirSamples(containment, inspectionData) {
             comments: '',
             inspectorName: inspectionData?.inspectorName || '',
             createdAt: Date.now(),
-            autoCreated: true
+            autoCreated: true,
+            sampleSetId: clearanceSampleSetId
         };
         existingSamples.push(newSample);
     }
@@ -3450,7 +3452,7 @@ function renderWorkerRosterView(project) {
                                 <input type="text" id="worker-name" placeholder="Enter worker's full name" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
                             </div>
                             <div>
-                                <label for="worker-type" class="block text-sm font-medium text-gray-700 mb-1.5">AHERA Certification Type</label>
+                                <label for="worker-type" class="block text-sm font-medium text-gray-700 mb-1.5">Certification Type</label>
                                 <select id="worker-type" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
                                     <option value="W">Worker (W)</option>
                                     <option value="S">Supervisor (S)</option>
@@ -3499,7 +3501,7 @@ function renderWorkerRosterView(project) {
                         <div class="pt-2">
                             <button type="submit" class="btn btn-primary">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
-                                Add Worker
+                                + Save
                             </button>
                         </div>
                     </form>
@@ -3598,7 +3600,7 @@ function openEditWorkerModal(worker) {
                     <input type="text" id="edit-worker-name" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${escapeHtml(worker.name)}" required>
                 </div>
                 <div>
-                    <label for="edit-worker-type" class="block text-sm font-medium text-gray-700 mb-1">AHERA Certification Type</label>
+                    <label for="edit-worker-type" class="block text-sm font-medium text-gray-700 mb-1">Certification Type</label>
                     <select id="edit-worker-type" class="w-full border border-gray-300 rounded-lg p-3 bg-white focus:ring-2 focus:ring-indigo-500" required>
                         <option value="W" ${worker.certificationType === 'W' ? 'selected' : ''}>Worker (W)</option>
                         <option value="S" ${worker.certificationType === 'S' ? 'selected' : ''}>Supervisor (S)</option>
