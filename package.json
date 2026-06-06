@@ -1,6 +1,6 @@
 {
   "name": "oversight-desktop",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Oversight Desktop - Standalone offline project management application",
   "main": "main.js",
   "scripts": {
@@ -64,7 +64,6 @@
       "!.git/**",
       "!.cursor/**",
       "!scripts/**",
-      "scripts/photo-bridge.ps1",
       "lib/phone-imobile.js",
       "!_orig*",
       "!**/{README.md,RELEASE_GUIDE.md,HANDOFF.md,AGENT_PROMPT.md,SETUP.md,QUICK_START.md,DOCUMENT_GENERATION.md,EXPORT_FIXES.md,UPDATES.md,CHANGELOG.md}"
@@ -98,6 +97,10 @@
       "artifactName": "Oversight-Desktop-Portable-${version}.${ext}"
     },
     "extraResources": [
+      {
+        "from": "scripts/photo-bridge.ps1",
+        "to": "scripts/photo-bridge.ps1"
+      },
       {
         "from": "bin/libimobiledevice",
         "to": "bin/libimobiledevice",
