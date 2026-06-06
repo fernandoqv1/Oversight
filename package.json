@@ -45,6 +45,7 @@
       "output": "dist"
     },
     "files": [
+      "**/*",
       "!dist/**",
       "!dist-*/**",
       "!dist-packaged/**",
