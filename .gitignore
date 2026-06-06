@@ -1,4 +1,9 @@
 node_modules/
+bin/libimobiledevice/
+bin/libimobiledevice-suite.zip
+bin/libimobiledevice-tmp/
+bin/libimobiledevice-download/
+bin/thumb-test*/
 dist/
 dist-*/
 dist-packaged/

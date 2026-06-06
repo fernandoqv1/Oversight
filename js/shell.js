@@ -123,13 +123,22 @@
     const site = (siteMaterials || []).find(m => m.id === id);
     return displayUnit(site?.unit, 'units');
   }
+  function parseLocalDate(d) {
+    // Date-only strings (YYYY-MM-DD) are parsed as UTC midnight by the Date
+    // constructor, which shifts to the previous day in negative-offset zones
+    // like PST. Append a local midnight time so they render on the correct day.
+    if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.trim())) {
+      return new Date(`${d.trim()}T00:00:00`);
+    }
+    return new Date(d);
+  }
   function fmtDate(d) {
     if (!d) return '—';
-    try { return new Date(d).toLocaleDateString(undefined, { month:'short', day:'numeric' }); } catch (e) { return '—'; }
+    try { return parseLocalDate(d).toLocaleDateString(undefined, { month:'short', day:'numeric' }); } catch (e) { return '—'; }
   }
   function fmtDateFull(d) {
     if (!d) return '—';
-    try { return new Date(d).toLocaleDateString(); } catch (e) { return '—'; }
+    try { return parseLocalDate(d).toLocaleDateString(); } catch (e) { return '—'; }
   }
   function fmtTime(d) {
     if (!d) return '';
@@ -1327,7 +1336,7 @@
   function renderTabLogs(p) {
     const wrap = document.getElementById('tab-logs');
     if (!wrap) return;
-    const logs = (p.dailyLogs || []).slice().sort((a, b) => new Date(b.date) - new Date(a.date));
+    const logs = (p.dailyLogs || []).slice().sort((a, b) => parseLocalDate(b.date) - parseLocalDate(a.date));
     wrap.innerHTML = `
       <div class="filter-bar">
         <div class="filter-spacer"></div>
@@ -1335,7 +1344,7 @@
       </div>
       ${logs.length === 0 ? '<div class="empty-state"><div class="title">No daily logs yet</div><div class="sub">Create the first log entry for this project.</div></div>'
         : `<div class="timeline">${logs.map(L => {
-            const d = new Date(L.date);
+            const d = parseLocalDate(L.date);
             const entries = (L.entries || []).slice().sort((a, b) => entrySortValue(b) - entrySortValue(a));
             const workersListed = (L.workers || []).length;
             const workersTotal = L.workersTotal ?? workersListed;

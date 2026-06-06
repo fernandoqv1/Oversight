@@ -71,3 +71,13 @@ if (fs.existsSync(fontSourceDir)) {
 }
 
 ensureElectron(root);
+
+try {
+  const { spawnSync } = require('child_process');
+  spawnSync(process.execPath, [path.join(__dirname, 'ensure-libimobiledevice.js')], {
+    stdio: 'inherit',
+    cwd: root,
+  });
+} catch (err) {
+  console.warn('libimobiledevice setup skipped:', err.message);
+}
