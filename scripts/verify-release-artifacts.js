@@ -22,7 +22,7 @@ if (!fs.existsSync(latestYmlPath)) {
 const yml = fs.readFileSync(latestYmlPath, 'utf8');
 const pathMatch = yml.match(/^path:\s*(.+)$/m);
 const shaMatch = yml.match(/^sha512:\s*(.+)$/m);
-const sizeMatch = yml.match(/^size:\s*(\d+)/m);
+const sizeMatch = yml.match(/^\s+size:\s*(\d+)/m) || yml.match(/^size:\s*(\d+)/m);
 const fileShaMatch = yml.match(/^\s+sha512:\s*(.+)$/m);
 
 if (!pathMatch || !shaMatch || !sizeMatch) {
