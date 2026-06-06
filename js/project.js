@@ -2410,7 +2410,7 @@ function openEditContainmentModal(containmentId) {
                 return `<div class="text-xs border rounded p-2 ${passClass}">
                     <span class="font-medium">${escapeHtml(vi.type || '')} Visual:</span> ${passText}
                     ${vi.inspectorName ? ` — ${escapeHtml(vi.inspectorName)}` : ''}
-                    ${vi.date ? ` (${vi.date})` : ''}
+                    ${vi.date ? ` (${formatDateText(vi.date)})` : ''}
                     ${vi.comments ? `<br><span class="italic">${escapeHtml(vi.comments)}</span>` : ''}
                 </div>`;
             }).join('')}
@@ -3791,9 +3791,12 @@ function openProjectDailyLogModal(logId) {
                     </div>
                 </div>
             </form>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary modal-cancel-btn" id="daily-log-cancel-btn">Cancel</button>
-                <button type="submit" form="daily-log-form" class="btn btn-primary modal-save-btn">${isEdit ? 'Save Changes' : 'Create Daily Log'}</button>
+            <div class="modal-footer" style="${isEdit ? 'display:flex;justify-content:space-between;align-items:center;' : ''}">
+                ${isEdit ? '<button type="button" class="btn btn-danger" id="daily-log-delete-btn">Delete Daily Log</button>' : ''}
+                <div style="display:flex;gap:8px;${isEdit ? 'margin-left:auto;' : ''}">
+                    <button type="button" class="btn btn-secondary modal-cancel-btn" id="daily-log-cancel-btn">Cancel</button>
+                    <button type="submit" form="daily-log-form" class="btn btn-primary modal-save-btn">${isEdit ? 'Save Changes' : 'Create Daily Log'}</button>
+                </div>
             </div>
         </div>
     `;
@@ -3808,6 +3811,17 @@ function openProjectDailyLogModal(logId) {
         mouseDownOnBackdrop = false;
     });
     modal.querySelector('#daily-log-cancel-btn')?.addEventListener('click', closeModal);
+
+    modal.querySelector('#daily-log-delete-btn')?.addEventListener('click', () => {
+        if (!existingLog?.id) return;
+        const dateLabel = existingLog.date ? formatDateText(existingLog.date) : 'this daily log';
+        if (!confirm(`Delete the daily log for ${dateLabel}? This cannot be undone.`)) return;
+        currentProject.dailyLogs = (currentProject.dailyLogs || []).filter(log => log.id !== existingLog.id);
+        saveCurrentProject();
+        showNotification('Daily log deleted.');
+        closeModal();
+        renderProject();
+    });
 
     const workerCheckboxes = Array.from(modal.querySelectorAll('.daily-log-worker-checkbox'));
     const workersTotalInput = modal.querySelector('#daily-log-workers-total');
@@ -3958,6 +3972,664 @@ function bindLogPhotoPreviews(container, getFiles, setFiles) {
     return render;
 }
 
+function formatPhoneImportDisplayDate(dateStr) {
+    if (!dateStr) return '';
+    const trimmed = String(dateStr).trim();
+    if (!trimmed) return '';
+    const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+    let date;
+    if (isoMatch) {
+        date = new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
+    } else {
+        date = new Date(trimmed);
+    }
+    if (isNaN(date.getTime())) return trimmed;
+    return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+function openPhoneImportModal(logDate, onImportComplete) {
+    if (!window.electronAPI?.detectPhoneDevices) {
+        showNotification('Phone import is not available in this version.', true);
+        return;
+    }
+
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.style.zIndex = '10001';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 880px;">
+            <h3>Import Photos from Phone</h3>
+            <div id="phone-import-countdown" class="text-sm text-gray-500 text-center" style="min-height:20px;margin:8px 0 4px;"></div>
+            <div id="phone-import-body" style="min-height: 120px;">
+                <div class="flex items-center justify-center py-8">
+                    <div class="text-center">
+                        <div style="width:40px;height:40px;border:3px solid #e5e7eb;border-top-color:#6366f1;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto;"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="phone-import-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary" id="phone-import-btn" disabled style="display:none;">Import Selected</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+    const body = modal.querySelector('#phone-import-body');
+    const countdownEl = modal.querySelector('#phone-import-countdown');
+    const importBtn = modal.querySelector('#phone-import-btn');
+    const cancelBtn = modal.querySelector('#phone-import-cancel');
+
+    let countdownDeadlineMs = 0;
+    let countdownTimer = null;
+    const previewBlobUrls = new Map();
+    const loadedThumbnails = new Map();
+    const tileByPath = new Map();
+
+    function formatCountdown(seconds) {
+        const sec = Math.max(0, Math.ceil(Number(seconds) || 0));
+        if (sec <= 0) return 'Finishing up…';
+        if (sec < 60) return `~${sec}s remaining`;
+        const minutes = Math.floor(sec / 60);
+        const remainder = sec % 60;
+        return remainder > 0 ? `~${minutes}m ${remainder}s remaining` : `~${minutes}m remaining`;
+    }
+
+    function countdownSecondsLeft() {
+        if (!countdownDeadlineMs) return 0;
+        return Math.max(0, Math.ceil((countdownDeadlineMs - Date.now()) / 1000));
+    }
+
+    function updateCountdownDisplay() {
+        if (!countdownEl) return;
+        countdownEl.textContent = formatCountdown(countdownSecondsLeft());
+    }
+
+    function ensureCountdownTimer() {
+        if (countdownTimer) return;
+        countdownTimer = setInterval(updateCountdownDisplay, 250);
+    }
+
+    function setCountdown(seconds) {
+        const sec = Math.max(0, Math.ceil(Number(seconds) || 0));
+        countdownDeadlineMs = Date.now() + sec * 1000;
+        ensureCountdownTimer();
+        updateCountdownDisplay();
+    }
+
+    function hideCountdown() {
+        if (countdownTimer) {
+            clearInterval(countdownTimer);
+            countdownTimer = null;
+        }
+        countdownDeadlineMs = 0;
+        if (countdownEl) countdownEl.textContent = '';
+    }
+
+    function extendCountdownIfLow(minSeconds = 15, bumpSeconds = 20) {
+        if (countdownSecondsLeft() <= minSeconds) {
+            setCountdown(Math.max(bumpSeconds, countdownSecondsLeft() + bumpSeconds));
+        }
+    }
+
+    const unsubscribePreviewProgress = window.electronAPI.onPhoneImportPreviewProgress?.((payload) => {
+        if (!payload) return;
+        if (typeof payload.secondsRemaining === 'number') {
+            setCountdown(payload.secondsRemaining);
+        }
+        if (payload.photo?.path) {
+            showPhotoPreview(payload.photo, { allowReplace: true });
+        }
+        if (payload.phase === 'previews' && payload.completed >= payload.total) {
+            hideCountdown();
+        }
+    }) || (() => {});
+
+    const closeModal = () => {
+        unsubscribePreviewProgress();
+        if (countdownTimer) clearInterval(countdownTimer);
+        for (const url of previewBlobUrls.values()) URL.revokeObjectURL(url);
+        modal.remove();
+    };
+
+    cancelBtn.addEventListener('click', closeModal);
+    let mouseDownOnBackdrop = false;
+    modal.addEventListener('mousedown', (e) => { mouseDownOnBackdrop = (e.target === modal); });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal && mouseDownOnBackdrop) closeModal();
+        mouseDownOnBackdrop = false;
+    });
+
+    let selectedDevice = null;
+    let selectedDeviceInfo = null;
+    let photoList = [];
+    let selectedPhotoPaths = new Set();
+
+    function pickPhoneDevice(devices) {
+        if (!Array.isArray(devices) || devices.length === 0) return null;
+        const mtp = devices.find((d) => d.backend === 'mtp');
+        const imobile = devices.find((d) => d.backend === 'libimobiledevice');
+        if (mtp) {
+            return {
+                name: mtp.name,
+                backend: 'mtp',
+                udid: imobile?.udid || null,
+                listBackend: 'mtp',
+                importBackend: imobile ? 'libimobiledevice' : 'mtp',
+            };
+        }
+        return imobile || devices[0];
+    }
+
+    function phoneDeviceOptions(forImport = false) {
+        if (!selectedDeviceInfo) return null;
+        const useImobile = forImport && selectedDeviceInfo.udid
+            && (selectedDeviceInfo.importBackend === 'libimobiledevice' || selectedDeviceInfo.backend === 'libimobiledevice');
+        return {
+            backend: useImobile ? 'libimobiledevice' : 'mtp',
+            udid: selectedDeviceInfo.udid || null,
+        };
+    }
+
+    function phoneBackendLabel(backend) {
+        if (backend === 'libimobiledevice') return 'Trusted USB';
+        return 'Photos USB';
+    }
+
+    function normalizePhonePhotoPath(photoPath) {
+        return String(photoPath || '').replace(/\//g, '\\');
+    }
+
+    function showError(msg, retryFn) {
+        hideCountdown();
+        body.innerHTML = `
+            <div class="text-center py-6">
+                <div class="text-red-600 text-sm mb-3">${escapeHtml(msg)}</div>
+                ${retryFn ? '<button type="button" class="btn btn-secondary btn-sm" id="phone-retry-btn">Retry</button>' : ''}
+            </div>
+        `;
+        if (retryFn) {
+            body.querySelector('#phone-retry-btn')?.addEventListener('click', retryFn);
+        }
+    }
+
+    function showNoDevice() {
+        hideCountdown();
+        body.innerHTML = `
+            <div class="text-center py-6">
+                <div class="text-sm text-gray-700 mb-2" style="font-weight:600;">No phone detected</div>
+                <div class="text-sm text-gray-500 mb-4" style="max-width:360px;margin:0 auto;line-height:1.6;">
+                    1. Connect your iPhone via USB<br>
+                    2. Unlock the phone<br>
+                    3. Tap <strong>Trust</strong> for faster import, or <strong>Allow</strong> for photos-only access<br>
+                    4. Wait a few seconds, then retry
+                </div>
+                <button type="button" class="btn btn-primary btn-sm" id="phone-retry-btn">Retry Detection</button>
+            </div>
+        `;
+        body.querySelector('#phone-retry-btn')?.addEventListener('click', detectDevices);
+    }
+
+    function formatPhoneImportTimeLabel(photo) {
+        const raw = photo?.dateTaken || '';
+        if (raw && /\d{1,2}:\d{2}/.test(raw)) {
+            const match = raw.match(/(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)/);
+            if (match) return match[1].trim();
+        }
+        const dateOnly = formatPhoneImportDisplayDate(photo?.date || '');
+        return dateOnly || 'Photo';
+    }
+
+    function syncPhotoTileSelection() {
+        body.querySelectorAll('.phone-import-tile').forEach(tile => {
+            const photoPath = tile.dataset.path;
+            tile.dataset.selected = selectedPhotoPaths.has(photoPath) ? 'true' : 'false';
+        });
+    }
+
+    function indexPhotoTiles() {
+        tileByPath.clear();
+        body.querySelectorAll('.phone-import-tile').forEach((tile) => {
+            tileByPath.set(normalizePhonePhotoPath(tile.dataset.path), tile);
+        });
+    }
+
+    function findPhotoTile(photoPath, photoIndex) {
+        if (Number.isInteger(photoIndex) && photoIndex >= 0) {
+            const byIndex = body.querySelector(`.phone-import-tile[data-index="${photoIndex}"]`);
+            if (byIndex) return byIndex;
+        }
+        const norm = normalizePhonePhotoPath(photoPath);
+        const mapped = tileByPath.get(norm);
+        if (mapped) return mapped;
+        const baseName = norm.split('\\').pop()?.toLowerCase();
+        if (baseName) {
+            for (const [key, tile] of tileByPath.entries()) {
+                if (key.split('\\').pop()?.toLowerCase() === baseName) return tile;
+            }
+        }
+        const listIndex = photoList.findIndex((p) => normalizePhonePhotoPath(p.path) === norm);
+        if (listIndex >= 0) {
+            return body.querySelector(`.phone-import-tile[data-index="${listIndex}"]`);
+        }
+        return null;
+    }
+
+    function isPreviewDisplayed(photoPath, photoIndex) {
+        const tile = findPhotoTile(photoPath, photoIndex);
+        return tile?.querySelector('.phone-import-thumb-img')?.classList.contains('loaded') === true;
+    }
+
+    function applyPreviewToTile(photoPath, src, photoIndex) {
+        const tile = findPhotoTile(photoPath, photoIndex);
+        if (!tile) return false;
+        const img = tile.querySelector('.phone-import-thumb-img');
+        if (!img) return false;
+        img.src = src;
+        img.classList.add('loaded');
+        return true;
+    }
+
+    function resolvePhotoIndex(photo) {
+        if (Number.isInteger(photo?.index) && photo.index >= 0) return photo.index;
+        return photoList.findIndex((p) => normalizePhonePhotoPath(p.path) === normalizePhonePhotoPath(photo.path));
+    }
+
+    async function showPhotoPreview(photo, { allowReplace = false } = {}) {
+        if (!photo?.path) return false;
+        const photoIndex = resolvePhotoIndex(photo);
+        if (!allowReplace && isPreviewDisplayed(photo.path, photoIndex)) return true;
+
+        if (photo.thumbBase64) {
+            const mimeType = photo.thumbMimeType || photo.previewMimeType || 'image/jpeg';
+            const src = `data:${mimeType};base64,${photo.thumbBase64}`;
+            if (applyPreviewToTile(photo.path, src, photoIndex)) {
+                loadedThumbnails.set(normalizePhonePhotoPath(photo.path), {
+                    path: photo.path,
+                    success: true,
+                    base64: photo.thumbBase64,
+                    mimeType,
+                });
+                return true;
+            }
+            return false;
+        }
+
+        if (photo.previewPath) {
+            return loadPreviewFromPath(photo.path, photo.previewPath, photoIndex, allowReplace);
+        }
+        return false;
+    }
+
+    async function loadPreviewFromPath(photoPath, previewPath, photoIndex, allowReplace = false) {
+        const norm = normalizePhonePhotoPath(photoPath);
+        if (!allowReplace && isPreviewDisplayed(photoPath, photoIndex)) return true;
+        const reader = window.electronAPI?.readPhonePreview || window.electronAPI?.readImportedPhoto;
+        if (!reader) return false;
+        try {
+            const result = await reader(previewPath);
+            if (!result?.success) return false;
+            let src;
+            if (result.base64) {
+                src = `data:${result.mimeType || 'image/jpeg'};base64,${result.base64}`;
+            } else if (result.data) {
+                const blob = new Blob([new Uint8Array(result.data)], { type: 'image/jpeg' });
+                const url = URL.createObjectURL(blob);
+                previewBlobUrls.set(norm, url);
+                src = url;
+            } else {
+                return false;
+            }
+            if (!applyPreviewToTile(photoPath, src, photoIndex)) return false;
+            loadedThumbnails.set(norm, {
+                path: photoPath,
+                success: true,
+                blobUrl: src.startsWith('blob:') ? src : undefined,
+                base64: result.base64,
+                mimeType: result.mimeType || 'image/jpeg',
+            });
+            return true;
+        } catch (err) {
+            console.warn('Preview load failed:', err);
+            return false;
+        }
+    }
+
+    function seedInitialPhotoPreviews() {
+        photoList.forEach((photo, index) => {
+            if (photo?.thumbBase64) {
+                showPhotoPreview({ ...photo, index });
+            }
+        });
+    }
+
+    async function loadHighResPreviews(photos) {
+        if (!Array.isArray(photos) || photos.length === 0) return;
+        if (!selectedDevice) return;
+
+        let result = null;
+        if (typeof window.electronAPI?.loadPhonePhotoPreviews === 'function') {
+            try {
+                result = await window.electronAPI.loadPhonePhotoPreviews(selectedDevice, photos);
+            } catch (err) {
+                console.warn('loadPhonePhotoPreviews failed:', err);
+            }
+        }
+        if (!result?.success && typeof window.electronAPI?.upgradePhonePhotoPreviews === 'function') {
+            try {
+                result = await window.electronAPI.upgradePhonePhotoPreviews(selectedDevice, photos);
+            } catch (err) {
+                console.warn('upgradePhonePhotoPreviews failed:', err);
+            }
+        }
+
+        if (result?.success && Array.isArray(result.photos)) {
+            for (const photo of result.photos) {
+                await showPhotoPreview(photo, { allowReplace: true });
+            }
+        } else if (typeof window.electronAPI?.getPhonePhotoThumbnails === 'function') {
+            try {
+                const paths = photos.map((photo) => photo.path).filter(Boolean);
+                const thumbResult = await window.electronAPI.getPhonePhotoThumbnails(
+                    selectedDevice,
+                    paths,
+                    phoneDeviceOptions()
+                );
+                if (thumbResult?.success && Array.isArray(thumbResult.thumbnails)) {
+                    for (const thumb of thumbResult.thumbnails) {
+                        if (!thumb?.success || !thumb.base64) continue;
+                        await showPhotoPreview({
+                            path: thumb.path,
+                            thumbBase64: thumb.base64,
+                            thumbMimeType: thumb.mimeType || 'image/jpeg',
+                        }, { allowReplace: true });
+                    }
+                }
+            } catch (err) {
+                console.warn('getPhonePhotoThumbnails fallback failed:', err);
+            }
+        }
+
+        applyThumbnailSources();
+        hideCountdown();
+    }
+
+    function applyThumbnailSources() {
+        body.querySelectorAll('.phone-import-tile').forEach((tile) => {
+            const photoPath = tile.dataset.path;
+            const thumb = loadedThumbnails.get(normalizePhonePhotoPath(photoPath));
+            const img = tile.querySelector('.phone-import-thumb-img');
+            if (!img || !thumb) return;
+            if (thumb.blobUrl) {
+                img.src = thumb.blobUrl;
+            } else if (thumb.base64) {
+                img.src = `data:${thumb.mimeType || 'image/jpeg'};base64,${thumb.base64}`;
+            } else {
+                return;
+            }
+            img.classList.add('loaded');
+        });
+    }
+
+    function togglePhotoSelection(photoPath) {
+        if (!photoPath) return;
+        if (selectedPhotoPaths.has(photoPath)) selectedPhotoPaths.delete(photoPath);
+        else selectedPhotoPaths.add(photoPath);
+        syncPhotoTileSelection();
+        updateImportBtn();
+    }
+
+    function renderPhotoGrid() {
+        if (photoList.length === 0) {
+            hideCountdown();
+            body.innerHTML = `
+                <div class="text-center py-6">
+                    <div class="text-sm text-gray-700 mb-1" style="font-weight:600;">No photos found for ${escapeHtml(formatPhoneImportDisplayDate(logDate))}</div>
+                    <div class="text-sm text-gray-500 mb-3">No photos were found for this date. Try Show All Photos, or confirm you tapped Allow when the phone asked to access photos.</div>
+                    <button type="button" class="btn btn-secondary btn-sm" id="phone-list-all-btn">Show All Photos</button>
+                </div>
+            `;
+            body.querySelector('#phone-list-all-btn')?.addEventListener('click', () => listPhotos(null));
+            importBtn.style.display = 'none';
+            return;
+        }
+
+        const grid = photoList.map((p, index) => {
+            const selected = selectedPhotoPaths.has(p.path);
+            return `<button type="button" class="phone-import-tile" data-index="${index}" data-path="${escapeHtml(p.path)}" data-selected="${selected ? 'true' : 'false'}" aria-pressed="${selected ? 'true' : 'false'}">
+                <div class="phone-import-thumb">
+                    <img class="phone-import-thumb-img" alt="${escapeHtml(p.name || 'Photo')}">
+                    <div class="phone-import-thumb-loading" aria-hidden="true"></div>
+                    <span class="phone-import-check" aria-hidden="true">&#10003;</span>
+                </div>
+            </button>`;
+        }).join('');
+
+        body.innerHTML = `
+            <div class="flex justify-end gap-2 mb-2">
+                <button type="button" class="btn-link text-xs" id="phone-select-all">Select All</button>
+                <button type="button" class="btn-link text-xs" id="phone-deselect-all">Deselect All</button>
+            </div>
+            <div class="phone-import-grid">${grid}</div>
+        `;
+
+        importBtn.style.display = '';
+        updateImportBtn();
+
+        body.querySelectorAll('.phone-import-tile').forEach(tile => {
+            tile.addEventListener('click', () => togglePhotoSelection(tile.dataset.path));
+        });
+
+        body.querySelector('#phone-select-all')?.addEventListener('click', () => {
+            photoList.forEach(p => selectedPhotoPaths.add(p.path));
+            syncPhotoTileSelection();
+            updateImportBtn();
+        });
+        body.querySelector('#phone-deselect-all')?.addEventListener('click', () => {
+            selectedPhotoPaths.clear();
+            syncPhotoTileSelection();
+            updateImportBtn();
+        });
+
+        indexPhotoTiles();
+        seedInitialPhotoPreviews();
+        applyThumbnailSources();
+    }
+
+    function updateImportBtn() {
+        const count = selectedPhotoPaths.size;
+        importBtn.disabled = count === 0;
+        importBtn.textContent = count > 0 ? `Import ${count} Photo${count !== 1 ? 's' : ''}` : 'Import Selected';
+    }
+
+    async function loadPhonePhotosViaQuickList() {
+        if (typeof window.electronAPI?.quickListPhonePhotos !== 'function') return null;
+        try {
+            return await window.electronAPI.quickListPhonePhotos(logDate);
+        } catch (err) {
+            const message = String(err?.message || err || '');
+            if (/no handler registered/i.test(message)) {
+                console.warn('quick-list-phone-photos unavailable; using detect + list fallback');
+                return null;
+            }
+            throw err;
+        }
+    }
+
+    async function detectDevices() {
+        setCountdown(45);
+        const listCountdownTimer = setInterval(() => extendCountdownIfLow(5, 15), 3000);
+        body.innerHTML = `
+            <div class="flex items-center justify-center py-8">
+                <div class="text-center">
+                    <div style="width:40px;height:40px;border:3px solid #e5e7eb;border-top-color:#6366f1;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto;"></div>
+                </div>
+            </div>
+        `;
+        try {
+            const quickResult = await loadPhonePhotosViaQuickList();
+            clearInterval(listCountdownTimer);
+            if (quickResult) {
+                if (!quickResult.success) {
+                    showError(quickResult.error || 'Failed to connect to phone', detectDevices);
+                    return;
+                }
+                if (!quickResult.devices || quickResult.devices.length === 0) {
+                    showNoDevice();
+                    return;
+                }
+                selectedDeviceInfo = pickPhoneDevice(quickResult.devices.map((d) => ({ ...d, backend: 'mtp' })));
+                selectedDevice = quickResult.deviceName || selectedDeviceInfo.name;
+                photoList = quickResult.photos || [];
+                selectedPhotoPaths.clear();
+                loadedThumbnails.clear();
+                renderPhotoGrid();
+                loadHighResPreviews(photoList);
+                return;
+            }
+
+            const result = await window.electronAPI.detectPhoneDevices();
+            if (!result.success) {
+                showError(result.error || 'Failed to detect devices', detectDevices);
+                return;
+            }
+            if (!result.devices || result.devices.length === 0) {
+                showNoDevice();
+                return;
+            }
+            selectedDeviceInfo = pickPhoneDevice(result.devices);
+            selectedDevice = selectedDeviceInfo.name;
+            await listPhotos(logDate);
+        } catch (err) {
+            clearInterval(listCountdownTimer);
+            showError(err.message || 'Failed to detect devices', detectDevices);
+        }
+    }
+
+    function renderLoadingState() {
+        body.innerHTML = `
+            <div class="flex items-center justify-center py-8">
+                <div style="width:32px;height:32px;border:3px solid #e5e7eb;border-top-color:#6366f1;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto;"></div>
+            </div>
+        `;
+    }
+
+    async function listPhotos(dateFilter) {
+        setCountdown(45);
+        const listCountdownTimer = setInterval(() => extendCountdownIfLow(5, 15), 3000);
+        renderLoadingState();
+        try {
+            const result = await window.electronAPI.listPhonePhotos(selectedDevice, dateFilter || '', phoneDeviceOptions());
+            clearInterval(listCountdownTimer);
+            if (!result.success) {
+                showError(result.error || 'Failed to load photos', () => listPhotos(dateFilter));
+                return;
+            }
+            photoList = result.photos || [];
+            if (result.backend && selectedDeviceInfo) {
+                selectedDeviceInfo.backend = result.backend;
+            }
+            selectedPhotoPaths.clear();
+            loadedThumbnails.clear();
+
+            renderPhotoGrid();
+
+            if (photoList.length > 0) {
+                loadHighResPreviews(photoList);
+            } else {
+                hideCountdown();
+            }
+        } catch (err) {
+            clearInterval(listCountdownTimer);
+            showError(err.message || 'Failed to load photos', () => listPhotos(dateFilter));
+        }
+    }
+
+    async function doImport() {
+        const paths = Array.from(selectedPhotoPaths);
+        if (paths.length === 0) return;
+
+        importBtn.disabled = true;
+        importBtn.textContent = 'Importing...';
+        cancelBtn.disabled = true;
+
+        body.innerHTML = `
+            <div class="text-center py-6">
+                <div class="text-sm text-gray-700 mb-3">Importing ${paths.length} photo${paths.length !== 1 ? 's' : ''}...</div>
+                <div style="width:100%;max-width:300px;height:8px;background:#e5e7eb;border-radius:4px;margin:0 auto;overflow:hidden;">
+                    <div id="phone-import-progress" style="width:10%;height:100%;background:#6366f1;border-radius:4px;transition:width 0.3s;"></div>
+                </div>
+                <div id="phone-import-status" class="text-xs text-gray-400 mt-2">Copying files from device...</div>
+            </div>
+        `;
+
+        const progressBar = modal.querySelector('#phone-import-progress');
+        const statusEl = modal.querySelector('#phone-import-status');
+
+        try {
+            const result = await window.electronAPI.importPhonePhotos(selectedDevice, paths, phoneDeviceOptions(true));
+            if (!result.success) {
+                showError(result.error || 'Import failed');
+                cancelBtn.disabled = false;
+                return;
+            }
+
+            const imported = result.imported || [];
+            if (imported.length === 0) {
+                showError('No files were imported. ' + ((result.errors || []).join('; ') || 'Unknown error.'));
+                cancelBtn.disabled = false;
+                return;
+            }
+
+            if (progressBar) progressBar.style.width = '50%';
+            if (statusEl) statusEl.textContent = 'Reading imported files...';
+
+            const files = [];
+            for (let i = 0; i < imported.length; i++) {
+                try {
+                    const photoData = await window.electronAPI.readImportedPhoto(imported[i].localPath);
+                    if (photoData.success && photoData.data) {
+                        const arr = new Uint8Array(photoData.data);
+                        const ext = (photoData.name || '').split('.').pop()?.toLowerCase() || 'jpg';
+                        const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', gif: 'image/gif' };
+                        const mime = mimeMap[ext] || 'image/jpeg';
+                        const blob = new Blob([arr], { type: mime });
+                        const file = new File([blob], photoData.name || `photo_${i}.jpg`, { type: mime });
+                        files.push(file);
+                    }
+                } catch (readErr) {
+                    console.error('Failed to read imported photo:', readErr);
+                }
+                if (progressBar) progressBar.style.width = (50 + (50 * (i + 1) / imported.length)) + '%';
+            }
+
+            if (files.length === 0) {
+                showError('Failed to read imported files.');
+                cancelBtn.disabled = false;
+                return;
+            }
+
+            if (progressBar) progressBar.style.width = '100%';
+            if (statusEl) statusEl.textContent = `${files.length} photo${files.length !== 1 ? 's' : ''} imported successfully!`;
+
+            const errMsg = (result.errors || []).length > 0 ? ` (${result.errors.length} failed)` : '';
+
+            setTimeout(() => {
+                closeModal();
+                if (onImportComplete) onImportComplete(files);
+                showNotification(`${files.length} photo${files.length !== 1 ? 's' : ''} imported from phone${errMsg}.`);
+            }, 600);
+        } catch (err) {
+            showError(err.message || 'Import failed');
+            cancelBtn.disabled = false;
+        }
+    }
+
+    importBtn.addEventListener('click', doImport);
+
+    detectDevices();
+}
+
 function openProjectDailyLogEntryModal(logId) {
     if (!currentProject) { showNotification('Project data unavailable.', true); return; }
 
@@ -3989,7 +4661,10 @@ function openProjectDailyLogEntryModal(logId) {
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Photos (max 5)</label>
-                    <input type="file" id="daily-log-entry-photos" accept="image/*,.heic,.heif" multiple class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    <div class="flex gap-2 items-center flex-wrap">
+                        <input type="file" id="daily-log-entry-photos" accept="image/*,.heic,.heif" multiple class="text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" style="flex:1;min-width:0;">
+                        <button type="button" id="daily-log-entry-phone-import" class="btn btn-secondary" style="white-space:nowrap;padding:6px 12px;font-size:0.82rem;">&#128241; Import from Phone</button>
+                    </div>
                     <div id="daily-log-entry-photo-previews" class="mt-2 flex flex-wrap gap-2"></div>
                 </div>
             </form>
@@ -4037,6 +4712,16 @@ function openProjectDailyLogEntryModal(logId) {
         selectedPhotoFiles = [...selectedPhotoFiles, ...prepared].slice(0, MAX_PHOTOS);
         fileInput.value = '';
         renderPhotoPreviews();
+    });
+
+    const logForEntry = (currentProject.dailyLogs || []).find(l => l.id === logId);
+    const logDateForImport = logForEntry?.date || getTodayLocal();
+    modal.querySelector('#daily-log-entry-phone-import')?.addEventListener('click', () => {
+        openPhoneImportModal(logDateForImport, async (importedFiles) => {
+            const prepared = await preparePhotoFilesForUpload(importedFiles);
+            selectedPhotoFiles = [...selectedPhotoFiles, ...prepared].slice(0, MAX_PHOTOS);
+            renderPhotoPreviews();
+        });
     });
 
     modal.querySelector('#daily-log-entry-form')?.addEventListener('submit', async (event) => {
@@ -4135,7 +4820,10 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Photos (max 5)</label>
-                    <input type="file" id="daily-log-entry-edit-photos" accept="image/*,.heic,.heif" multiple class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    <div class="flex gap-2 items-center flex-wrap">
+                        <input type="file" id="daily-log-entry-edit-photos" accept="image/*,.heic,.heif" multiple class="text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" style="flex:1;min-width:0;">
+                        <button type="button" id="daily-log-entry-edit-phone-import" class="btn btn-secondary" style="white-space:nowrap;padding:6px 12px;font-size:0.82rem;">&#128241; Import from Phone</button>
+                    </div>
                     <div id="daily-log-entry-edit-photo-previews" class="mt-2 flex flex-wrap gap-2"></div>
                 </div>
             </form>
@@ -4201,6 +4889,16 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
         newPhotoFiles = [...newPhotoFiles, ...prepared].slice(0, MAX_PHOTOS - existingPhotos.length);
         e.target.value = '';
         renderEditPhotoPreviews();
+    });
+
+    const editLogDateForImport = log?.date || getTodayLocal();
+    modal.querySelector('#daily-log-entry-edit-phone-import')?.addEventListener('click', () => {
+        openPhoneImportModal(editLogDateForImport, async (importedFiles) => {
+            const remaining = Math.max(0, MAX_PHOTOS - existingPhotos.length - newPhotoFiles.length);
+            const prepared = await preparePhotoFilesForUpload(importedFiles.slice(0, remaining));
+            newPhotoFiles = [...newPhotoFiles, ...prepared].slice(0, MAX_PHOTOS - existingPhotos.length);
+            renderEditPhotoPreviews();
+        });
     });
 
     renderEditPhotoPreviews();
