@@ -7,6 +7,8 @@
     "start": "node scripts/start-dev.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win --publish never --config.win.signAndEditExecutable=false",
+    "build:win:verify": "npm run build:win && node scripts/verify-release-artifacts.js",
+    "verify-release": "node scripts/verify-release-artifacts.js",
     "build:dir": "electron-builder --win --dir",
     "release": "electron-builder --win --publish always",
     "postinstall": "node scripts/postinstall.js"
