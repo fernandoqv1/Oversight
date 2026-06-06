@@ -51,6 +51,10 @@ const ACTIVE_CONTAINMENT_STAGES = [
 
 const respiratorOptions = ['Half-Face', 'Full-Face', 'PAPR'];
 
+function containmentNameHasContainmentWord(name) {
+    return /\bcontainment\b/i.test(String(name || '').trim());
+}
+
 /** Returns containment name with " Containment" suffix for document display (matches folder naming). */
 function getContainmentDisplayName(name) {
     const base = (name || 'Containment').trim().replace(/\s+Containment$/i, '');
@@ -63,7 +67,7 @@ function wireContainmentNameSuffix(inputId, suffixId) {
     if (!nameInput || !suffixSpan) return;
     const updateSuffix = () => {
         const raw = nameInput.value;
-        if (!raw.trim()) {
+        if (!raw.trim() || containmentNameHasContainmentWord(raw)) {
             suffixSpan.style.display = 'none';
             return;
         }
@@ -2395,10 +2399,16 @@ function openEditContainmentModal(containmentId) {
         `<option value="${b.id}" ${b.id === containment.buildingId ? 'selected' : ''}>${escapeHtml(b.name)}</option>`
     ).join('');
     
-    // Show regulated area status (read-only, set via Pre-Start inspection)
-    const regulatedBadge = containment.regulatedArea 
-        ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">⚠️ Regulated Area</span>' 
-        : '';
+    // Regulated area can be toggled in edit; Pre-Start inspection can also set it on stage change
+    const regulatedAreaField = `
+        <div class="notice-box notice-box--warn">
+            ${buildModalCheckboxRow(
+                'edit-containment-regulated-area',
+                '',
+                containment.regulatedArea ? 'checked' : '',
+                '<span class="modal-check-title">Regulated Area</span><span class="modal-check-subtitle">Check this if the containment is a regulated area. Negative pressure readings will not be required for daily logs, and clearance air samples will not be automatically created.</span>'
+            )}
+        </div>`;
     
     // Show visual inspection history
     const inspectionsHtml = (containment.visualInspections || []).length > 0
@@ -2423,7 +2433,7 @@ function openEditContainmentModal(containmentId) {
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
                 <div class="containment-name-wrap">
                     <input type="text" id="edit-containment-name" class="containment-name-input" value="${escapeHtml(containment.name)}" autocomplete="off">
-                    <span id="edit-containment-suffix" class="containment-name-suffix" style="${containment.name ? '' : 'display:none;'}"> Containment</span>
+                    <span id="edit-containment-suffix" class="containment-name-suffix" style="display:none;"> Containment</span>
                 </div>
             </div>
             <div>
@@ -2449,7 +2459,7 @@ function openEditContainmentModal(containmentId) {
                     <option value="${STAGE_ABATEMENT_COMPLETED}" ${currentStage === STAGE_ABATEMENT_COMPLETED ? 'selected' : ''}>Abatement Completed</option>
                 </select>
             </div>
-            ${regulatedBadge ? `<div class="flex items-center gap-2">${regulatedBadge}</div>` : ''}
+            ${regulatedAreaField}
             ${inspectionsHtml}
             <div id="edit-containment-status-msg" class="hidden text-sm font-medium p-2 rounded"></div>
         </div>
@@ -2538,6 +2548,7 @@ function openEditContainmentModal(containmentId) {
         
         const newStage = document.getElementById('edit-containment-stage')?.value;
         const previousStage = currentStage; // normalized at modal open time
+        const editRegulatedArea = document.getElementById('edit-containment-regulated-area')?.checked ?? !!containment.regulatedArea;
         
         // --- Stage change detection & visual inspection logic ---
         let requiresInspection = false;
@@ -2636,9 +2647,8 @@ function openEditContainmentModal(containmentId) {
             });
         }
         
-        // Determine regulatedArea status
-        // Set via Pre-Start inspection; otherwise keep existing value
-        let regulatedArea = containment.regulatedArea || false;
+        // Determine regulatedArea status from edit form; Pre-Start inspection overrides on pass
+        let regulatedArea = editRegulatedArea;
         if (inspectionType === 'Pre-Start' && visualInspectionData?.passed) {
             regulatedArea = visualInspectionData.regulatedArea || false;
         }
