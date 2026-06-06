@@ -380,6 +380,9 @@ function debugPhoneLog(location, message, data, hypothesisId) {
 // #endregion
 
 function getPhotoBridgeScript() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'scripts', 'photo-bridge.ps1');
+  }
   return path.join(__dirname, 'scripts', 'photo-bridge.ps1');
 }
 
@@ -812,8 +815,14 @@ async function runPhotoBridge(args, timeoutMs) {
     }
   }
 
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     const scriptPath = getPhotoBridgeScript();
+    try {
+      await fs.access(scriptPath);
+    } catch {
+      reject(new Error(`Phone import script not found at ${scriptPath}`));
+      return;
+    }
     const psArgs = [
       '-NoProfile', '-NonInteractive',
       '-ExecutionPolicy', 'Bypass',
