@@ -45,6 +45,7 @@ function exportProjectToExcel(projectData) {
 
     // Project Overview Sheet
     const overviewData = [
+      ['Oversight Project ID', projectData.id || ''],
       ['Project Number', projectData.projectNumber || ''],
       ['Site Name', projectData.siteName || projectData.name || ''],
       ['Site Address', projectData.siteAddress || ''],
@@ -376,13 +377,15 @@ function importProjectFromExcel(fileBuffer) {
         if (jsonStr) {
           try {
             const projectData = JSON.parse(jsonStr);
-            // Reset ID for new import; preserve created/lastModified from source
-            projectData.id = Date.now().toString(36) + Math.random().toString(36).substr(2);
+            // Preserve stable Oversight Project ID so re-import updates instead of duplicating
+            if (!projectData.id) {
+              projectData.id = _genId('prj');
+            }
             projectData.created = parseExcelDate(projectData.created) || new Date().toISOString();
             projectData.lastModified = parseExcelDate(projectData.lastModified) || new Date().toISOString();
             delete projectData.archived;
             delete projectData.archivedAt;
-            return projectData;
+            return _finalizeImportedProject(projectData, workbook);
           } catch (e) {
             console.warn('Failed to parse _FullData, falling back to sheet reconstruction', e);
           }
@@ -392,7 +395,7 @@ function importProjectFromExcel(fileBuffer) {
 
     // Fallback: Reconstruct from individual sheets
     const projectData = {
-      id: Date.now().toString(36) + Math.random().toString(36).substr(2),
+      id: _genId('prj'),
       created: new Date().toISOString(),
       lastModified: new Date().toISOString()
     };
@@ -401,6 +404,7 @@ function importProjectFromExcel(fileBuffer) {
     if (workbook.SheetNames.includes('Overview')) {
       const overview = XLSX.utils.sheet_to_json(workbook.Sheets['Overview'], { header: 1 });
       const fieldMap = {
+        'Oversight Project ID': 'id',
         'Project Number': 'projectNumber',
         'Site Name': 'siteName',
         'Site Address': 'siteAddress',
@@ -633,11 +637,23 @@ function importProjectFromExcel(fileBuffer) {
     }
 
     projectData.bulkSamples = projectData.bulkSamples || [];
-    return projectData;
+    return _finalizeImportedProject(projectData, workbook);
   } catch (error) {
     console.error('Error importing project from Excel:', error);
     throw error;
   }
+}
+
+/** Read Oversight Project ID from Overview when missing; ensure id is always set. */
+function _finalizeImportedProject(projectData, workbook) {
+  if ((!projectData.id || projectData.id === '') && workbook.SheetNames.includes('Overview')) {
+    const overview = XLSX.utils.sheet_to_json(workbook.Sheets['Overview'], { header: 1 });
+    const idRow = overview.find(row => row[0] === 'Oversight Project ID');
+    if (idRow && idRow[1]) projectData.id = String(idRow[1]).trim();
+  }
+  if (!projectData.id) projectData.id = _genId('prj');
+  if (projectData.siteName && !projectData.name) projectData.name = projectData.siteName;
+  return projectData;
 }
 
 function _genId(prefix) {

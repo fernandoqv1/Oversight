@@ -478,6 +478,30 @@ function getAssignedQuantity(materialId) {
     return total;
 }
 
+/** Find an existing site material by name, or create one for tracking in the Materials list. */
+function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0) {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return null;
+    if (!currentProject.materials) currentProject.materials = [];
+    const normName = trimmed.toLowerCase();
+    let material = currentProject.materials.find(m => (m.name || '').trim().toLowerCase() === normName);
+    if (!material) {
+        material = {
+            id: generateId(),
+            name: trimmed,
+            totalQuantity: 0,
+            unit: unit || 'SF',
+            friable: false
+        };
+        currentProject.materials.push(material);
+    }
+    const hint = Number(quantityHint) || 0;
+    if (hint > (Number(material.totalQuantity) || 0)) {
+        material.totalQuantity = hint;
+    }
+    return material;
+}
+
 function renderContainments() {
     _shellRefresh();
     const container = document.getElementById('oversight-project-containments');
@@ -747,6 +771,90 @@ function isAutoAirSampleId(value) {
     return new RegExp(`^${escapedProject}-(AS|PS|CA)\\d{3}$`, 'i').test(String(value || ''));
 }
 
+function buildAirSampleIdPrefix(type) {
+    const projectNum = currentProject?.projectNumber || 'PJ';
+    return `${projectNum}-${getAirSampleTypePrefix(type)}`;
+}
+
+function parseAirSampleIdSuffix(sampleId, type) {
+    const typePrefix = getAirSampleTypePrefix(type);
+    const id = String(sampleId || '').trim();
+    const autoMatch = id.match(/^.+-(AS|PS|CA)(\d{1,3})$/i);
+    if (autoMatch && autoMatch[1].toUpperCase() === typePrefix) {
+        return autoMatch[2].padStart(3, '0');
+    }
+    if (/^\d{1,3}$/.test(id)) return id.padStart(3, '0');
+    const generic = id.match(/(AS|PS|CA)(\d{1,3})$/i);
+    if (generic) return generic[2].padStart(3, '0');
+    return getNextAirSampleId(type).slice(buildAirSampleIdPrefix(type).length);
+}
+
+function buildAirSampleIdFromSuffix(type, suffixInput) {
+    const prefix = buildAirSampleIdPrefix(type);
+    const digits = String(suffixInput || '').replace(/\D/g, '');
+    const suffix = (digits || '001').padStart(3, '0').slice(-3);
+    return `${prefix}${suffix}`;
+}
+
+function syncAirSampleIdsForProjectNumber(oldProjectNumber, newProjectNumber) {
+    if (!oldProjectNumber || !newProjectNumber || oldProjectNumber === newProjectNumber) return;
+    const escapedOld = oldProjectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`^${escapedOld}-(AS|PS|CA)(\\d{3})$`, 'i');
+    (currentProject.airSamples || []).forEach(sample => {
+        const id = sample.sampleId || '';
+        const match = id.match(re);
+        if (match) {
+            sample.sampleId = `${newProjectNumber}-${match[1].toUpperCase()}${match[2]}`;
+        }
+    });
+}
+
+function buildAirSampleIdFieldHtml(prefixSpanId, suffixInputId, type, sampleId, compact) {
+    const prefix = buildAirSampleIdPrefix(type);
+    const suffix = parseAirSampleIdSuffix(sampleId, type);
+    const inputStyle = compact
+        ? 'padding:0.3rem 0.5rem; font-size:0.875rem; width:3.25rem;'
+        : 'padding:0.75rem; width:3.5rem;';
+    return `<div class="flex items-center gap-1" style="flex-wrap:nowrap;">
+        <span id="${prefixSpanId}" class="font-mono text-gray-600 whitespace-nowrap${compact ? ' text-xs' : ' text-sm'}">${escapeHtml(prefix)}</span>
+        <input type="text" id="${suffixInputId}" class="border rounded font-mono" style="${inputStyle}" value="${escapeHtml(suffix)}" maxlength="3" inputmode="numeric" aria-label="Sample number">
+    </div>`;
+}
+
+function wireAirSampleIdTypeChange(modal, typeSelectId, prefixSpanId, suffixInputId, options = {}) {
+    const { currentSampleId = null, autoSuggestOnTypeChange = !currentSampleId } = typeof options === 'string'
+        ? { currentSampleId: options }
+        : options;
+    const typeSelect = modal.querySelector(`#${typeSelectId}`);
+    const prefixEl = modal.querySelector(`#${prefixSpanId}`);
+    const suffixEl = modal.querySelector(`#${suffixInputId}`);
+    typeSelect?.addEventListener('change', () => {
+        const sampleType = typeSelect.value;
+        if (prefixEl) prefixEl.textContent = buildAirSampleIdPrefix(sampleType);
+        if (!suffixEl) return;
+        if (autoSuggestOnTypeChange) {
+            const currentFullId = buildAirSampleIdFromSuffix(sampleType, suffixEl.value.trim());
+            if (!suffixEl.value.trim() || isAutoAirSampleId(currentFullId)) {
+                suffixEl.value = getNextAirSampleId(sampleType, currentSampleId || '').slice(buildAirSampleIdPrefix(sampleType).length);
+            }
+        } else {
+            suffixEl.value = parseAirSampleIdSuffix(suffixEl.value, sampleType);
+        }
+    });
+}
+
+function buildChainOfCustodyTemplateData(formData) {
+    const labAccountNumber = formData.labNumber || '';
+    const laboratoryName = formData.lab || '';
+    return {
+        labNumber: labAccountNumber,
+        lab: laboratoryName,
+        Bill: labAccountNumber,
+        Bill2: labAccountNumber,
+        Laboratory: laboratoryName
+    };
+}
+
 // Export for onclick handlers
 window.updateSampleCalc = updateSampleCalc;
 
@@ -918,8 +1026,11 @@ function openEditProjectModal() {
             return;
         }
         
+        const previousProjectNumber = currentProject.projectNumber || '';
+
         // Update all fields
         currentProject.projectNumber = projectNumber;
+        syncAirSampleIdsForProjectNumber(previousProjectNumber, projectNumber);
         currentProject.siteName = siteName;
         currentProject.name = siteName;
         currentProject.siteAddress = siteAddress;
@@ -1210,24 +1321,16 @@ function openSpaceMaterialModal(building, existingSpace) {
             if (!newName) return;
             const newQty = parseFloat(row.querySelector('.new-mat-qty')?.value) || 0;
             const newUnit = row.querySelector('.new-mat-unit')?.value || 'SF';
-
-            if (!currentProject.materials) currentProject.materials = [];
-            const newMatId = generateId();
-            currentProject.materials.push({
-                id: newMatId,
-                name: newName,
-                totalQuantity: newQty,
-                unit: newUnit,
-                friable: false
-            });
+            const siteMat = findOrCreateSiteMaterial(newName, newUnit, newQty);
+            if (!siteMat) return;
 
             if (newQty > 0) {
                 assignedMaterials.push({
                     id: generateId(),
-                    materialId: newMatId,
-                    name: newName,
+                    materialId: siteMat.id,
+                    name: siteMat.name,
                     quantity: newQty,
-                    unit: newUnit
+                    unit: siteMat.unit || newUnit
                 });
             }
         });
@@ -1622,7 +1725,7 @@ function openPrintBulkSamplesModal(materialId) {
                     <input type="text" id="print-bulk-inspector" class="w-full p-2.5 border rounded-lg" value="${escapeHtml(inspectorName)}">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Lab Account Number</label>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Bill 2 / Lab Account Number</label>
                     <input type="text" id="print-bulk-lab-number" class="w-full p-2.5 border rounded-lg" placeholder="e.g., LAB-001">
                 </div>
             </div>
@@ -1743,10 +1846,8 @@ async function printBulkSampleForm(project, material, bulkSamples, formData = {}
             date: formatDate(getTodayLocal()),
             projectNumber: project.projectNumber || '',
             inspectorName: formInspectorName,
-            labNumber: formData.labNumber || '',
             datesCollected: datesCollected,
             analysisType: formData.analysisType || 'PLM - Standard',
-            lab: formData.lab || '',
             turnAroundTime: formData.turnAroundTime || '',
             siteName: project.siteName || '',
             spectialInstructions: formData.specialInstructions || '',
@@ -1756,7 +1857,8 @@ async function printBulkSampleForm(project, material, bulkSamples, formData = {}
             samplesBulk: samplesData,
             samples: samplesData,
             image: signatureBase64 || '',
-            signature: signatureBase64 || ''
+            signature: signatureBase64 || '',
+            ...buildChainOfCustodyTemplateData(formData)
         };
 
         showNotification('Loading Bulk Sample template...');
@@ -1860,25 +1962,36 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
         let name = document.getElementById('space-material-name').value.trim();
         let unit = document.getElementById('space-material-unit').value;
         
+        const quantity = parseFloat(document.getElementById('space-material-quantity').value) || 0;
+
+        let siteMaterial = null;
         if (selectedId) {
-            const siteMaterial = currentProject.materials?.find(m => m.id === selectedId);
+            siteMaterial = currentProject.materials?.find(m => m.id === selectedId) || null;
+            if (siteMaterial) {
+                name = siteMaterial.name;
+                unit = siteMaterial.unit || unit;
+            }
+        } else if (name) {
+            siteMaterial = findOrCreateSiteMaterial(name, unit, quantity);
             if (siteMaterial) {
                 name = siteMaterial.name;
                 unit = siteMaterial.unit || unit;
             }
         }
-        
+
         if (!name) {
             alert('Please select or enter a material');
             return false;
         }
-        
-        const quantity = parseFloat(document.getElementById('space-material-quantity').value) || 0;
+
+        if (siteMaterial && quantity > (Number(siteMaterial.totalQuantity) || 0)) {
+            siteMaterial.totalQuantity = quantity;
+        }
         
         if (!space.materials) space.materials = [];
         space.materials.push({
             id: generateId(),
-            materialId: selectedId || null,
+            materialId: siteMaterial?.id || selectedId || null,
             name,
             quantity,
             unit
@@ -2412,18 +2525,20 @@ function openEditContainmentModal(containmentId) {
     
     // Show visual inspection history
     const inspectionsHtml = (containment.visualInspections || []).length > 0
-        ? `<div class="mt-2 space-y-1">
-            <label class="block text-xs font-medium text-gray-500 uppercase tracking-wide">Visual Inspections</label>
+        ? `<div class="containment-vi-history" style="margin-top:0.5rem;">
+            <label class="block font-medium text-gray-500 uppercase tracking-wide" style="font-size:10px;margin-bottom:0.25rem;">Visual Inspections</label>
+            <div style="display:flex;flex-direction:column;gap:0.25rem;">
             ${(containment.visualInspections || []).map(vi => {
                 const passClass = vi.passed ? 'text-green-700 bg-green-50 border-green-200' : 'text-red-700 bg-red-50 border-red-200';
                 const passText = vi.passed ? 'Pass' : 'Fail';
-                return `<div class="text-xs border rounded p-2 ${passClass}">
+                return `<div class="border rounded ${passClass}" style="font-size:0.6875rem;line-height:1.35;padding:0.3rem 0.45rem;">
                     <span class="font-medium">${escapeHtml(vi.type || '')} Visual:</span> ${passText}
                     ${vi.inspectorName ? ` — ${escapeHtml(vi.inspectorName)}` : ''}
                     ${vi.date ? ` (${formatDateText(vi.date)})` : ''}
-                    ${vi.comments ? `<br><span class="italic">${escapeHtml(vi.comments)}</span>` : ''}
+                    ${vi.comments ? `<br><span class="italic" style="font-size:0.625rem;line-height:1.3;">${escapeHtml(vi.comments)}</span>` : ''}
                 </div>`;
             }).join('')}
+            </div>
         </div>`
         : '';
     
@@ -2807,7 +2922,7 @@ function openAddAirSampleModal() {
             <div class="grid grid-cols-2 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample ID</label>
-                    <input type="text" id="new-sample-id" class="w-full p-3 border rounded-lg" value="${suggestedId}">
+                    ${buildAirSampleIdFieldHtml('new-sample-id', 'new-sample-id-suffix', 'Area', suggestedId, false)}
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
@@ -2873,7 +2988,8 @@ function openAddAirSampleModal() {
             </div>
         </div>
     `, () => {
-        const sampleId = document.getElementById('new-sample-id').value.trim();
+        const sampleType = document.getElementById('new-sample-type').value;
+        const sampleId = buildAirSampleIdFromSuffix(sampleType, document.getElementById('new-sample-id-suffix').value.trim());
         if (!sampleId) {
             alert('Please enter a sample ID');
             return false;
@@ -2891,7 +3007,7 @@ function openAddAirSampleModal() {
         currentProject.airSamples.push({
             id: generateId(),
             sampleId,
-            type: document.getElementById('new-sample-type').value,
+            type: sampleType,
             location: document.getElementById('new-sample-location').value.trim(),
             containmentId: containmentIdVal,
             containmentName: containment?.name || '',
@@ -2908,14 +3024,7 @@ function openAddAirSampleModal() {
         renderProject();
     });
 
-    const sampleTypeSelect = modal.querySelector('#new-sample-type');
-    const sampleIdInput = modal.querySelector('#new-sample-id');
-    sampleTypeSelect?.addEventListener('change', () => {
-        if (!sampleIdInput) return;
-        if (!sampleIdInput.value.trim() || isAutoAirSampleId(sampleIdInput.value.trim())) {
-            sampleIdInput.value = getNextAirSampleId(sampleTypeSelect.value);
-        }
-    });
+    wireAirSampleIdTypeChange(modal, 'new-sample-type', 'new-sample-id', 'new-sample-id-suffix');
 }
 
 function openEditAirSampleModal(sampleId) {
@@ -2961,7 +3070,7 @@ function openEditAirSampleModal(sampleId) {
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem 0.75rem;">
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample ID</label>
-                        <input type="text" id="edit-sample-id" class="w-full border rounded" style="padding:0.3rem 0.5rem; font-size:0.875rem;" value="${escapeHtml(sample.sampleId || '')}">
+                        ${buildAirSampleIdFieldHtml('edit-sample-id', 'edit-sample-id-suffix', sample.type || 'Area', sample.sampleId || '', true)}
                     </div>
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample Type</label>
@@ -3053,14 +3162,15 @@ function openEditAirSampleModal(sampleId) {
             ` : ''}
         </div>
     `, () => {
-        const sampleIdVal = document.getElementById('edit-sample-id').value.trim();
+        const editSampleType = document.getElementById('edit-sample-type').value;
+        const sampleIdVal = buildAirSampleIdFromSuffix(editSampleType, document.getElementById('edit-sample-id-suffix').value.trim());
         if (!sampleIdVal) {
             alert('Please enter a sample ID');
             return false;
         }
         
         sample.sampleId = sampleIdVal;
-        sample.type = document.getElementById('edit-sample-type').value;
+        sample.type = editSampleType;
         sample.location = document.getElementById('edit-sample-location').value.trim();
         const containmentIdVal = document.getElementById('edit-sample-containment').value;
         sample.containmentId = containmentIdVal;
@@ -3126,15 +3236,25 @@ function openEditAirSampleModal(sampleId) {
     });
 
     modal.querySelector('.modal-content')?.classList.add('air-sample-edit-modal');
-    const editSampleTypeSelect = modal.querySelector('#edit-sample-type');
-    const editSampleIdInput = modal.querySelector('#edit-sample-id');
-    editSampleTypeSelect?.addEventListener('change', () => {
-        if (!editSampleIdInput) return;
-        const currentValue = editSampleIdInput.value.trim();
-        if (!currentValue || isAutoAirSampleId(currentValue)) {
-            editSampleIdInput.value = getNextAirSampleId(editSampleTypeSelect.value, sample.sampleId || '');
-        }
-    });
+    wireAirSampleIdTypeChange(modal, 'edit-sample-type', 'edit-sample-id', 'edit-sample-id-suffix', { currentSampleId: sample.sampleId || '' });
+
+    const editFooter = modal.querySelector('.modal-footer');
+    if (editFooter) {
+        editFooter.classList.remove('justify-end');
+        editFooter.classList.add('justify-between');
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'btn btn-danger';
+        deleteBtn.textContent = 'Delete Sample';
+        deleteBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!confirm('Delete this air sample? This cannot be undone.')) return;
+            modal.remove();
+            deleteAirSample(sampleId);
+        });
+        editFooter.insertBefore(deleteBtn, editFooter.firstChild);
+    }
 
     setTimeout(() => {
         updateSampleCalc('edit');
@@ -4039,10 +4159,28 @@ function openPhoneImportModal(logDate, onImportComplete) {
     function formatCountdown(seconds) {
         const sec = Math.max(0, Math.ceil(Number(seconds) || 0));
         if (sec <= 0) return 'Finishing up…';
-        if (sec < 60) return `~${sec}s remaining`;
+        if (sec < 60) return `Loading photos… ~${sec}s left`;
         const minutes = Math.floor(sec / 60);
         const remainder = sec % 60;
-        return remainder > 0 ? `~${minutes}m ${remainder}s remaining` : `~${minutes}m remaining`;
+        return remainder > 0 ? `Loading photos… ~${minutes}m ${remainder}s left` : `Loading photos… ~${minutes}m left`;
+    }
+
+    function formatPreviewProgress(completed, total) {
+        const done = Math.max(0, Number(completed) || 0);
+        const count = Math.max(0, Number(total) || 0);
+        if (count <= 0) return 'Loading previews…';
+        if (done >= count) return 'Finishing up…';
+        return `Loading previews… ${done} / ${count}`;
+    }
+
+    function setPreviewProgress(completed, total) {
+        if (!countdownEl) return;
+        if (countdownTimer) {
+            clearInterval(countdownTimer);
+            countdownTimer = null;
+        }
+        countdownDeadlineMs = 0;
+        countdownEl.textContent = formatPreviewProgress(completed, total);
     }
 
     function countdownSecondsLeft() {
@@ -4084,13 +4222,22 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
     const unsubscribePreviewProgress = window.electronAPI.onPhoneImportPreviewProgress?.((payload) => {
         if (!payload) return;
-        if (typeof payload.secondsRemaining === 'number') {
-            setCountdown(payload.secondsRemaining);
+        if (payload.phase === 'shell' && typeof payload.completed === 'number' && typeof payload.total === 'number') {
+            setPreviewProgress(payload.completed, payload.total);
         }
         if (payload.photo?.path) {
             showPhotoPreview(payload.photo, { allowReplace: true });
+            // #region agent log
+            agentPreviewLog('project.js:previewProgress', 'tile update', {
+                phase: payload.phase,
+                path: payload.photo.path,
+                hasThumb: !!payload.photo.thumbBase64,
+                completed: payload.completed,
+                total: payload.total,
+            }, 'D');
+            // #endregion
         }
-        if (payload.phase === 'previews' && payload.completed >= payload.total) {
+        if (payload.phase === 'shell' && payload.completed >= payload.total) {
             hideCountdown();
         }
     }) || (() => {});
@@ -4271,6 +4418,8 @@ function openPhoneImportModal(logDate, onImportComplete) {
         return false;
     }
 
+    function agentPreviewLog() {}
+
     async function loadPreviewFromPath(photoPath, previewPath, photoIndex, allowReplace = false) {
         const norm = normalizePhonePhotoPath(photoPath);
         if (!allowReplace && isPreviewDisplayed(photoPath, photoIndex)) return true;
@@ -4278,6 +4427,15 @@ function openPhoneImportModal(logDate, onImportComplete) {
         if (!reader) return false;
         try {
             const result = await reader(previewPath);
+            // #region agent log
+            agentPreviewLog('project.js:loadPreviewFromPath', 'read preview result', {
+                success: !!result?.success,
+                hasBase64: !!result?.base64,
+                hasData: Array.isArray(result?.data),
+                error: result?.error || null,
+                previewPath,
+            }, 'D');
+            // #endregion
             if (!result?.success) return false;
             let src;
             if (result.base64) {
@@ -4290,7 +4448,12 @@ function openPhoneImportModal(logDate, onImportComplete) {
             } else {
                 return false;
             }
-            if (!applyPreviewToTile(photoPath, src, photoIndex)) return false;
+            if (!applyPreviewToTile(photoPath, src, photoIndex)) {
+                // #region agent log
+                agentPreviewLog('project.js:loadPreviewFromPath', 'tile apply failed', { photoPath, photoIndex }, 'D');
+                // #endregion
+                return false;
+            }
             loadedThumbnails.set(norm, {
                 path: photoPath,
                 success: true,
@@ -4300,16 +4463,18 @@ function openPhoneImportModal(logDate, onImportComplete) {
             });
             return true;
         } catch (err) {
+            // #region agent log
+            agentPreviewLog('project.js:loadPreviewFromPath', 'preview load exception', { error: String(err?.message || err) }, 'D');
+            // #endregion
             console.warn('Preview load failed:', err);
             return false;
         }
     }
 
-    function seedInitialPhotoPreviews() {
+    function seedShellPreviewsFromList() {
         photoList.forEach((photo, index) => {
-            if (photo?.thumbBase64) {
-                showPhotoPreview({ ...photo, index });
-            }
+            if (!photo?.thumbBase64) return;
+            showPhotoPreview({ ...photo, index });
         });
     }
 
@@ -4317,41 +4482,67 @@ function openPhoneImportModal(logDate, onImportComplete) {
         if (!Array.isArray(photos) || photos.length === 0) return;
         if (!selectedDevice) return;
 
+        const missing = photos.filter((photo) => photo?.path && !photo.thumbBase64);
+        const withEmbedded = photos.length - missing.length;
+        if (withEmbedded > 0) {
+            seedShellPreviewsFromList();
+        }
+        if (missing.length === 0) {
+            hideCountdown();
+            applyThumbnailSources();
+            // #region agent log
+            agentPreviewLog('project.js:loadHighResPreviews', 'skipped fetch - embedded thumbs', {
+                photoCount: photos.length,
+                withEmbedded,
+            }, 'E');
+            // #endregion
+            return;
+        }
+
+        setPreviewProgress(withEmbedded, photos.length);
+        // #region agent log
+        agentPreviewLog('project.js:loadHighResPreviews', 'start', {
+            photoCount: photos.length,
+            missing: missing.length,
+            withEmbedded,
+        }, 'E');
+        // #endregion
+
         let result = null;
         if (typeof window.electronAPI?.loadPhonePhotoPreviews === 'function') {
             try {
                 result = await window.electronAPI.loadPhonePhotoPreviews(selectedDevice, photos);
             } catch (err) {
+                // #region agent log
+                agentPreviewLog('project.js:loadHighResPreviews', 'loadPhonePhotoPreviews exception', { error: String(err?.message || err) }, 'E');
+                // #endregion
                 console.warn('loadPhonePhotoPreviews failed:', err);
-            }
-        }
-        if (!result?.success && typeof window.electronAPI?.upgradePhonePhotoPreviews === 'function') {
-            try {
-                result = await window.electronAPI.upgradePhonePhotoPreviews(selectedDevice, photos);
-            } catch (err) {
-                console.warn('upgradePhonePhotoPreviews failed:', err);
             }
         }
 
         if (result?.success && Array.isArray(result.photos)) {
             for (const photo of result.photos) {
+                if (!photo?.thumbBase64 && !photo?.previewPath) continue;
                 await showPhotoPreview(photo, { allowReplace: true });
             }
         } else if (typeof window.electronAPI?.getPhonePhotoThumbnails === 'function') {
             try {
-                const paths = photos.map((photo) => photo.path).filter(Boolean);
+                const paths = missing.map((photo) => photo.path).filter(Boolean);
                 const thumbResult = await window.electronAPI.getPhonePhotoThumbnails(
                     selectedDevice,
                     paths,
                     phoneDeviceOptions()
                 );
                 if (thumbResult?.success && Array.isArray(thumbResult.thumbnails)) {
-                    for (const thumb of thumbResult.thumbnails) {
+                    for (let index = 0; index < thumbResult.thumbnails.length; index += 1) {
+                        const thumb = thumbResult.thumbnails[index];
                         if (!thumb?.success || !thumb.base64) continue;
+                        const photoIndex = photos.findIndex((p) => normalizePhonePhotoPath(p.path) === normalizePhonePhotoPath(thumb.path));
                         await showPhotoPreview({
                             path: thumb.path,
                             thumbBase64: thumb.base64,
                             thumbMimeType: thumb.mimeType || 'image/jpeg',
+                            index: photoIndex >= 0 ? photoIndex : index,
                         }, { allowReplace: true });
                     }
                 }
@@ -4362,6 +4553,12 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
         applyThumbnailSources();
         hideCountdown();
+        // #region agent log
+        agentPreviewLog('project.js:loadHighResPreviews', 'done', {
+            resultSuccess: !!result?.success,
+            loadedThumbnails: loadedThumbnails.size,
+        }, 'D,E');
+        // #endregion
     }
 
     function applyThumbnailSources() {
@@ -4442,7 +4639,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
         });
 
         indexPhotoTiles();
-        seedInitialPhotoPreviews();
+        seedShellPreviewsFromList();
         applyThumbnailSources();
     }
 
@@ -4467,8 +4664,8 @@ function openPhoneImportModal(logDate, onImportComplete) {
     }
 
     async function detectDevices() {
-        setCountdown(45);
-        const listCountdownTimer = setInterval(() => extendCountdownIfLow(5, 15), 3000);
+        setCountdown(15);
+        const listCountdownTimer = setInterval(() => extendCountdownIfLow(3, 8), 3000);
         body.innerHTML = `
             <div class="flex items-center justify-center py-8">
                 <div class="text-center">
@@ -4525,8 +4722,8 @@ function openPhoneImportModal(logDate, onImportComplete) {
     }
 
     async function listPhotos(dateFilter) {
-        setCountdown(45);
-        const listCountdownTimer = setInterval(() => extendCountdownIfLow(5, 15), 3000);
+        setCountdown(15);
+        const listCountdownTimer = setInterval(() => extendCountdownIfLow(3, 8), 3000);
         renderLoadingState();
         try {
             const result = await window.electronAPI.listPhonePhotos(selectedDevice, dateFilter || '', phoneDeviceOptions());
@@ -5238,7 +5435,7 @@ function openPrintAirSamplesModal() {
                     <input type="text" id="print-air-inspector" class="w-full p-2.5 border rounded-lg" value="${escapeHtml(inspectorName)}">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Lab Account Number</label>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Bill 2 / Lab Account Number</label>
                     <input type="text" id="print-air-lab-number" class="w-full p-2.5 border rounded-lg" placeholder="e.g., LAB-001">
                 </div>
             </div>
@@ -5392,17 +5589,16 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
             date: formatDate(getTodayLocal()),
             projectNumber: project.projectNumber || '',
             inspectorName: formInspectorName,
-            labNumber: formData.labNumber || '',
             datesCollected: datesCollected,
             analysisType: formData.analysisType || 'PCM: NIOSH 7400',
-            lab: formData.lab || '',
             turnAroundTime: formData.turnAroundTime || '',
             siteName: project.siteName || '',
             spectialInstructions: formData.specialInstructions || '',
             inspectorEmail: formData.inspectorEmail || '',
             samples: samplesData,
             image: signatureBase64 || '',
-            signature: signatureBase64 || ''
+            signature: signatureBase64 || '',
+            ...buildChainOfCustodyTemplateData(formData)
         };
 
         showNotification('Loading Air Sample template...');
@@ -5940,9 +6136,30 @@ function saveCurrentProject() {
 // openSpaceMaterialModal didn't fire (e.g., materials added via quick-add modal).
 // Only bumps UP, never reduces — preserves user-declared totals.
 function syncMaterialTotals() {
-    if (!currentProject || !currentProject.materials) return;
-    
+    if (!currentProject) return;
+    if (!currentProject.materials) currentProject.materials = [];
+
     const buildings = currentProject.buildings || [];
+
+    // Promote space-only materials to the site materials list and link materialId
+    buildings.forEach(building => {
+        (building.spaces || []).forEach(space => {
+            (space.materials || []).forEach(sm => {
+                const name = (sm.name || sm.materialName || '').trim();
+                if (!name) return;
+                let siteMat = sm.materialId
+                    ? currentProject.materials.find(m => m.id === sm.materialId)
+                    : null;
+                if (!siteMat) {
+                    siteMat = findOrCreateSiteMaterial(name, sm.unit || 'SF', sm.quantity || 0);
+                }
+                if (!siteMat) return;
+                sm.materialId = siteMat.id;
+                sm.name = siteMat.name;
+                if (!sm.unit) sm.unit = siteMat.unit;
+            });
+        });
+    });
     
     currentProject.materials.forEach(material => {
         const matName = (material.name || '').trim().toLowerCase();
