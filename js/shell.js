@@ -445,6 +445,21 @@
     });
   }
 
+  function wireProjectSidebarPeek() {
+    if (!IS_PROJECT_PAGE) return;
+    const sidebar = document.getElementById('app-sidebar');
+    if (!sidebar) return;
+    sidebar.setAttribute('data-project-peek', 'true');
+    sidebar.setAttribute('data-collapsed', 'true');
+    sidebar.addEventListener('mouseenter', () => {
+      if (sidebar.getAttribute('data-collapsed') === 'true')
+        sidebar.setAttribute('data-hover-open', 'true');
+    });
+    sidebar.addEventListener('mouseleave', () => {
+      sidebar.removeAttribute('data-hover-open');
+    });
+  }
+
   function wireInspectorBtn() {
     // Click handler is wired by js/inspector-profile.js. We only refresh the
     // visible badge on initial paint (name + avatar initials), and let
@@ -1680,6 +1695,7 @@
 
   function initProjectPage() {
     wireSidebarToggle();
+    wireProjectSidebarPeek();
     wireInspectorBtn();
     wireTweaks();
     document.querySelector('.proj-head-row')?.addEventListener('click', (e) => {

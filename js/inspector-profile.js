@@ -232,6 +232,126 @@ function createSignatureImageModule() {
     });
 }
 
+const PHOTO_LOG_ROWS_PER_PAGE = 4;
+const PHOTO_LOG_PAIRS_PER_PAGE = PHOTO_LOG_ROWS_PER_PAGE / 2;
+
+function _photoLogGetCellText(cellXml) {
+    return (cellXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [])
+        .map(t => t.replace(/<[^>]+>/g, ''))
+        .join('')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .trim();
+}
+
+function _photoLogHasImage(cellXml) {
+    return /<w:(?:drawing|pict|object)\b|<a:blip\b/.test(cellXml);
+}
+
+function _photoLogAddTrPrProperty(rowXml, propXml) {
+    const propTag = propXml.match(/<w:(\w+)/)?.[1];
+    if (!propTag) return rowXml;
+    const existingTrPr = rowXml.match(/<w:trPr\b[^>]*>([\s\S]*?)<\/w:trPr>/);
+    if (existingTrPr) {
+        if (new RegExp(`<w:${propTag}\\b`).test(existingTrPr[0])) return rowXml;
+        return rowXml.replace(existingTrPr[0], existingTrPr[0].replace('</w:trPr>', `${propXml}</w:trPr>`));
+    }
+    return rowXml.replace(/(<w:tr\b[^>]*>)/, `$1<w:trPr>${propXml}</w:trPr>`);
+}
+
+function _photoLogAddKeepNextToLabelRow(rowXml) {
+    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+    return rowXml.replace(cellPattern, (cellXml) => {
+        if (!/Photo\s*#/.test(_photoLogGetCellText(cellXml))) return cellXml;
+        return cellXml.replace(/<w:p\b([^>]*)>([\s\S]*?)<\/w:p>/g, (full, attrs, inner) => {
+            if (/<w:keepNext/.test(inner)) return full;
+            if (/<w:pPr/.test(inner)) {
+                return full.replace(/<w:pPr\b[^>]*>/, (pPr) => `${pPr}<w:keepNext/>`);
+            }
+            return `<w:p${attrs}><w:pPr><w:keepNext/></w:pPr>${inner}</w:p>`;
+        });
+    });
+}
+
+function removeEmptyPhotoLogCells(zip) {
+    const docFile = zip?.file?.('word/document.xml');
+    if (!docFile) return;
+
+    const isEmptyCell = (cellXml) => !_photoLogHasImage(cellXml) && _photoLogGetCellText(cellXml) === '';
+    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+    let removeNextPhotoImageCell = false;
+    const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
+        const cells = rowXml.match(cellPattern);
+        if (!cells || cells.length !== 2 || !isEmptyCell(cells[1])) {
+            removeNextPhotoImageCell = false;
+            return rowXml;
+        }
+
+        const firstText = _photoLogGetCellText(cells[0]);
+        if (/Photo\s*#/.test(firstText)) {
+            removeNextPhotoImageCell = true;
+            return rowXml.replace(cells[1], '');
+        }
+
+        if (removeNextPhotoImageCell && _photoLogHasImage(cells[0])) {
+            removeNextPhotoImageCell = false;
+            return rowXml.replace(cells[1], '');
+        }
+
+        removeNextPhotoImageCell = false;
+        return rowXml;
+    });
+
+    zip.file('word/document.xml', updatedXml);
+}
+
+function paginatePhotoLogTable(zip) {
+    const docFile = zip?.file?.('word/document.xml');
+    if (!docFile) return;
+
+    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+    let pairIndex = 0;
+    let expectImageRow = false;
+
+    const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
+        const cells = rowXml.match(cellPattern);
+        if (!cells || cells.length < 1) {
+            expectImageRow = false;
+            return rowXml;
+        }
+
+        const isLabelRow = /Photo\s*#/.test(_photoLogGetCellText(cells[0]));
+        const isImageRow = expectImageRow && _photoLogHasImage(cells[0]);
+
+        if (isLabelRow) {
+            let updated = _photoLogAddKeepNextToLabelRow(rowXml);
+            updated = _photoLogAddTrPrProperty(updated, '<w:cantSplit/>');
+            if (pairIndex >= PHOTO_LOG_PAIRS_PER_PAGE && pairIndex % PHOTO_LOG_PAIRS_PER_PAGE === 0) {
+                updated = _photoLogAddTrPrProperty(updated, '<w:pageBreakBefore/>');
+            }
+            expectImageRow = true;
+            pairIndex++;
+            return updated;
+        }
+
+        if (isImageRow) {
+            expectImageRow = false;
+            return _photoLogAddTrPrProperty(rowXml, '<w:cantSplit/>');
+        }
+
+        expectImageRow = false;
+        return rowXml;
+    });
+
+    zip.file('word/document.xml', updatedXml);
+}
+
+function processPhotoLogInDocx(zip) {
+    removeEmptyPhotoLogCells(zip);
+    paginatePhotoLogTable(zip);
+}
+
 /**
  * Get signature base64 for a specific inspector by name
  * @param {string} inspectorName - The name of the inspector
