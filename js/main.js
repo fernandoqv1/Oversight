@@ -1187,47 +1187,6 @@ async function downloadArchivedProject(projectId, projectName) {
             return date < new Date();
         };
 
-        const removeEmptyPhotoLogCells = (zip) => {
-            const docFile = zip?.file?.('word/document.xml');
-            if (!docFile) return;
-
-            const getCellText = (cellXml) => (cellXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [])
-                .map(t => t.replace(/<[^>]+>/g, ''))
-                .join('')
-                .replace(/&amp;/g, '&')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .trim();
-            const hasImage = (cellXml) => /<w:(?:drawing|pict|object)\b|<a:blip\b/.test(cellXml);
-            const isEmptyCell = (cellXml) => !hasImage(cellXml) && getCellText(cellXml) === '';
-
-            const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
-            let removeNextPhotoImageCell = false;
-            const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
-                const cells = rowXml.match(cellPattern);
-                if (!cells || cells.length !== 2 || !isEmptyCell(cells[1])) {
-                    removeNextPhotoImageCell = false;
-                    return rowXml;
-                }
-
-                const firstText = getCellText(cells[0]);
-                if (/Photo\s*#/.test(firstText)) {
-                    removeNextPhotoImageCell = true;
-                    return rowXml.replace(cells[1], '');
-                }
-
-                if (removeNextPhotoImageCell && hasImage(cells[0])) {
-                    removeNextPhotoImageCell = false;
-                    return rowXml.replace(cells[1], '');
-                }
-
-                removeNextPhotoImageCell = false;
-                return rowXml;
-            });
-
-            zip.file('word/document.xml', updatedXml);
-        };
-
         // Template document generator - uses ImageModule for {%image}/{%%image} signatures
         const generateDocBlob = async (templatePath, templateData) => {
             try {
@@ -1252,7 +1211,7 @@ async function downloadArchivedProject(projectId, projectName) {
                 const docTemplate = new DocxtemplaterClass(docZip, docOptions);
                 docTemplate.render(templateData);
                 if (/Daily Log Template\.docx/i.test(templatePath)) {
-                    removeEmptyPhotoLogCells(docTemplate.getZip());
+                    processPhotoLogInDocx(docTemplate.getZip());
                 }
                 return docTemplate.getZip().generate({
                     type: 'blob',

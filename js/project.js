@@ -5660,47 +5660,6 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
 // DAILY LOG DOCUMENT GENERATION
 // ============================================
 
-function removeEmptyPhotoLogCells(zip) {
-    const docFile = zip?.file?.('word/document.xml');
-    if (!docFile) return;
-
-    const getCellText = (cellXml) => (cellXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [])
-        .map(t => t.replace(/<[^>]+>/g, ''))
-        .join('')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .trim();
-    const hasImage = (cellXml) => /<w:(?:drawing|pict|object)\b|<a:blip\b/.test(cellXml);
-    const isEmptyCell = (cellXml) => !hasImage(cellXml) && getCellText(cellXml) === '';
-
-    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
-    let removeNextPhotoImageCell = false;
-    const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
-        const cells = rowXml.match(cellPattern);
-        if (!cells || cells.length !== 2 || !isEmptyCell(cells[1])) {
-            removeNextPhotoImageCell = false;
-            return rowXml;
-        }
-
-        const firstText = getCellText(cells[0]);
-        if (/Photo\s*#/.test(firstText)) {
-            removeNextPhotoImageCell = true;
-            return rowXml.replace(cells[1], '');
-        }
-
-        if (removeNextPhotoImageCell && hasImage(cells[0])) {
-            removeNextPhotoImageCell = false;
-            return rowXml.replace(cells[1], '');
-        }
-
-        removeNextPhotoImageCell = false;
-        return rowXml;
-    });
-
-    zip.file('word/document.xml', updatedXml);
-}
-
 function printDailyLog(project, dailyLog) {
     try {
         let DocxtemplaterClass = window.Docxtemplater || (typeof Docxtemplater !== 'undefined' ? Docxtemplater : null);
@@ -5886,7 +5845,7 @@ function printDailyLog(project, dailyLog) {
 
                 try {
                     doc.render(templateData);
-                    removeEmptyPhotoLogCells(doc.getZip());
+                    processPhotoLogInDocx(doc.getZip());
                 } catch (error) {
                     console.error('Docxtemplater render error:', error);
                     if (error.properties && error.properties.errors) {
