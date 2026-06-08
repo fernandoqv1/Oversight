@@ -638,6 +638,18 @@ function openNewProjectModal(existingProject = null) {
             airSamples: isEdit ? existingProject.airSamples : [],
             bulkSamples: isEdit ? (existingProject.bulkSamples || []) : []
         };
+
+        if (isEdit && existingProject.projectNumber && existingProject.projectNumber !== projectNumber) {
+            const escapedOld = existingProject.projectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const sampleIdRe = new RegExp(`^${escapedOld}-(AS|PS|CA)(\\d{3})$`, 'i');
+            (projectData.airSamples || []).forEach(sample => {
+                const id = sample.sampleId || '';
+                const match = id.match(sampleIdRe);
+                if (match) {
+                    sample.sampleId = `${projectNumber}-${match[1].toUpperCase()}${match[2]}`;
+                }
+            });
+        }
         
         saveProject(projectData);
         
@@ -776,6 +788,45 @@ function handleExportProject(projectId) {
     }
 }
 
+function formatProjectTimestamp(iso) {
+    if (!iso) return 'Unknown';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+}
+
+function getStoredProjectById(projectId) {
+    if (!projectId) return null;
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY_PREFIX + projectId);
+        return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function confirmImportProjectUpdate(existing, imported) {
+    const existingLabel = `${existing.projectNumber || '—'} — ${existing.siteName || existing.name || 'Untitled'}`;
+    const importedLabel = `${imported.projectNumber || '—'} — ${imported.siteName || imported.name || 'Untitled'}`;
+    const existingMod = new Date(existing.lastModified || 0).getTime();
+    const importedMod = new Date(imported.lastModified || 0).getTime();
+    const isNewer = !isNaN(importedMod) && importedMod >= existingMod;
+
+    const lines = [
+        'This Excel file matches a project already on this device (same Oversight Project ID).',
+        '',
+        `Local copy: ${existingLabel}`,
+        `Last modified: ${formatProjectTimestamp(existing.lastModified)}`,
+        '',
+        `Import file: ${importedLabel}`,
+        `Last modified: ${formatProjectTimestamp(imported.lastModified)}`,
+        '',
+        isNewer
+            ? 'The import appears to be a newer version. Replace your local copy with the imported file?'
+            : 'The import appears to be older than your local copy. Replace your local copy anyway?'
+    ];
+    return confirm(lines.join('\n'));
+}
+
 function handleImportFile(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -795,20 +846,33 @@ function handleImportFile(event) {
             if (!projectData.lastModified) {
                 projectData.lastModified = new Date().toISOString();
             }
+
+            const existing = getStoredProjectById(projectData.id);
+            let isUpdate = false;
+            if (existing) {
+                if (!confirmImportProjectUpdate(existing, projectData)) {
+                    event.target.value = '';
+                    return;
+                }
+                isUpdate = true;
+                projectData.created = existing.created || projectData.created;
+            }
             
             saveProject(projectData);
             loadProjects();
             
-            showNotification('Project imported successfully!', 'success');
+            showNotification(
+                isUpdate ? 'Project updated from import.' : 'Project imported successfully!',
+                'success'
+            );
         } catch (err) {
             console.error('Import failed', err);
             alert('Failed to import project: ' + err.message);
+        } finally {
+            event.target.value = '';
         }
     };
     reader.readAsArrayBuffer(file);
-    
-    // Reset input so the same file can be re-imported
-    event.target.value = '';
 }
 
 function showNotification(message, type = 'info') {
