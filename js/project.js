@@ -1124,6 +1124,21 @@ function getNextWipeSampleId() {
     return `${prefix}${String(nextNum).padStart(2, '0')}`;
 }
 
+function formatWipeSampleTypeForCoc(type) {
+    const value = String(type || '').trim();
+    if (!value) return 'Wipe';
+    if (/clearance/i.test(value)) return 'Clearance';
+    if (/pre[-\s]?start/i.test(value) || /pre[-\s]?abatement/i.test(value)) return 'Pre-Start';
+    return value;
+}
+
+function resolveWipeContainmentName(sample, project) {
+    const raw = sample.containmentName
+        || (sample.containmentId && (project.containments || []).find(c => c.id === sample.containmentId)?.name)
+        || '';
+    return raw ? getContainmentDisplayName(raw) : '';
+}
+
 function syncWipeSampleIdsForProjectNumber(oldProjectNumber, newProjectNumber) {
     if (!oldProjectNumber || !newProjectNumber || oldProjectNumber === newProjectNumber) return;
     const escapedOld = oldProjectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2542,6 +2557,8 @@ async function printWipeSampleForm(project, wipeSamples, formData = {}) {
 
         const samplesWipe = wipeSamples.map(sample => ({
             sampleID: sample.sampleId || sample.id || '',
+            sampleType: formatWipeSampleTypeForCoc(sample.type),
+            containmentName: resolveWipeContainmentName(sample, project),
             substrate: sample.substrate || '',
             component: sample.component || '',
             quantity: sample.squareFeet || '',
@@ -2582,13 +2599,7 @@ async function printWipeSampleForm(project, wipeSamples, formData = {}) {
         }
 
         const zip = new PizZipClass(arrayBuffer);
-        // #region agent log
-        fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a62bad'},body:JSON.stringify({sessionId:'a62bad',location:'project.js:printWipeSampleForm',message:'wipe zip before normalize',data:{paths:Object.keys(zip.files||{}),backslashPaths:Object.keys(zip.files||{}).filter(p=>p.includes('\\'))},timestamp:Date.now(),hypothesisId:'H1-binary-asText'})}).catch(()=>{});
-        // #endregion
         repairDocxPlaceholderTags(zip);
-        // #region agent log
-        fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a62bad'},body:JSON.stringify({sessionId:'a62bad',location:'project.js:printWipeSampleForm',message:'wipe zip after repair',data:{paths:Object.keys(zip.files||{}),hasDocument:!!zip.file('word/document.xml')},timestamp:Date.now(),hypothesisId:'H1-binary-asText',runId:'post-fix'})}).catch(()=>{});
-        // #endregion
         const doc = new DocxtemplaterClass(zip, {
             paragraphLoop: true,
             linebreaks: true,
