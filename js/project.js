@@ -1033,6 +1033,60 @@ function repairDocxPlaceholderTags(zip) {
     });
 }
 
+const WORKER_ROSTER_EXPIRED_DATE_FIELDS = [
+    'aheraExpired', 'medicalExpired', 'respiratorExpired', 'leadExpired', 'leadMedExpired'
+];
+
+function collectWorkerRosterExpiredDates(rosterRows) {
+    const dates = new Set();
+    (rosterRows || []).forEach(row => {
+        WORKER_ROSTER_EXPIRED_DATE_FIELDS.forEach(field => {
+            const value = row && row[field];
+            if (value && String(value).trim()) dates.add(String(value).trim());
+        });
+    });
+    return dates;
+}
+
+function colorDocxRunTextRed(xml, text) {
+    if (!xml || !text) return xml;
+    const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const textTag = `<w:t(?:\\s[^>]*)?>${escaped}</w:t>`;
+    xml = xml.replace(
+        new RegExp(`(<w:r(?:\\s[^>]*)?>\\s*<w:rPr(?:\\s[^>]*)?>)([\\s\\S]*?)(</w:rPr>\\s*${textTag}</w:r>)`, 'g'),
+        (match, open, inner, close) => {
+            if (/w:color w:val="(?:EE0000|FF0000)"/.test(inner)) return match;
+            return `${open}${inner}<w:color w:val="EE0000"/>${close}`;
+        }
+    );
+    xml = xml.replace(
+        new RegExp(`(<w:r(?:\\s[^>]*)?>)\\s*${textTag}</w:r>`, 'g'),
+        `<w:r><w:rPr><w:color w:val="EE0000"/></w:rPr><w:t>${text}</w:t></w:r>`
+    );
+    return xml;
+}
+
+function applyWorkerRosterExpiredRed(zip, rosterRows) {
+    if (!zip || typeof zip.file !== 'function') return;
+    const expiredDates = collectWorkerRosterExpiredDates(rosterRows);
+    if (expiredDates.size === 0) return;
+    Object.keys(zip.files).forEach(path => {
+        if (!isDocxPlaceholderPart(path)) return;
+        const file = zip.file(path);
+        if (!file) return;
+        let xml = file.asText();
+        let changed = false;
+        expiredDates.forEach(dateStr => {
+            const next = colorDocxRunTextRed(xml, dateStr);
+            if (next !== xml) {
+                xml = next;
+                changed = true;
+            }
+        });
+        if (changed) zip.file(path, xml);
+    });
+}
+
 const LEAD_ANALYSIS_OPTIONS = [
     'Lead by NIOSH 7300 (ICP)',
     'Lead by NIOSH 7303 (ICP-MS)',
@@ -4881,6 +4935,39 @@ function buildNegativePressureHtml(containments, readingsById) {
     `;
 }
 
+function bytesFromImportedPhotoData(photoData) {
+    if (!photoData) return null;
+    const raw = photoData.data;
+    if (raw instanceof Uint8Array) return raw;
+    if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+    if (Array.isArray(raw)) return new Uint8Array(raw);
+    if (raw && raw.type === 'Buffer' && Array.isArray(raw.data)) return new Uint8Array(raw.data);
+    if (photoData.base64) {
+        const bin = atob(photoData.base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes;
+    }
+    return null;
+}
+
+function convertedImageToFile(converted, originalName) {
+    const mime = converted.mimeType || 'image/jpeg';
+    const jpgName = (originalName || 'photo').replace(/\.hei[cf]$/i, '.jpg');
+    if (Array.isArray(converted.data) && converted.data.length > 0) {
+        const blob = new Blob([new Uint8Array(converted.data)], { type: mime });
+        return new File([blob], jpgName, { type: mime });
+    }
+    if (converted.base64) {
+        const bin = atob(converted.base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: mime });
+        return new File([blob], jpgName, { type: mime });
+    }
+    return null;
+}
+
 async function preparePhotoFilesForUpload(files) {
     const out = [];
     for (const file of files) {
@@ -4891,9 +4978,14 @@ async function preparePhotoFilesForUpload(files) {
             try {
                 const buf = await file.arrayBuffer();
                 const converted = await window.electronAPI.convertImageForUpload(Array.from(new Uint8Array(buf)), file.name);
-                if (converted?.success && converted.base64) {
-                    const mime = converted.mimeType || 'image/jpeg';
-                    useFile = await fetch(`data:${mime};base64,${converted.base64}`).then(r => r.blob());
+                if (converted?.success) {
+                    const convertedFile = convertedImageToFile(converted, file.name);
+                    if (convertedFile) {
+                        useFile = convertedFile;
+                    } else {
+                        showNotification('HEIC could not be converted; save as JPEG from Photos and retry.', true);
+                        continue;
+                    }
                 } else {
                     showNotification(converted?.error || 'HEIC could not be converted; save as JPEG from Photos and retry.', true);
                     continue;
@@ -4951,7 +5043,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
         return;
     }
 
-    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.style.zIndex = '10001';
@@ -5056,15 +5147,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
         }
         if (payload.photo?.path) {
             showPhotoPreview(payload.photo, { allowReplace: true });
-            // #region agent log
-            agentPreviewLog('project.js:previewProgress', 'tile update', {
-                phase: payload.phase,
-                path: payload.photo.path,
-                hasThumb: !!payload.photo.thumbBase64,
-                completed: payload.completed,
-                total: payload.total,
-            }, 'D');
-            // #endregion
         }
         if (payload.phase === 'shell' && payload.completed >= payload.total) {
             hideCountdown();
@@ -5247,8 +5329,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
         return false;
     }
 
-    function agentPreviewLog() {}
-
     async function loadPreviewFromPath(photoPath, previewPath, photoIndex, allowReplace = false) {
         const norm = normalizePhonePhotoPath(photoPath);
         if (!allowReplace && isPreviewDisplayed(photoPath, photoIndex)) return true;
@@ -5256,15 +5336,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
         if (!reader) return false;
         try {
             const result = await reader(previewPath);
-            // #region agent log
-            agentPreviewLog('project.js:loadPreviewFromPath', 'read preview result', {
-                success: !!result?.success,
-                hasBase64: !!result?.base64,
-                hasData: Array.isArray(result?.data),
-                error: result?.error || null,
-                previewPath,
-            }, 'D');
-            // #endregion
             if (!result?.success) return false;
             let src;
             if (result.base64) {
@@ -5278,9 +5349,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
                 return false;
             }
             if (!applyPreviewToTile(photoPath, src, photoIndex)) {
-                // #region agent log
-                agentPreviewLog('project.js:loadPreviewFromPath', 'tile apply failed', { photoPath, photoIndex }, 'D');
-                // #endregion
                 return false;
             }
             loadedThumbnails.set(norm, {
@@ -5292,9 +5360,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
             });
             return true;
         } catch (err) {
-            // #region agent log
-            agentPreviewLog('project.js:loadPreviewFromPath', 'preview load exception', { error: String(err?.message || err) }, 'D');
-            // #endregion
             console.warn('Preview load failed:', err);
             return false;
         }
@@ -5319,32 +5384,16 @@ function openPhoneImportModal(logDate, onImportComplete) {
         if (missing.length === 0) {
             hideCountdown();
             applyThumbnailSources();
-            // #region agent log
-            agentPreviewLog('project.js:loadHighResPreviews', 'skipped fetch - embedded thumbs', {
-                photoCount: photos.length,
-                withEmbedded,
-            }, 'E');
-            // #endregion
             return;
         }
 
         setPreviewProgress(withEmbedded, photos.length);
-        // #region agent log
-        agentPreviewLog('project.js:loadHighResPreviews', 'start', {
-            photoCount: photos.length,
-            missing: missing.length,
-            withEmbedded,
-        }, 'E');
-        // #endregion
 
         let result = null;
         if (typeof window.electronAPI?.loadPhonePhotoPreviews === 'function') {
             try {
                 result = await window.electronAPI.loadPhonePhotoPreviews(selectedDevice, photos);
             } catch (err) {
-                // #region agent log
-                agentPreviewLog('project.js:loadHighResPreviews', 'loadPhonePhotoPreviews exception', { error: String(err?.message || err) }, 'E');
-                // #endregion
                 console.warn('loadPhonePhotoPreviews failed:', err);
             }
         }
@@ -5382,12 +5431,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
         applyThumbnailSources();
         hideCountdown();
-        // #region agent log
-        agentPreviewLog('project.js:loadHighResPreviews', 'done', {
-            resultSuccess: !!result?.success,
-            loadedThumbnails: loadedThumbnails.size,
-        }, 'D,E');
-        // #endregion
     }
 
     function applyThumbnailSources() {
@@ -5624,11 +5667,11 @@ function openPhoneImportModal(logDate, onImportComplete) {
             for (let i = 0; i < imported.length; i++) {
                 try {
                     const photoData = await window.electronAPI.readImportedPhoto(imported[i].localPath);
-                    if (photoData.success && photoData.data) {
-                        const arr = new Uint8Array(photoData.data);
+                    const arr = bytesFromImportedPhotoData(photoData);
+                    if (photoData.success && arr && arr.length > 0) {
                         const ext = (photoData.name || '').split('.').pop()?.toLowerCase() || 'jpg';
                         const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', gif: 'image/gif' };
-                        const mime = mimeMap[ext] || 'image/jpeg';
+                        const mime = mimeMap[ext] || photoData.mimeType || 'image/jpeg';
                         const blob = new Blob([arr], { type: mime });
                         const file = new File([blob], photoData.name || `photo_${i}.jpg`, { type: mime });
                         files.push(file);
@@ -5650,9 +5693,15 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
             const errMsg = (result.errors || []).length > 0 ? ` (${result.errors.length} failed)` : '';
 
-            setTimeout(() => {
+            setTimeout(async () => {
                 closeModal();
-                if (onImportComplete) onImportComplete(files);
+                if (onImportComplete) {
+                    try {
+                        await onImportComplete(files);
+                    } catch (handoffErr) {
+                        showNotification(handoffErr?.message || 'Failed to attach imported photos.', true);
+                    }
+                }
                 showNotification(`${files.length} photo${files.length !== 1 ? 's' : ''} imported from phone${errMsg}.`);
             }, 600);
         } catch (err) {
@@ -7295,6 +7344,7 @@ async function exportWorkerRosterDoc(project) {
         if (signatureImageModule) docOptions.modules = [signatureImageModule];
         const doc = new DocxtemplaterClass(zip, docOptions);
         doc.render(templateData);
+        applyWorkerRosterExpiredRed(doc.getZip(), templateData.roster);
         const blob = doc.getZip().generate({
             type: 'blob',
             mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'

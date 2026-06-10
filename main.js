@@ -159,9 +159,6 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  // #region agent log
-  try { debugPhoneLog('main.js:startup', 'app ready - new code loaded', { isPackaged: app.isPackaged, version: app.getVersion(), logPath: debugPhoneLogPath }, 'STARTUP'); } catch (e) { /* ignore */ }
-  // #endregion
   createWindow();
   setupAutoUpdater();
 
@@ -364,21 +361,6 @@ ipcMain.handle('read-template', async (event, templatePath) => {
 
 const phoneImobile = require('./lib/phone-imobile');
 
-// #region agent log
-const debugPhoneLogPath = app.isPackaged
-  ? path.join(app.getPath('userData'), 'debug-ad218e.log')
-  : path.join(__dirname, 'debug-ad218e.log');
-function debugPhoneLog(location, message, data, hypothesisId) {
-  const entry = JSON.stringify({ sessionId: 'ad218e', location, message, data, hypothesisId, timestamp: Date.now() });
-  try { require('fs').appendFileSync(debugPhoneLogPath, `${entry}\n`); } catch { /* ignore */ }
-  fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ad218e' },
-    body: entry,
-  }).catch(() => {});
-}
-// #endregion
-
 function getPhotoBridgeScript() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'scripts', 'photo-bridge.ps1');
@@ -456,6 +438,7 @@ async function detectPhoneDevicesUnified() {
 }
 
 const phoneThumbCache = new Map();
+const phoneFullCopyCache = new Map();
 
 function sniffImageFormat(buffer) {
   if (!buffer || buffer.length < 12) return 'unknown';
@@ -544,6 +527,111 @@ function resizeNativeImage(img, maxDim = PHONE_PREVIEW_MAX_DIM) {
   return img.resize({ width: Math.max(1, w), height: Math.max(1, h), quality: 'best' }).toJPEG(100);
 }
 
+function parseTiffExifOrientation(buffer, tiffStart) {
+  if (tiffStart + 8 >= buffer.length) return null;
+  const le = buffer[tiffStart] === 0x49;
+  const readU16 = (pos) => (le ? buffer.readUInt16LE(pos) : buffer.readUInt16BE(pos));
+  const ifd0Offset = readU16(tiffStart + 4);
+  const ifd0 = tiffStart + ifd0Offset;
+  if (ifd0 + 2 >= buffer.length) return null;
+  const entries = readU16(ifd0);
+  for (let i = 0; i < entries; i += 1) {
+    const entry = ifd0 + 2 + i * 12;
+    if (entry + 12 > buffer.length) break;
+    if (readU16(entry) === 0x0112) return readU16(entry + 8);
+  }
+  return null;
+}
+
+function readJpegExifOrientation(buffer) {
+  if (!buffer || buffer.length < 4) return null;
+  if (buffer[0] !== 0xFF || buffer[1] !== 0xD8) return null;
+  let offset = 2;
+  while (offset + 3 < buffer.length) {
+    if (buffer[offset] !== 0xFF) break;
+    const marker = buffer[offset + 1];
+    if (marker === 0xE1) {
+      const segLen = buffer.readUInt16BE(offset + 2);
+      const exifHeader = buffer.slice(offset + 4, offset + 10).toString('ascii');
+      if (exifHeader === 'Exif\0\0' && offset + 10 + 8 < buffer.length) {
+        const orientation = parseTiffExifOrientation(buffer, offset + 10);
+        if (orientation) return orientation;
+      }
+      offset += 2 + segLen;
+      continue;
+    }
+    if (marker >= 0xD0 && marker <= 0xD9) {
+      offset += 2;
+      continue;
+    }
+    if (offset + 3 >= buffer.length) break;
+    offset += 2 + buffer.readUInt16BE(offset + 2);
+  }
+  return null;
+}
+
+function readExifOrientationFromBuffer(buffer) {
+  if (!buffer || buffer.length < 12) return null;
+  const jpegOrientation = readJpegExifOrientation(buffer);
+  if (jpegOrientation) return jpegOrientation;
+  const exifMarker = Buffer.from('Exif\0\0');
+  for (let i = 0; i <= buffer.length - exifMarker.length; i += 1) {
+    if (buffer[i] === 0x45 && buffer.slice(i, i + exifMarker.length).equals(exifMarker)) {
+      const orientation = parseTiffExifOrientation(buffer, i + exifMarker.length);
+      if (orientation) return orientation;
+    }
+  }
+  return null;
+}
+
+function applyExifOrientationToJpegBuffer(jpegBuffer, orientation) {
+  if (!jpegBuffer || !orientation || orientation === 1) return jpegBuffer;
+  let img = nativeImage.createFromBuffer(jpegBuffer);
+  if (!img || img.isEmpty()) return jpegBuffer;
+  switch (orientation) {
+    case 3: img = img.rotate(180); break;
+    case 6: img = img.rotate(90); break;
+    case 8: img = img.rotate(270); break;
+    default: break;
+  }
+  if (!img || img.isEmpty()) return jpegBuffer;
+  return img.toJPEG(100);
+}
+
+async function heicBufferToOrientedJpeg(input, quality = 0.92) {
+  const orientation = readExifOrientationFromBuffer(input);
+  const heicConvert = require('heic-convert');
+  const output = await heicConvert({ buffer: input, format: 'JPEG', quality });
+  let jpeg = Buffer.isBuffer(output) ? output : Buffer.from(output);
+  if (orientation && orientation !== 1) {
+    jpeg = applyExifOrientationToJpegBuffer(jpeg, orientation);
+  }
+  return { jpeg, orientation };
+}
+
+async function normalizePhonePhotoFile(localPath) {
+  const input = await fs.readFile(localPath);
+  const format = sniffImageFormat(input);
+  const orientation = readExifOrientationFromBuffer(input);
+
+  if (format === 'heic') {
+    const { jpeg } = await heicBufferToOrientedJpeg(input, 0.92);
+    const baseName = path.basename(localPath, path.extname(localPath));
+    const outPath = path.join(path.dirname(localPath), `${baseName}.jpg`);
+    await fs.writeFile(outPath, jpeg);
+    if (outPath !== localPath) {
+      try { await fs.unlink(localPath); } catch { /* ignore */ }
+    }
+    return outPath;
+  }
+
+  if (format === 'jpeg' && orientation && orientation !== 1) {
+    const rotated = applyExifOrientationToJpegBuffer(input, orientation);
+    await fs.writeFile(localPath, rotated);
+  }
+  return localPath;
+}
+
 async function buildThumbnailJpeg(filePath, maxDim = PHONE_PREVIEW_MAX_DIM) {
   let input;
   try {
@@ -560,10 +648,14 @@ async function buildThumbnailJpeg(filePath, maxDim = PHONE_PREVIEW_MAX_DIM) {
   }
 
   const format = sniffImageFormat(input);
+  const sourceOrientation = readExifOrientationFromBuffer(input);
 
   if (format === 'heic') {
     try {
-      const jpegBuffer = await convertHeicBuffer();
+      let jpegBuffer = await convertHeicBuffer();
+      if (sourceOrientation && sourceOrientation !== 1) {
+        jpegBuffer = applyExifOrientationToJpegBuffer(jpegBuffer, sourceOrientation);
+      }
       const img = nativeImage.createFromBuffer(jpegBuffer);
       return resizeNativeImage(img, maxDim);
     } catch {
@@ -572,7 +664,11 @@ async function buildThumbnailJpeg(filePath, maxDim = PHONE_PREVIEW_MAX_DIM) {
   }
 
   if (format === 'jpeg') {
-    const img = nativeImage.createFromBuffer(input);
+    let jpegInput = input;
+    if (sourceOrientation && sourceOrientation !== 1) {
+      jpegInput = applyExifOrientationToJpegBuffer(input, sourceOrientation);
+    }
+    const img = nativeImage.createFromBuffer(jpegInput);
     if (img && !img.isEmpty()) return resizeNativeImage(img, maxDim);
     try {
       const jpegBuffer = await convertHeicBuffer();
@@ -666,6 +762,12 @@ async function buildHighResPreviewsFromDevice(deviceName, photos, onProgress) {
   let byName;
   try {
     ({ byName } = await importDevicePhotosToTemp(deviceName, paths));
+    for (const photo of photos) {
+      const localPath = findImportedLocalPath(byName, photo.path);
+      if (localPath) {
+        phoneFullCopyCache.set(`${deviceName}|${photo.path}`, localPath);
+      }
+    }
   } finally {
     clearInterval(copyHeartbeat);
   }
@@ -776,11 +878,6 @@ async function fetchMtpShellThumbnails(deviceName, photoPaths) {
     }
     fetched.push(response);
   }
-
-  debugPhoneLog('main.js:thumbnails', 'shell thumbnails built', {
-    requested: paths.length,
-    successCount: fetched.filter((t) => t.success).length,
-  }, 'A,C');
 
   return fetched;
 }
@@ -946,14 +1043,8 @@ ipcMain.handle('list-phone-photos', async (_event, deviceName, dateFilter, devic
     try {
       const result = await runPhotoBridge(args, listTimeout);
       if (result.success && Array.isArray(result.photos)) {
-        const before = result.photos.length;
         result.photos = dedupeIosMtpPhotos(result.photos);
         cachePhotosFromListResult(deviceName, result.photos);
-        debugPhoneLog('main.js:list', 'mtp list with previews', {
-          before,
-          after: result.photos.length,
-          withThumbs: result.photos.filter((p) => p.thumbBase64).length,
-        }, 'DEDUP');
         return { ...result, backend: 'mtp' };
       }
     } catch (error) {
@@ -979,6 +1070,57 @@ ipcMain.handle('list-phone-photos', async (_event, deviceName, dateFilter, devic
   }
 });
 
+async function importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backend) {
+  const imported = [];
+  const errors = [];
+  const uncachedPaths = [];
+
+  for (const filePath of filePaths) {
+    const cacheKey = `${deviceName}|${filePath}`;
+    const cachedPath = phoneFullCopyCache.get(cacheKey);
+    const fileName = path.basename(filePath);
+    const destPath = path.join(tempDir, fileName);
+    if (cachedPath && cachedPath !== destPath) {
+      try {
+        await fs.access(cachedPath);
+        await fs.copyFile(cachedPath, destPath);
+        imported.push({ name: fileName, localPath: destPath, fromCache: true });
+        continue;
+      } catch {
+        phoneFullCopyCache.delete(cacheKey);
+      }
+    }
+    uncachedPaths.push(filePath);
+  }
+
+  if (uncachedPaths.length > 0) {
+    let remoteResult;
+    if (backend.backend === 'libimobiledevice' && backend.udid) {
+      try {
+        remoteResult = await phoneImobile.importPhotos(backend.udid, uncachedPaths, tempDir);
+        if ((remoteResult.imported || []).length === 0) {
+          remoteResult = null;
+        }
+      } catch {
+        remoteResult = null;
+      }
+    }
+    if (!remoteResult) {
+      const filesJson = JSON.stringify(uncachedPaths);
+      remoteResult = await runPhotoBridge(
+        ['-Action', 'import', '-DeviceName', deviceName, '-Files', filesJson, '-DestDir', tempDir],
+        120000
+      );
+    }
+    for (const item of remoteResult.imported || []) {
+      imported.push({ ...item, fromCache: false });
+    }
+    errors.push(...(remoteResult.errors || []));
+  }
+
+  return { success: true, imported, errors };
+}
+
 ipcMain.handle('import-phone-photos', async (_event, deviceName, filePaths, deviceOptions) => {
   try {
     if (!deviceName || typeof deviceName !== 'string') {
@@ -991,24 +1133,31 @@ ipcMain.handle('import-phone-photos', async (_event, deviceName, filePaths, devi
     const tempDir = toWindowsPath(path.join(app.getPath('temp'), 'oversight-phone-import', Date.now().toString()));
     await fs.mkdir(tempDir, { recursive: true });
 
-    if (backend.backend === 'libimobiledevice' && backend.udid) {
+    const copyResult = await importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backend);
+    const normalizedImported = [];
+    const normalizeErrors = [];
+
+    for (const item of copyResult.imported || []) {
+      if (!item?.localPath) continue;
       try {
-        const result = await phoneImobile.importPhotos(backend.udid, filePaths, tempDir);
-        if ((result.imported || []).length > 0) {
-          return { ...result, backend: 'libimobiledevice' };
-        }
-        console.warn('libimobiledevice import returned no files; falling back to MTP');
-      } catch (error) {
-        console.warn('libimobiledevice import failed; falling back to MTP:', error.message);
+        const normalizedPath = await normalizePhonePhotoFile(item.localPath);
+        normalizedImported.push({
+          name: path.basename(normalizedPath),
+          localPath: normalizedPath,
+          fromCache: !!item.fromCache,
+        });
+      } catch (err) {
+        normalizeErrors.push(`Could not process '${item.name || path.basename(item.localPath)}': ${err.message}`);
+        normalizedImported.push(item);
       }
     }
 
-    const filesJson = JSON.stringify(filePaths);
-    const result = await runPhotoBridge(
-      ['-Action', 'import', '-DeviceName', deviceName, '-Files', filesJson, '-DestDir', tempDir],
-      120000
-    );
-    return { ...result, backend: 'mtp' };
+    return {
+      success: true,
+      imported: normalizedImported,
+      errors: [...(copyResult.errors || []), ...normalizeErrors],
+      backend: backend.backend === 'libimobiledevice' && backend.udid ? 'libimobiledevice' : 'mtp',
+    };
   } catch (error) {
     console.error('import-phone-photos error:', error);
     return { success: false, error: error.message };
@@ -1060,17 +1209,6 @@ async function fetchPhonePhotoThumbnails(deviceName, photoPaths, deviceOptions) 
   if (paths.length === 0) {
     return { success: true, thumbnails: [] };
   }
-
-  const backend = normalizePhoneBackend(deviceOptions);
-  // #region agent log
-  debugPhoneLog('main.js:thumbnails', 'thumb request start', {
-    deviceName,
-    pathCount: paths.length,
-    backend: backend.backend,
-    hasUdid: !!backend.udid,
-    samplePaths: paths.slice(0, 2),
-  }, 'C');
-  // #endregion
 
   const cached = [];
   const uncached = [];
@@ -1205,7 +1343,13 @@ ipcMain.handle('read-imported-photo', async (_event, filePath) => {
       return { success: false, error: 'Access denied: file outside temp import directory' };
     }
     const buffer = await fs.readFile(resolved);
-    return { success: true, data: Array.from(new Uint8Array(buffer)), name: path.basename(resolved) };
+    return {
+      success: true,
+      data: buffer,
+      base64: buffer.toString('base64'),
+      mimeType: sniffImageFormat(buffer) === 'jpeg' ? 'image/jpeg' : 'application/octet-stream',
+      name: path.basename(resolved),
+    };
   } catch (error) {
     console.error('read-imported-photo error:', error);
     return { success: false, error: error.message };
@@ -1218,19 +1362,18 @@ ipcMain.handle('convert-image-for-upload', async (_event, byteArray, fileName) =
       return { success: false, error: 'Empty image data' };
     }
     const ext = String(fileName || '').split('.').pop()?.toLowerCase() || '';
-    const isHeic = ext === 'heic' || ext === 'heif';
+    const input = Buffer.from(byteArray);
+    const sniffedFormat = sniffImageFormat(input);
+    const isHeic = ext === 'heic' || ext === 'heif' || sniffedFormat === 'heic';
     if (!isHeic) {
       return { success: false, error: 'Not a HEIC/HEIF file' };
     }
-    const heicConvert = require('heic-convert');
-    const input = Buffer.from(byteArray);
-    const output = await heicConvert({
-      buffer: input,
-      format: 'JPEG',
-      quality: 0.92
-    });
-    const jpeg = Buffer.isBuffer(output) ? output : Buffer.from(output);
-    return { success: true, base64: jpeg.toString('base64'), mimeType: 'image/jpeg' };
+    const { jpeg } = await heicBufferToOrientedJpeg(input, 0.92);
+    return {
+      success: true,
+      base64: jpeg.toString('base64'),
+      mimeType: 'image/jpeg',
+    };
   } catch (error) {
     console.error('HEIC convert error:', error);
     return { success: false, error: error.message || 'HEIC could not be converted' };
