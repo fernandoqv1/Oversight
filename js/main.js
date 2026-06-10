@@ -1283,6 +1283,57 @@ async function downloadArchivedProject(projectId, projectName) {
             });
         };
 
+        const WORKER_ROSTER_EXPIRED_DATE_FIELDS = [
+            'aheraExpired', 'medicalExpired', 'respiratorExpired', 'leadExpired', 'leadMedExpired'
+        ];
+        const collectWorkerRosterExpiredDates = (rosterRows) => {
+            const dates = new Set();
+            (rosterRows || []).forEach(row => {
+                WORKER_ROSTER_EXPIRED_DATE_FIELDS.forEach(field => {
+                    const value = row && row[field];
+                    if (value && String(value).trim()) dates.add(String(value).trim());
+                });
+            });
+            return dates;
+        };
+        const colorDocxRunTextRed = (xml, text) => {
+            if (!xml || !text) return xml;
+            const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const textTag = `<w:t(?:\\s[^>]*)?>${escaped}</w:t>`;
+            xml = xml.replace(
+                new RegExp(`(<w:r(?:\\s[^>]*)?>\\s*<w:rPr(?:\\s[^>]*)?>)([\\s\\S]*?)(</w:rPr>\\s*${textTag}</w:r>)`, 'g'),
+                (match, open, inner, close) => {
+                    if (/w:color w:val="(?:EE0000|FF0000)"/.test(inner)) return match;
+                    return `${open}${inner}<w:color w:val="EE0000"/>${close}`;
+                }
+            );
+            xml = xml.replace(
+                new RegExp(`(<w:r(?:\\s[^>]*)?>)\\s*${textTag}</w:r>`, 'g'),
+                `<w:r><w:rPr><w:color w:val="EE0000"/></w:rPr><w:t>${text}</w:t></w:r>`
+            );
+            return xml;
+        };
+        const applyWorkerRosterExpiredRed = (zip, rosterRows) => {
+            if (!zip || typeof zip.file !== 'function') return;
+            const expiredDates = collectWorkerRosterExpiredDates(rosterRows);
+            if (expiredDates.size === 0) return;
+            Object.keys(zip.files).forEach(path => {
+                if (!/^word[\\/](document|header\d+|footer\d+)\.xml$/i.test(path)) return;
+                const file = zip.file(path);
+                if (!file) return;
+                let xml = file.asText();
+                let changed = false;
+                expiredDates.forEach(dateStr => {
+                    const next = colorDocxRunTextRed(xml, dateStr);
+                    if (next !== xml) {
+                        xml = next;
+                        changed = true;
+                    }
+                });
+                if (changed) zip.file(path, xml);
+            });
+        };
+
         const generateDocBlob = async (templatePath, templateData) => {
             try {
                 const cacheBuster = `?t=${Date.now()}`;
@@ -1309,6 +1360,9 @@ async function downloadArchivedProject(projectId, projectName) {
                 docTemplate.render(templateData);
                 if (/Daily Log Template\.docx/i.test(templatePath)) {
                     processPhotoLogInDocx(docTemplate.getZip());
+                }
+                if (/Worker Roster Template\.docx/i.test(templatePath)) {
+                    applyWorkerRosterExpiredRed(docTemplate.getZip(), templateData.roster);
                 }
                 return docTemplate.getZip().generate({
                     type: 'blob',
