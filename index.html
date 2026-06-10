@@ -288,6 +288,7 @@ a { color:inherit; text-decoration:none; }
 .modal-content > h3 + :not(.modal-footer) { padding-top:18px; }
 .modal-content > h3 ~ :not(.modal-footer):nth-last-child(2) { padding-bottom:18px; }
 .modal-content .modal-footer { display:flex; justify-content:flex-end; gap:8px; align-items:center; padding:14px 22px; border-top:1px solid var(--border); background:var(--surface-2); }
+.modal-content .modal-footer.justify-between { justify-content:space-between; }
 .modal-content .modal-footer .btn,
 .modal-content .modal-footer .modal-cancel-btn,
 .modal-content .modal-footer .modal-save-btn { padding:6px 14px; border-radius:7px; font-size:13px; font-weight:500; line-height:1.4; }
@@ -617,7 +618,6 @@ a { color:inherit; text-decoration:none; }
 <script src="./lib/file-saver.min.js"></script>
 <script src="./lib/xlsx.full.min.js"></script>
 <script src="./lib/pizzip.min.js"></script>
-<script src="./lib/pizzip-utils.js"></script>
 <script src="./lib/docxtemplater.js"></script>
 <script src="./lib/imagemodule.js"></script>
 <script>

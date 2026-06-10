@@ -176,14 +176,20 @@
       type: 'bulk',
       collectionDate: s.date
     }));
-    return air.concat(bulk);
+    const wipe = (p.wipeSamples || []).map(s => ({
+      ...s,
+      _kind: 'wipe',
+      type: s.type || 'Wipe',
+      collectionDate: s.date
+    }));
+    return air.concat(bulk).concat(wipe);
   }
   function sampleSortValue(s) {
     if (s._kind === 'bulk') return activitySortValue(s.date);
     return activitySortValue(s.collectionDate || s.date || s.startTime);
   }
   function sampleCount(p) {
-    return (p.airSamples || []).length + (p.bulkSamples || []).length;
+    return (p.airSamples || []).length + (p.bulkSamples || []).length + (p.wipeSamples || []).length;
   }
   function timeToMinutes(value) {
     const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
@@ -994,6 +1000,9 @@
     }
     if (meta) {
       const parts = [];
+      const hz = typeof window.getProjectHazardSummary === 'function' ? window.getProjectHazardSummary(p) : { hasAsbestos: true, hasLead: false };
+      if (hz.hasAsbestos) parts.push('<span class="pill-num" style="font-size:11px;">Asb</span>');
+      if (hz.hasLead) parts.push('<span class="pill-num" style="font-size:11px;">Pb</span>');
       if (p.siteAddress) parts.push(`<span>${ICONS.bldg} ${esc(p.siteAddress)}</span>`);
       if (p.contractor) parts.push(`<span>${ICONS.user} ${esc(p.contractor)}</span>`);
       if (p.clientName) parts.push(`<span>${esc(p.clientName)}</span>`);
@@ -1215,7 +1224,7 @@
         <section class="panel">
           <div class="panel-head"><h2 class="panel-title">Materials in this containment</h2></div>
           ${mats.length === 0 ? '<div class="empty-row" style="padding:18px;">No materials linked.</div>'
-            : `<ul class="mat-list">${mats.map(m => `<li class="mat-row"><div class="mat-name">${esc(m.name || m.materialName || '—')}</div><div class="muted small">${esc(m.location || '')}</div></li>`).join('')}</ul>`}
+            : `<ul class="mat-list">${mats.map(m => { const siteMat = (p.materials || []).find(sm => sm.id === m.materialId || (sm.name || '').toLowerCase() === (m.name || m.materialName || '').toLowerCase()); const hzLabel = siteMat ? (typeof window.hazardTypeLabel === 'function' ? window.hazardTypeLabel(siteMat.hazardType) : 'Asb') : 'Asb'; return `<li class="mat-row"><div class="mat-name">${esc(m.name || m.materialName || '—')} <span class="mat-type-tag">${esc(hzLabel)}</span></div><div class="muted small">${esc(m.location || '')}</div></li>`; }).join('')}</ul>`}
         </section>
         <section class="panel">
           <div class="panel-head"><h2 class="panel-title">History</h2></div>
@@ -1240,7 +1249,11 @@
   let samplesFilterCont = 'all';
   function renderSamplesMaterialsPanel(allMats) {
     if (!allMats.length) return '';
-    return `<section class="panel" style="margin-bottom:16px;"><div class="panel-head"><h2 class="panel-title">Site materials · ${allMats.length}</h2><span class="muted small">Double-click a material to record a bulk sample</span></div><ul class="mat-list">${allMats.map(m => `<li class="mat-row" data-material-id="${esc(m.id)}" title="Double-click to add bulk sample"><div class="mat-name">${esc(m.name)}</div><div class="mat-qty-line muted small mono">${formatQty(m.totalQuantity || 0)} ${esc(displayUnit(m.unit, 'units'))}${m.type ? ` <span class="mat-type-tag">${esc(m.type)}</span>` : ''}</div></li>`).join('')}</ul></section>`;
+    const matHazardTag = (m) => {
+      const label = typeof window.hazardTypeLabel === 'function' ? window.hazardTypeLabel(m.hazardType) : ((m.hazardType || '').toLowerCase() === 'lead' ? 'Pb' : 'Asb');
+      return ` <span class="mat-type-tag">${esc(label)}</span>`;
+    };
+    return `<section class="panel" style="margin-bottom:16px;"><div class="panel-head"><h2 class="panel-title">Site materials · ${allMats.length}</h2><span class="muted small">Double-click a material to record a bulk sample</span></div><ul class="mat-list">${allMats.map(m => `<li class="mat-row" data-material-id="${esc(m.id)}" title="Double-click to add bulk sample"><div class="mat-name">${esc(m.name)}</div><div class="mat-qty-line muted small mono">${formatQty(m.totalQuantity || 0)} ${esc(displayUnit(m.unit, 'units'))}${matHazardTag(m)}</div></li>`).join('')}</ul></section>`;
   }
 
   function renderTabSamples(p) {
@@ -1252,25 +1265,44 @@
     let samples = projectSamplesList(p);
     if (samplesFilterType === 'bulk') {
       samples = samples.filter(s => s._kind === 'bulk');
+    } else if (samplesFilterType === 'wipe') {
+      samples = samples.filter(s => s._kind === 'wipe');
+    } else if (samplesFilterType === 'pb' || samplesFilterType === 'lead') {
+      const isPbAir = (s) => {
+        if (typeof window.getAirSampleHazardType === 'function') return window.getAirSampleHazardType(s) === 'lead';
+        return /-Pb-(AS|PS|CA)\d+$/i.test(s.sampleId || '');
+      };
+      samples = samples.filter(s => s._kind === 'air' && isPbAir(s));
     } else if (samplesFilterType !== 'all') {
       samples = samples.filter(s => s._kind === 'air' && (s.type || '').toLowerCase().includes(samplesFilterType));
     }
     if (samplesFilterCont !== 'all') {
-      samples = samples.filter(s => s._kind === 'air' && (s.containmentId === samplesFilterCont || s.containmentName === samplesFilterCont));
+      samples = samples.filter(s => (s._kind === 'air' || s._kind === 'wipe')
+        && (s.containmentId === samplesFilterCont || s.containmentName === samplesFilterCont));
     }
     samples.sort((a, b) => sampleSortValue(b) - sampleSortValue(a));
     const airInView = samples.filter(s => s._kind === 'air');
     const running = airInView.filter(s => s.startTime && !s.stopTime).length;
     const complete = airInView.filter(s => s.stopTime).length + samples.filter(s => s._kind === 'bulk').length;
     const hasBulk = (p.bulkSamples || []).length > 0;
+    const hasWipe = (p.wipeSamples || []).length > 0;
+    const hazardSummary = typeof window.getProjectHazardSummary === 'function' ? window.getProjectHazardSummary(p) : { hasLead: false };
+    const hasLeadMaterials = hazardSummary.hasLead;
+    const airHazardTag = (s) => {
+      const ht = typeof window.getAirSampleHazardType === 'function' ? window.getAirSampleHazardType(s) : 'asbestos';
+      const label = typeof window.hazardTypeLabel === 'function' ? window.hazardTypeLabel(ht) : (ht === 'lead' ? 'Pb' : 'Asb');
+      return ` <span class="mat-type-tag">${esc(label)}</span>`;
+    };
     wrap.innerHTML = `
       <div class="filter-bar">
         <div class="seg" id="samp-type">
           <button class="seg-btn" data-value="all" data-active="${samplesFilterType === 'all'}">All</button>
           <button class="seg-btn" data-value="bulk" data-active="${samplesFilterType === 'bulk'}">Bulk</button>
+          ${hasLeadMaterials ? `<button class="seg-btn" data-value="wipe" data-active="${samplesFilterType === 'wipe'}">Wipe</button>` : ''}
           <button class="seg-btn" data-value="area" data-active="${samplesFilterType === 'area'}">Area</button>
           <button class="seg-btn" data-value="personal" data-active="${samplesFilterType === 'personal'}">Personal</button>
           <button class="seg-btn" data-value="clearance" data-active="${samplesFilterType === 'clearance'}">Clearance</button>
+          ${hasLeadMaterials ? `<button class="seg-btn" data-value="pb" data-active="${samplesFilterType === 'pb' || samplesFilterType === 'lead'}">Pb</button>` : ''}
         </div>
         <select class="select" id="samp-cont">
           <option value="all">All containments</option>
@@ -1279,7 +1311,9 @@
         <div class="filter-spacer"></div>
         <button class="btn-ghost" id="print-air-samples-btn">${ICONS.doc} Air COC</button>
         ${hasBulk ? `<button class="btn-ghost" id="print-bulk-samples-btn">${ICONS.doc} Bulk COC</button>` : ''}
+        ${hasWipe ? `<button class="btn-ghost" id="print-wipe-samples-btn">${ICONS.doc} Wipe COC</button>` : ''}
         <button class="btn-primary" id="new-air-sample-btn">${ICONS.plus} Add air sample</button>
+        ${hasLeadMaterials ? `<button class="btn-primary" id="new-wipe-sample-btn">${ICONS.plus} Add wipe</button>` : ''}
       </div>
       <div class="samples-table">
         <div class="samp-th"><span>Sample #</span><span>Type</span><span>Cont.</span><span>Material</span><span>Flow</span><span>Start</span><span>Stop</span><span class="r">Vol (L)</span><span>Status</span></div>
@@ -1298,12 +1332,25 @@
                   <span><span class="samp-status status-complete">Recorded</span></span>
                 </div>`;
               }
+              if (s._kind === 'wipe') {
+                return `<div class="samp-tr" data-id="${esc(s.id)}" data-kind="wipe">
+                  <span class="mono">${esc(sampleDisplayId(s))}</span>
+                  <span>${esc(s.type || 'Wipe')}</span>
+                  <span class="muted small">${esc(s.containmentName || '—')}</span>
+                  <span class="muted small">${esc([s.substrate, s.component].filter(Boolean).join(' / ') || '—')}</span>
+                  <span class="mono small">—</span>
+                  <span class="mono small">${fmtDateFull(s.date)}</span>
+                  <span class="mono small">—</span>
+                  <span class="r mono">${esc(s.squareFeet || '—')}</span>
+                  <span><span class="samp-status status-complete">Recorded</span></span>
+                </div>`;
+              }
               const runningRow = s.startTime && !s.stopTime;
               const done = !!s.stopTime;
               const vol = sampleVolume(s);
               return `<div class="samp-tr" data-id="${esc(s.id)}" data-kind="air">
                 <span class="mono">${esc(sampleDisplayId(s))}</span>
-                <span>${esc(s.type || '—')}</span>
+                <span>${esc(s.type || '—')}${airHazardTag(s)}</span>
                 <span class="muted small">${esc(s.containmentName || (conts.find(c => c.id === s.containmentId)?.name) || '—')}</span>
                 <span class="muted small">${esc(s.materialName || '—')}</span>
                 <span class="mono small">${esc(s.startFlowRate ? s.startFlowRate + ' L/min' : '—')}</span>
@@ -1332,6 +1379,10 @@
         if (matId && typeof window.openPrintBulkSamplesModal === 'function') window.openPrintBulkSamplesModal(matId);
         return;
       }
+      if (r.dataset.kind === 'wipe') {
+        if (typeof window.openEditWipeSampleModal === 'function') window.openEditWipeSampleModal(r.dataset.id);
+        return;
+      }
       if (typeof window.openEditAirSampleModal === 'function') window.openEditAirSampleModal(r.dataset.id);
     }));
     wrap.querySelectorAll('#samp-type button').forEach(b => b.addEventListener('click', () => { samplesFilterType = b.dataset.value; renderTabSamples(getCurrentProject()); }));
@@ -1344,6 +1395,12 @@
     });
     wrap.querySelector('#print-bulk-samples-btn')?.addEventListener('click', () => {
       if (typeof window.openPrintBulkSamplesModal === 'function') window.openPrintBulkSamplesModal();
+    });
+    wrap.querySelector('#print-wipe-samples-btn')?.addEventListener('click', () => {
+      if (typeof window.openPrintWipeSamplesModal === 'function') window.openPrintWipeSamplesModal();
+    });
+    wrap.querySelector('#new-wipe-sample-btn')?.addEventListener('click', () => {
+      if (typeof window.openAddWipeSampleModal === 'function') window.openAddWipeSampleModal();
     });
   }
 
@@ -1411,12 +1468,12 @@
       </div>
       ${(blds.length === 0 && allMats.length === 0)
         ? '<div class="empty-state"><div class="title">No buildings or materials yet</div><div class="sub">Add a building and then assign materials to its spaces.</div></div>'
-        : `${allMats.length > 0 ? `<section class="panel" style="margin-bottom:16px;"><div class="panel-head"><h2 class="panel-title">Site materials · ${allMats.length}</h2><span class="muted small">Double-click a material to take a bulk sample</span></div><ul class="mat-list">${allMats.map(m => `<li class="mat-row" data-material-id="${esc(m.id)}" title="Double-click to add bulk sample"><div class="mat-name">${esc(m.name)}</div><div class="mat-qty-line muted small mono">${formatQty(m.totalQuantity || 0)} ${esc(displayUnit(m.unit, 'units'))}${m.type ? ` <span class="mat-type-tag">${esc(m.type)}</span>` : ''}</div><div class="mat-row-actions"><button class="btn-ghost small" data-action="edit-mat" data-id="${esc(m.id)}">Edit</button><button class="btn-ghost small danger" data-action="del-mat" data-id="${esc(m.id)}">Delete</button></div></li>`).join('')}</ul></section>` : ''}
+        : `${allMats.length > 0 ? `<section class="panel" style="margin-bottom:16px;"><div class="panel-head"><h2 class="panel-title">Site materials · ${allMats.length}</h2><span class="muted small">Double-click a material to take a bulk sample</span></div><ul class="mat-list">${allMats.map(m => { const hzLabel = typeof window.hazardTypeLabel === 'function' ? window.hazardTypeLabel(m.hazardType) : ((m.hazardType || '').toLowerCase() === 'lead' ? 'Pb' : 'Asb'); return `<li class="mat-row" data-material-id="${esc(m.id)}" title="Double-click to add bulk sample"><div class="mat-name">${esc(m.name)}</div><div class="mat-qty-line muted small mono">${formatQty(m.totalQuantity || 0)} ${esc(displayUnit(m.unit, 'units'))} <span class="mat-type-tag">${esc(hzLabel)}</span></div><div class="mat-row-actions"><button class="btn-ghost small" data-action="edit-mat" data-id="${esc(m.id)}">Edit</button><button class="btn-ghost small danger" data-action="del-mat" data-id="${esc(m.id)}">Delete</button></div></li>`; }).join('')}</ul></section>` : ''}
         <div class="tree">${blds.map(b => `<div class="tree-bldg" data-bldg-id="${esc(b.id)}">
           <div class="tree-bldg-head">${ICONS.bldg}<div class="name">${esc(b.name)}</div><button class="btn-ghost small" data-action="edit-bldg" data-id="${esc(b.id)}">${ICONS.pencil}</button><button class="btn-ghost small danger" data-action="del-bldg" data-id="${esc(b.id)}">${ICONS.trash}</button></div>
           <div class="tree-bldg-body">
             ${(b.spaces || []).length === 0 ? '<div class="muted small">No spaces.</div>'
-              : (b.spaces || []).map(sp => `<div class="tree-space"><div class="tree-space-head"><div class="tree-space-name">${esc(sp.name)}</div><button class="btn-ghost small" data-action="edit-space" data-bldg-id="${esc(b.id)}" data-id="${esc(sp.id)}">${ICONS.pencil}</button><button class="btn-ghost small danger" data-action="del-space" data-bldg-id="${esc(b.id)}" data-id="${esc(sp.id)}">${ICONS.trash}</button></div><div class="tree-mats">${(sp.materials || []).length === 0 ? '<div class="muted small">No materials assigned.</div>' : (sp.materials || []).map(sm => `<div class="tree-mat" data-material-id="${esc(sm.materialId || sm.id)}" title="Double-click to add bulk sample"><span class="tree-mat-name">${esc(sm.name || sm.materialName || 'Material')}</span><span class="tree-mat-qty mono small">${formatQty(sm.quantity || 0)} ${esc(unitForSpaceMaterial(sm, allMats))}</span><button class="btn-link small" data-action="rm-mat-from-space" data-bldg-id="${esc(b.id)}" data-space-id="${esc(sp.id)}" data-mat-id="${esc(sm.materialId || sm.id)}">Remove</button></div>`).join('')}<button class="btn-link small tree-mat-add" data-action="add-mat-to-space" data-bldg-id="${esc(b.id)}" data-space-id="${esc(sp.id)}">+ Add material to space</button></div></div>`).join('')}
+              : (b.spaces || []).map(sp => `<div class="tree-space"><div class="tree-space-head"><div class="tree-space-name">${esc(sp.name)}</div><button class="btn-ghost small" data-action="edit-space" data-bldg-id="${esc(b.id)}" data-id="${esc(sp.id)}">${ICONS.pencil}</button><button class="btn-ghost small danger" data-action="del-space" data-bldg-id="${esc(b.id)}" data-id="${esc(sp.id)}">${ICONS.trash}</button></div><div class="tree-mats">${(sp.materials || []).length === 0 ? '<div class="muted small">No materials assigned.</div>' : (sp.materials || []).map(sm => { const siteMat = allMats.find(m => m.id === sm.materialId || (m.name || '').toLowerCase() === (sm.name || sm.materialName || '').toLowerCase()); const hzLabel = siteMat ? (typeof window.hazardTypeLabel === 'function' ? window.hazardTypeLabel(siteMat.hazardType) : 'Asb') : 'Asb'; return `<div class="tree-mat" data-material-id="${esc(sm.materialId || sm.id)}" title="Double-click to add bulk sample"><span class="tree-mat-name">${esc(sm.name || sm.materialName || 'Material')} <span class="mat-type-tag">${esc(hzLabel)}</span></span><span class="tree-mat-qty mono small">${formatQty(sm.quantity || 0)} ${esc(unitForSpaceMaterial(sm, allMats))}</span><button class="btn-link small" data-action="rm-mat-from-space" data-bldg-id="${esc(b.id)}" data-space-id="${esc(sp.id)}" data-mat-id="${esc(sm.materialId || sm.id)}">Remove</button></div>`; }).join('')}<button class="btn-link small tree-mat-add" data-action="add-mat-to-space" data-bldg-id="${esc(b.id)}" data-space-id="${esc(sp.id)}">+ Add material to space</button></div></div>`).join('')}
             <div class="tree-bldg-foot"><button class="btn-ghost small" data-action="add-space" data-bldg-id="${esc(b.id)}">+ Add space</button></div>
           </div>
         </div>`).join('')}</div>`}
@@ -1655,11 +1712,14 @@
     if (!wrap) return;
     const airCount = (p.airSamples || []).length;
     const bulkCount = (p.bulkSamples || []).length;
+    const wipeCount = (p.wipeSamples || []).length;
+    const hasLeadMaterials = typeof window.getProjectHazardSummary === 'function' ? window.getProjectHazardSummary(p).hasLead : wipeCount > 0;
     wrap.innerHTML = `
       <div class="page-head"><div><h2 class="panel-title" style="font-size:14px;">Chain of custody</h2><p class="page-sub">Print lab submission forms during the project. Daily logs, visual inspections, and containment summaries are generated when you export or archive the project.</p></div></div>
       <div class="doc-template-grid">
         <button class="doc-tpl" data-tpl="air-sample-request" ${airCount === 0 ? 'disabled title="Add air samples first"' : ''}><div class="icon">${ICONS.bell}</div><div class="title">Air sample chain of custody</div><div class="desc">${airCount} air sample${airCount === 1 ? '' : 's'} · lab submission / pump request.</div></button>
         <button class="doc-tpl" data-tpl="bulk-coc" ${bulkCount === 0 ? 'disabled title="Record bulk samples first"' : ''}><div class="icon">${ICONS.doc}</div><div class="title">Bulk chain of custody</div><div class="desc">${bulkCount} bulk sample${bulkCount === 1 ? '' : 's'} · material COC form.</div></button>
+        ${hasLeadMaterials ? `<button class="doc-tpl" data-tpl="wipe-coc" ${wipeCount === 0 ? 'disabled title="Record wipe samples first"' : ''}><div class="icon">${ICONS.doc}</div><div class="title">Lead wipe chain of custody</div><div class="desc">${wipeCount} wipe sample${wipeCount === 1 ? '' : 's'} · lead wipe COC form.</div></button>` : ''}
       </div>
     `;
     wrap.querySelectorAll('[data-tpl="air-sample-request"]:not([disabled])').forEach(b => b.addEventListener('click', () => {
@@ -1669,6 +1729,10 @@
     wrap.querySelectorAll('[data-tpl="bulk-coc"]:not([disabled])').forEach(b => b.addEventListener('click', () => {
       if (typeof window.openPrintBulkSamplesModal === 'function') window.openPrintBulkSamplesModal();
       else showShellNote('Bulk chain of custody print is not available.');
+    }));
+    wrap.querySelectorAll('[data-tpl="wipe-coc"]:not([disabled])').forEach(b => b.addEventListener('click', () => {
+      if (typeof window.openPrintWipeSamplesModal === 'function') window.openPrintWipeSamplesModal();
+      else showShellNote('Lead wipe chain of custody print is not available.');
     }));
   }
 

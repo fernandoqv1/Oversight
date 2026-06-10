@@ -161,9 +161,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key !== 'Escape') return;
         const modals = document.querySelectorAll('.modal.active');
         if (modals.length > 0) {
-            modals[modals.length - 1].remove();
+            dismissModal(modals[modals.length - 1]);
+        } else {
+            cleanupOrphanedModals();
         }
-        cleanupOrphanedModals();
     });
 
     const urlParams = new URLSearchParams(window.location.search);
@@ -202,6 +203,8 @@ function loadProject(id) {
         if (!currentProject.containments) currentProject.containments = [];
         if (!currentProject.airSamples) currentProject.airSamples = [];
         if (!currentProject.bulkSamples) currentProject.bulkSamples = [];
+        if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
+        migrateProjectHazardData(currentProject);
         if (!currentProject.workerRoster) currentProject.workerRoster = [];
         if (!currentProject.dailyLogs) currentProject.dailyLogs = [];
         currentProject.workerRoster = normalizeWorkerRoster(currentProject.workerRoster);
@@ -438,6 +441,7 @@ function renderMaterials() {
                 <div class="flex justify-between items-start gap-3">
                     <div class="flex-1 min-w-0">
                         <span class="font-medium text-gray-800">${escapeHtml(material.name)}</span>
+                        ${hazardTypeBadgeHtml(material.hazardType)}
                         ${material.friable ? '<span class="ml-2 px-2 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded">Friable</span>' : ''}
                         <div class="text-sm mt-1 space-x-3">
                             <span class="text-gray-500">Total: <strong>${material.totalQuantity || 0}</strong> ${displayUnit(material.unit, 'units')}</span>
@@ -478,8 +482,9 @@ function getAssignedQuantity(materialId) {
     return total;
 }
 
-/** Find an existing site material by name, or create one for tracking in the Materials list. */
-function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0) {
+/** Find an existing site material by name, or create one for tracking in the Materials list.
+ *  hazardType is applied only when creating a new material; existing records are never changed. */
+function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0, hazardType = 'asbestos') {
     const trimmed = String(name || '').trim();
     if (!trimmed) return null;
     if (!currentProject.materials) currentProject.materials = [];
@@ -491,7 +496,8 @@ function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0) {
             name: trimmed,
             totalQuantity: 0,
             unit: unit || 'SF',
-            friable: false
+            friable: false,
+            hazardType: normalizeHazardType(hazardType)
         };
         currentProject.materials.push(material);
     }
@@ -745,102 +751,195 @@ function getAirSampleTypePrefix(type) {
     const normalized = String(type || '').toLowerCase();
     if (normalized === 'personal') return 'PS';
     if (normalized === 'clearance') return 'CA';
+    if (normalized === 'lead') return 'AS';
     return 'AS';
 }
 
-function getNextAirSampleId(type, currentSampleId = null) {
+function normalizeHazardType(value) {
+    const v = String(value || '').toLowerCase();
+    if (v === 'lead' || v === 'pb') return 'lead';
+    return 'asbestos';
+}
+
+function isLeadHazard(hazardType) {
+    return normalizeHazardType(hazardType) === 'lead';
+}
+
+function getAirSampleHazardType(sample) {
+    if (!sample) return 'asbestos';
+    if (sample.hazardType) return normalizeHazardType(sample.hazardType);
+    if (String(sample.type || '').toLowerCase() === 'lead') return 'lead';
+    const id = sample.sampleId || '';
+    if (/-Pb-(AS|PS|CA)\d+$/i.test(id)) return 'lead';
+    return 'asbestos';
+}
+
+function resolveSiteMaterialHazard(materialId, materialName) {
+    const materials = currentProject?.materials || [];
+    if (materialId) {
+        const byId = materials.find(m => m.id === materialId);
+        if (byId) return normalizeHazardType(byId.hazardType);
+    }
+    const norm = (materialName || '').trim().toLowerCase();
+    if (norm) {
+        const byName = materials.find(m => (m.name || '').trim().toLowerCase() === norm);
+        if (byName) return normalizeHazardType(byName.hazardType);
+    }
+    return 'asbestos';
+}
+
+function getProjectHazardSummary(project) {
+    const p = project || currentProject;
+    const materials = p?.materials || [];
+    const hasAsbestos = materials.some(m => normalizeHazardType(m.hazardType) !== 'lead');
+    const hasLead = materials.some(m => normalizeHazardType(m.hazardType) === 'lead');
+    return {
+        hasAsbestos,
+        hasLead,
+        onlyAsbestos: hasAsbestos && !hasLead,
+        onlyLead: hasLead && !hasAsbestos,
+        both: hasAsbestos && hasLead
+    };
+}
+
+function getContainmentMaterialHazards(containment) {
+    let hasAsbestos = false;
+    let hasLead = false;
+    const seen = new Set();
+    const consider = (materialId, name) => {
+        const key = materialId || (name || '').trim().toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        const ht = resolveSiteMaterialHazard(materialId, name);
+        if (ht === 'lead') hasLead = true;
+        else hasAsbestos = true;
+    };
+    (containment?.materials || []).forEach(m => consider(m.materialId, m.materialName || m.name));
+    (containment?.spaces || []).forEach(sp => {
+        (sp.materials || []).forEach(m => consider(m.materialId, m.name || m.materialName));
+    });
+    return { hasAsbestos, hasLead };
+}
+
+function formatAirSampleSequence(num) {
+    const n = Math.max(1, parseInt(num, 10) || 1);
+    return n < 100 ? String(n).padStart(2, '0') : String(n);
+}
+
+function buildAirSampleIdPrefix(sampleType, hazardType = 'asbestos') {
     const projectNum = currentProject?.projectNumber || 'PJ';
-    const typePrefix = getAirSampleTypePrefix(type);
-    const prefix = `${projectNum}-${typePrefix}`;
+    const typePrefix = getAirSampleTypePrefix(sampleType);
+    if (isLeadHazard(hazardType)) return `${projectNum}-Pb-${typePrefix}`;
+    return `${projectNum}-${typePrefix}`;
+}
+
+function getNextAirSampleId(sampleType, hazardType = 'asbestos', currentSampleId = null) {
+    const prefix = buildAirSampleIdPrefix(sampleType, hazardType);
     let nextNum = 1;
+    const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`^${escaped}(\\d+)$`, 'i');
     (currentProject?.airSamples || []).forEach(sample => {
         const id = sample.sampleId || '';
         if (currentSampleId && id === currentSampleId) return;
-        if (!id.startsWith(prefix)) return;
-        const suffix = id.slice(prefix.length);
-        if (/^\d+$/.test(suffix)) {
-            nextNum = Math.max(nextNum, parseInt(suffix, 10) + 1);
-        }
+        const match = id.match(re);
+        if (match) nextNum = Math.max(nextNum, parseInt(match[1], 10) + 1);
     });
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+    return `${prefix}${formatAirSampleSequence(nextNum)}`;
 }
 
 function isAutoAirSampleId(value) {
     const projectNum = currentProject?.projectNumber || 'PJ';
     const escapedProject = projectNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`^${escapedProject}-(AS|PS|CA)\\d{3}$`, 'i').test(String(value || ''));
+    return new RegExp(`^${escapedProject}(-Pb)?-(AS|PS|CA)\\d{2,}$`, 'i').test(String(value || ''));
 }
 
-function buildAirSampleIdPrefix(type) {
-    const projectNum = currentProject?.projectNumber || 'PJ';
-    return `${projectNum}-${getAirSampleTypePrefix(type)}`;
-}
-
-function parseAirSampleIdSuffix(sampleId, type) {
-    const typePrefix = getAirSampleTypePrefix(type);
+function parseAirSampleIdSuffix(sampleId, sampleType, hazardType = 'asbestos') {
+    const typePrefix = getAirSampleTypePrefix(sampleType);
     const id = String(sampleId || '').trim();
-    const autoMatch = id.match(/^.+-(AS|PS|CA)(\d{1,3})$/i);
-    if (autoMatch && autoMatch[1].toUpperCase() === typePrefix) {
-        return autoMatch[2].padStart(3, '0');
-    }
-    if (/^\d{1,3}$/.test(id)) return id.padStart(3, '0');
-    const generic = id.match(/(AS|PS|CA)(\d{1,3})$/i);
-    if (generic) return generic[2].padStart(3, '0');
-    return getNextAirSampleId(type).slice(buildAirSampleIdPrefix(type).length);
+    const leadMatch = id.match(new RegExp(`-Pb-${typePrefix}(\\d+)$`, 'i'));
+    if (leadMatch && isLeadHazard(hazardType)) return formatAirSampleSequence(parseInt(leadMatch[1], 10));
+    const asbMatch = id.match(new RegExp(`-${typePrefix}(\\d+)$`, 'i'));
+    if (asbMatch && !isLeadHazard(hazardType)) return formatAirSampleSequence(parseInt(asbMatch[1], 10));
+    if (/^\d+$/.test(id)) return formatAirSampleSequence(parseInt(id, 10));
+    return getNextAirSampleId(sampleType, hazardType).slice(buildAirSampleIdPrefix(sampleType, hazardType).length);
 }
 
-function buildAirSampleIdFromSuffix(type, suffixInput) {
-    const prefix = buildAirSampleIdPrefix(type);
+function buildAirSampleIdFromSuffix(sampleType, suffixInput, hazardType = 'asbestos') {
+    const prefix = buildAirSampleIdPrefix(sampleType, hazardType);
     const digits = String(suffixInput || '').replace(/\D/g, '');
-    const suffix = (digits || '001').padStart(3, '0').slice(-3);
-    return `${prefix}${suffix}`;
+    const num = parseInt(digits, 10) || 1;
+    return `${prefix}${formatAirSampleSequence(num)}`;
 }
 
 function syncAirSampleIdsForProjectNumber(oldProjectNumber, newProjectNumber) {
     if (!oldProjectNumber || !newProjectNumber || oldProjectNumber === newProjectNumber) return;
     const escapedOld = oldProjectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`^${escapedOld}-(AS|PS|CA)(\\d{3})$`, 'i');
+    const patterns = [
+        new RegExp(`^(${escapedOld})-Pb-(AS|PS|CA)(\\d+)$`, 'i'),
+        new RegExp(`^(${escapedOld})-(AS|PS|CA)(\\d+)$`, 'i'),
+        new RegExp(`^(${escapedOld})-(\\d{2})Pb$`, 'i')
+    ];
     (currentProject.airSamples || []).forEach(sample => {
         const id = sample.sampleId || '';
-        const match = id.match(re);
-        if (match) {
-            sample.sampleId = `${newProjectNumber}-${match[1].toUpperCase()}${match[2]}`;
+        let m = id.match(patterns[0]);
+        if (m) { sample.sampleId = `${newProjectNumber}-Pb-${m[2].toUpperCase()}${m[3]}`; return; }
+        m = id.match(patterns[1]);
+        if (m) { sample.sampleId = `${newProjectNumber}-${m[2].toUpperCase()}${m[3]}`; return; }
+        m = id.match(patterns[2]);
+        if (m) {
+            sample.hazardType = 'lead';
+            if (sample.type === 'Lead') sample.type = 'Area';
+            sample.sampleId = getNextAirSampleId(sample.type || 'Area', 'lead');
         }
     });
 }
 
-function buildAirSampleIdFieldHtml(prefixSpanId, suffixInputId, type, sampleId, compact) {
-    const prefix = buildAirSampleIdPrefix(type);
-    const suffix = parseAirSampleIdSuffix(sampleId, type);
+function buildAirSampleIdFieldHtml(prefixSpanId, suffixInputId, sampleType, hazardType, sampleId, compact) {
+    const prefix = buildAirSampleIdPrefix(sampleType, hazardType);
+    const suffix = parseAirSampleIdSuffix(sampleId, sampleType, hazardType);
     const inputStyle = compact
         ? 'padding:0.3rem 0.5rem; font-size:0.875rem; width:3.25rem;'
         : 'padding:0.75rem; width:3.5rem;';
     return `<div class="flex items-center gap-1" style="flex-wrap:nowrap;">
         <span id="${prefixSpanId}" class="font-mono text-gray-600 whitespace-nowrap${compact ? ' text-xs' : ' text-sm'}">${escapeHtml(prefix)}</span>
-        <input type="text" id="${suffixInputId}" class="border rounded font-mono" style="${inputStyle}" value="${escapeHtml(suffix)}" maxlength="3" inputmode="numeric" aria-label="Sample number">
+        <input type="text" id="${suffixInputId}" class="border rounded font-mono" style="${inputStyle}" value="${escapeHtml(suffix)}" maxlength="4" inputmode="numeric" aria-label="Sample number">
     </div>`;
 }
 
-function wireAirSampleIdTypeChange(modal, typeSelectId, prefixSpanId, suffixInputId, options = {}) {
-    const { currentSampleId = null, autoSuggestOnTypeChange = !currentSampleId } = typeof options === 'string'
+function renderAirSampleIdField(container, sampleType, hazardType, sampleId, compact, prefixSpanId, suffixInputId) {
+    if (!container) return;
+    const ht = normalizeHazardType(hazardType);
+    const suggested = sampleId || getNextAirSampleId(sampleType, ht);
+    container.innerHTML = buildAirSampleIdFieldHtml(prefixSpanId, suffixInputId, sampleType, ht, suggested, compact);
+}
+
+function resolveAirSampleIdFromForm(sampleType, hazardType, suffixValue) {
+    return buildAirSampleIdFromSuffix(sampleType, suffixValue, hazardType);
+}
+
+function wireAirSampleIdTypeChange(modal, typeSelectId, hazardSelectId, containerId, prefixSpanId, suffixInputId, options = {}) {
+    const { currentSampleId = null, autoSuggestOnTypeChange = !currentSampleId, compact = false } = typeof options === 'string'
         ? { currentSampleId: options }
         : options;
     const typeSelect = modal.querySelector(`#${typeSelectId}`);
-    const prefixEl = modal.querySelector(`#${prefixSpanId}`);
-    const suffixEl = modal.querySelector(`#${suffixInputId}`);
-    typeSelect?.addEventListener('change', () => {
-        const sampleType = typeSelect.value;
-        if (prefixEl) prefixEl.textContent = buildAirSampleIdPrefix(sampleType);
-        if (!suffixEl) return;
-        if (autoSuggestOnTypeChange) {
-            const currentFullId = buildAirSampleIdFromSuffix(sampleType, suffixEl.value.trim());
-            if (!suffixEl.value.trim() || isAutoAirSampleId(currentFullId)) {
-                suffixEl.value = getNextAirSampleId(sampleType, currentSampleId || '').slice(buildAirSampleIdPrefix(sampleType).length);
-            }
-        } else {
-            suffixEl.value = parseAirSampleIdSuffix(suffixEl.value, sampleType);
+    const hazardSelect = hazardSelectId ? modal.querySelector(`#${hazardSelectId}`) : null;
+    const container = modal.querySelector(`#${containerId}`);
+    const getHazardType = () => normalizeHazardType(hazardSelect?.value || 'asbestos');
+    const refreshIdField = () => {
+        const sampleType = typeSelect?.value || 'Area';
+        const hazardType = getHazardType();
+        let suggestedId = currentSampleId;
+        if (autoSuggestOnTypeChange || !suggestedId) {
+            suggestedId = getNextAirSampleId(sampleType, hazardType, currentSampleId || '');
         }
+        renderAirSampleIdField(container, sampleType, hazardType, suggestedId, compact, prefixSpanId, suffixInputId);
+    };
+    typeSelect?.addEventListener('change', refreshIdField);
+    hazardSelect?.addEventListener('change', () => {
+        if (autoSuggestOnTypeChange) refreshIdField();
+        else renderAirSampleIdField(container, typeSelect?.value || 'Area', getHazardType(), currentSampleId, compact, prefixSpanId, suffixInputId);
     });
+    refreshIdField();
 }
 
 function buildChainOfCustodyTemplateData(formData) {
@@ -855,6 +954,212 @@ function buildChainOfCustodyTemplateData(formData) {
     };
 }
 
+function normalizeDocxZipPaths(zip) {
+    if (!zip || !zip.files) return;
+    Object.keys(zip.files).forEach(path => {
+        if (!path.includes('\\')) return;
+        const normalized = path.replace(/\\/g, '/');
+        if (normalized === path) return;
+        // Access zip.files[path] directly — zip.file() may normalize the argument
+        // to forward slashes before lookup, causing it to miss backslash-keyed entries.
+        const fileObj = zip.files[path];
+        if (!fileObj) return;
+        if (!zip.files[normalized]) {
+            // Binary-safe copy: asText() on media (e.g. word\media\image1.jpeg) throws in browser.
+            const content = typeof fileObj.asUint8Array === 'function'
+                ? fileObj.asUint8Array()
+                : fileObj.asBinary();
+            zip.file(normalized, content, { binary: true });
+        }
+        delete zip.files[path];
+    });
+}
+
+function isDocxPlaceholderPart(path) {
+    return /^word[\\/](document|header\d+|footer\d+)\.xml$/i.test(path);
+}
+
+function repairDocxPlaceholderXml(xml) {
+    const mergedRun = (tag) => `<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr><w:t>${tag}</w:t></w:r>`;
+    const rPr = String.raw`(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?`;
+    const run = String.raw`<w:r\b(?:\s[^>]*)?>${rPr}<w:t(?:\s[^>]*)?>`;
+    const runEnd = String.raw`<\/w:t><\/w:r>`;
+    const proof = String.raw`\s*(?:<w:proofErr[^>]*\/?>\s*)*`;
+    xml = xml.replace(
+        new RegExp(`${run}\\{\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}\\}${runEnd}`, 'g'),
+        (_m, tagName) => mergedRun(`{${tagName.trim()}}`)
+    );
+    xml = xml.replace(
+        /(<w:r\b(?:\s[^>]*)?>(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\{([#\/]?[\w.]+)\}([^<{}]+)<\/w:t><\/w:r>/g,
+        (_m, rOpen, tag, trailing) => `${rOpen}<w:t>{${tag}}</w:t></w:r>${mergedRun(trailing)}`
+    );
+    xml = xml.replace(
+        /(<w:r\b(?:\s[^>]*)?>(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\} \{<\/w:t><\/w:r>/g,
+        '$1<w:t>}</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr><w:t>{</w:t></w:r>'
+    );
+    xml = xml.replace(
+        new RegExp(`${run}\\{\\/${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+        (_m, tagName) => mergedRun(`{/${tagName.trim()}}`)
+    );
+    xml = xml.replace(
+        new RegExp(`${run}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+        (_m, part1, part2) => {
+            const name = (part1 + part2).trim();
+            if (!/^[\w#/.]+$/.test(name)) return _m;
+            return mergedRun(`{${name}}`);
+        }
+    );
+    xml = xml.replace(
+        new RegExp(`${run}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+        (_m, tagName) => {
+            const name = tagName.trim();
+            if (!/^[\w#/.]+$/.test(name)) return _m;
+            return mergedRun(`{${name}}`);
+        }
+    );
+    return xml;
+}
+
+function repairDocxPlaceholderTags(zip) {
+    if (!zip || typeof zip.file !== 'function') return;
+    normalizeDocxZipPaths(zip);
+    Object.keys(zip.files).forEach(path => {
+        if (!isDocxPlaceholderPart(path)) return;
+        const file = zip.file(path);
+        if (!file) return;
+        const original = file.asText();
+        const xml = repairDocxPlaceholderXml(original);
+        if (xml !== original) zip.file(path, xml);
+    });
+}
+
+const LEAD_ANALYSIS_OPTIONS = [
+    'Lead by NIOSH 7300 (ICP)',
+    'Lead by NIOSH 7303 (ICP-MS)',
+    'Lead by NIOSH 7082 (Flame AAS)'
+];
+
+function migrateProjectHazardData(project) {
+    if (!project) return;
+    (project.materials || []).forEach(m => {
+        if (!m.hazardType) m.hazardType = 'asbestos';
+    });
+    (project.airSamples || []).forEach(s => {
+        if (String(s.type || '').toLowerCase() === 'lead') {
+            s.hazardType = 'lead';
+            s.type = 'Area';
+        } else if (!s.hazardType) {
+            const id = s.sampleId || '';
+            s.hazardType = /-Pb-(AS|PS|CA)\d+$/i.test(id) ? 'lead' : 'asbestos';
+        }
+    });
+    (project.wipeSamples || []).forEach(s => {
+        if (s.type === 'Pre-Abatement') s.type = 'Pre-Start Wipe Sample';
+    });
+}
+
+function hazardTypeLabel(hazardType) {
+    return isLeadHazard(hazardType) ? 'Pb' : 'Asb';
+}
+
+function hazardTypeBadgeHtml(hazardType) {
+    const label = hazardTypeLabel(hazardType);
+    const cls = isLeadHazard(hazardType) ? 'bg-orange-100 text-orange-800' : 'bg-yellow-100 text-yellow-800';
+    return `<span class="ml-1 px-2 py-0.5 text-xs ${cls} rounded">${label}</span>`;
+}
+
+function buildMaterialHazardSelectorHtml(namePrefix, selected = 'asbestos') {
+    const ht = normalizeHazardType(selected);
+    const radioName = `${namePrefix}-hazard`;
+    return `<div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Hazard *</label>
+        <div style="display:flex; gap:16px; align-items:center;">
+            ${buildModalRadioRow(`${namePrefix}-hazard-asb`, radioName, 'asbestos', 'Asb', ht !== 'lead')}
+            ${buildModalRadioRow(`${namePrefix}-hazard-pb`, radioName, 'lead', 'Pb', ht === 'lead')}
+        </div>
+    </div>`;
+}
+
+function readMaterialHazardFromForm(namePrefix) {
+    const checked = document.querySelector(`input[name="${namePrefix}-hazard"]:checked`);
+    return normalizeHazardType(checked?.value);
+}
+
+function buildAirSampleHazardSelectorHtml(idPrefix, project, selected = '') {
+    const summary = getProjectHazardSummary(project);
+    let defaultVal = selected ? normalizeHazardType(selected) : '';
+    if (!defaultVal) {
+        if (summary.onlyAsbestos) defaultVal = 'asbestos';
+        else if (summary.onlyLead) defaultVal = 'lead';
+    }
+    const needsChoice = summary.both && !selected;
+    const isCompact = idPrefix.startsWith('edit');
+    const selectStyle = isCompact ? ' style="padding:0.3rem 0.5rem; font-size:0.875rem;"' : '';
+    const selectCls = isCompact ? 'w-full border rounded bg-white' : 'w-full p-3 border rounded-lg bg-white';
+    return `<div>
+        <label class="block ${isCompact ? 'text-xs' : 'text-sm'} font-medium text-gray-700" style="margin-bottom:${isCompact ? '2px' : '4px'};">Hazard *</label>
+        <select id="${idPrefix}-hazard" class="${selectCls}"${selectStyle}>
+            ${needsChoice ? '<option value="" selected>— Select —</option>' : ''}
+            <option value="asbestos" ${defaultVal === 'asbestos' ? 'selected' : ''}>Asb</option>
+            <option value="lead" ${defaultVal === 'lead' ? 'selected' : ''}>Pb</option>
+        </select>
+    </div>`;
+}
+
+function isWashoeClient(name) {
+    const n = (name || '').trim().toLowerCase();
+    return ['washoe county school district', 'washoe county sd', 'washoe csd'].includes(n);
+}
+
+function getNextWipeSampleId() {
+    const projectNum = currentProject?.projectNumber || 'PJ';
+    const prefix = `${projectNum}-W`;
+    let nextNum = 1;
+    (currentProject?.wipeSamples || []).forEach(s => {
+        const id = s.sampleId || '';
+        if (!id.startsWith(prefix)) return;
+        const part = id.slice(prefix.length);
+        if (/^\d+$/.test(part)) nextNum = Math.max(nextNum, parseInt(part, 10) + 1);
+    });
+    return `${prefix}${String(nextNum).padStart(2, '0')}`;
+}
+
+function syncWipeSampleIdsForProjectNumber(oldProjectNumber, newProjectNumber) {
+    if (!oldProjectNumber || !newProjectNumber || oldProjectNumber === newProjectNumber) return;
+    const escapedOld = oldProjectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`^${escapedOld}-W(\\d{2})$`, 'i');
+    (currentProject.wipeSamples || []).forEach(sample => {
+        const id = sample.sampleId || '';
+        const match = id.match(re);
+        if (match) sample.sampleId = `${newProjectNumber}-W${match[1]}`;
+    });
+}
+
+function getWipeContextFromContainment(containment) {
+    const buildingName = containment?.buildingName || '';
+    const spaceName = (containment?.spaces || [])
+        .map(s => s.spaceName || s.name || '')
+        .filter(Boolean)
+        .join(', ');
+    return { buildingName, spaceName };
+}
+
+function buildLeadAnalysisOptionsHtml(selectedValue) {
+    const normalized = selectedValue === 'Lead by Flame AAS NIOSH 7082'
+        ? 'Lead by NIOSH 7082 (Flame AAS)'
+        : selectedValue;
+    return LEAD_ANALYSIS_OPTIONS.map(opt =>
+        `<option value="${escapeHtml(opt)}"${opt === normalized ? ' selected' : ''}>${escapeHtml(opt)}</option>`
+    ).join('');
+}
+
+function projectHasAutoGeneratedSamples(project) {
+    const p = project || currentProject;
+    if (!p) return false;
+    return ((p.airSamples || []).some(s => s.autoCreated)
+        || (p.wipeSamples || []).some(s => s.autoCreated));
+}
+
 // Export for onclick handlers
 window.updateSampleCalc = updateSampleCalc;
 
@@ -863,6 +1168,7 @@ window.updateSampleCalc = updateSampleCalc;
 // ============================================
 
 function openEditProjectModal() {
+    closeAllModals();
     // Create a larger modal for all fields
     const modal = document.createElement('div');
     modal.className = 'modal active';
@@ -903,15 +1209,9 @@ function openEditProjectModal() {
                             <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Name</label>
                             <input type="text" id="edit-client-name" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientName || '')}">
                         </div>
-                        <div class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Phone</label>
-                                <input type="tel" id="edit-client-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientPhone || '')}">
-                            </div>
-                            <div>
-                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Fax</label>
-                                <input type="tel" id="edit-client-fax" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientFax || '')}">
-                            </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Phone</label>
+                            <input type="tel" id="edit-client-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientPhone || '')}">
                         </div>
                     </div>
                 </div>
@@ -939,15 +1239,9 @@ function openEditProjectModal() {
                             <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Name</label>
                             <input type="text" id="edit-contractor" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="Contractor company name" value="${escapeHtml(currentProject.contractor || '')}">
                         </div>
-                        <div class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Phone Number</label>
-                                <input type="tel" id="edit-contractor-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.contractorPhone || '')}">
-                            </div>
-                            <div>
-                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Fax</label>
-                                <input type="tel" id="edit-contractor-fax" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.contractorFax || '')}">
-                            </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Phone Number</label>
+                            <input type="tel" id="edit-contractor-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.contractorPhone || '')}">
                         </div>
                         <div class="grid grid-cols-2 gap-2">
                             <div>
@@ -1025,12 +1319,13 @@ function openEditProjectModal() {
             alert('Please enter a site name');
             return;
         }
-        
+
         const previousProjectNumber = currentProject.projectNumber || '';
 
         // Update all fields
         currentProject.projectNumber = projectNumber;
         syncAirSampleIdsForProjectNumber(previousProjectNumber, projectNumber);
+        syncWipeSampleIdsForProjectNumber(previousProjectNumber, projectNumber);
         currentProject.siteName = siteName;
         currentProject.name = siteName;
         currentProject.siteAddress = siteAddress;
@@ -1039,11 +1334,9 @@ function openEditProjectModal() {
         currentProject.foremanName = document.getElementById('edit-foreman-name').value.trim();
         currentProject.foremanPhone = document.getElementById('edit-foreman-phone').value.trim();
         currentProject.contractorPhone = document.getElementById('edit-contractor-phone').value.trim();
-        currentProject.contractorFax = document.getElementById('edit-contractor-fax').value.trim();
         currentProject.clientContactName = document.getElementById('edit-contact-name').value.trim();
         currentProject.clientContactPhone = document.getElementById('edit-contact-phone').value.trim();
         currentProject.clientPhone = document.getElementById('edit-client-phone').value.trim();
-        currentProject.clientFax = document.getElementById('edit-client-fax').value.trim();
         currentProject.projectFolderPath = document.getElementById('edit-project-folder')?.value.trim() || undefined;
         
         modal.remove();
@@ -1171,6 +1464,7 @@ function openAddSpaceModal(buildingId) {
 
 // Combined modal for adding/editing space with material assignment
 function openSpaceMaterialModal(building, existingSpace) {
+    closeAllModals();
     const isEdit = !!existingSpace;
     const projectMaterials = currentProject.materials || [];
     
@@ -1190,7 +1484,7 @@ function openSpaceMaterialModal(building, existingSpace) {
                     <input type="checkbox" id="mat-check-${pm.id}" class="h-4 w-4 rounded border-gray-300 text-indigo-600"
                            ${assigned ? 'checked' : ''} onchange="toggleMaterialRow('${pm.id}')">
                     <label for="mat-check-${pm.id}" class="modal-check-label" style="flex:1;">
-                        <span class="modal-check-title">${escapeHtml(pm.name)}</span>
+                        <span class="modal-check-title">${escapeHtml(pm.name)} ${hazardTypeLabel(pm.hazardType)}</span>
                         <span class="modal-check-subtitle">(${remaining > 0 ? remaining : 0} ${displayUnit(pm.unit)} remaining)</span>
                     </label>
                     <div class="flex items-center gap-2" id="mat-qty-row-${pm.id}" style="${assigned ? '' : 'opacity: 0.4'}">
@@ -1321,7 +1615,8 @@ function openSpaceMaterialModal(building, existingSpace) {
             if (!newName) return;
             const newQty = parseFloat(row.querySelector('.new-mat-qty')?.value) || 0;
             const newUnit = row.querySelector('.new-mat-unit')?.value || 'SF';
-            const siteMat = findOrCreateSiteMaterial(newName, newUnit, newQty);
+            const rowHazard = row.querySelector('input[name$="-hazard"]:checked')?.value || 'asbestos';
+            const siteMat = findOrCreateSiteMaterial(newName, newUnit, newQty, rowHazard);
             if (!siteMat) return;
 
             if (newQty > 0) {
@@ -1358,10 +1653,16 @@ function openSpaceMaterialModal(building, existingSpace) {
 
     const newMatContainer = modal.querySelector('#space-new-materials');
     const addInlineMatBtn = modal.querySelector('#add-inline-material-btn');
-    const buildNewMatRow = () => `
-        <div class="new-mat-row modal-material-row">
+    let inlineMatRowCounter = 0;
+    const buildNewMatRow = () => {
+        const rowId = `inline-mat-${++inlineMatRowCounter}`;
+        return `<div class="new-mat-row modal-material-row" style="flex-wrap:wrap;">
             <button type="button" class="new-mat-remove" style="background:transparent;border:none;cursor:pointer;color:var(--text-muted);font-size:18px;line-height:1;padding:0;width:1.25rem;" title="Remove">&times;</button>
-            <input type="text" class="new-mat-name" style="flex:1;min-width:0;width:auto !important;" placeholder="Material Name">
+            <input type="text" class="new-mat-name" style="flex:1;min-width:120px;width:auto !important;" placeholder="Material Name">
+            <div style="display:flex;gap:10px;align-items:center;">
+                ${buildModalRadioRow(`${rowId}-hazard-asb`, `${rowId}-hazard`, 'asbestos', 'Asb', true, 'style="padding:0;margin:0;"')}
+                ${buildModalRadioRow(`${rowId}-hazard-pb`, `${rowId}-hazard`, 'lead', 'Pb', false, 'style="padding:0;margin:0;"')}
+            </div>
             <input type="number" class="new-mat-qty" style="width:5.5rem !important;flex-shrink:0;" min="0" step="any" placeholder="Qty">
             <select class="new-mat-unit" style="width:auto !important;flex-shrink:0;padding:7px 8px;">
                 <option value="SF">ft\u00b2</option>
@@ -1369,8 +1670,8 @@ function openSpaceMaterialModal(building, existingSpace) {
                 <option value="EA">EA</option>
                 <option value="CF">ft\u00b3</option>
             </select>
-        </div>
-    `;
+        </div>`;
+    };
     if (addInlineMatBtn && newMatContainer) {
         addInlineMatBtn.addEventListener('click', () => {
             newMatContainer.insertAdjacentHTML('beforeend', buildNewMatRow());
@@ -1427,6 +1728,7 @@ function openAddMaterialModal() {
                     </select>
                 </div>
             </div>
+            ${buildMaterialHazardSelectorHtml('new-material', 'asbestos')}
             ${buildModalCheckboxRow('new-material-friable', '', '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
@@ -1442,7 +1744,8 @@ function openAddMaterialModal() {
             name,
             totalQuantity: parseFloat(document.getElementById('new-material-quantity').value) || 0,
             unit: document.getElementById('new-material-unit').value,
-            friable: document.getElementById('new-material-friable').checked
+            friable: document.getElementById('new-material-friable').checked,
+            hazardType: readMaterialHazardFromForm('new-material')
         });
         saveCurrentProject();
         renderProject();
@@ -1480,6 +1783,7 @@ function openEditMaterialModal(materialId) {
                 <label class="block text-sm font-medium text-gray-700 mb-1">HMR# (optional)</label>
                 <input type="text" id="edit-material-hmr" class="w-full p-3 border rounded-lg" placeholder="e.g., 01" value="${escapeHtml(material.hmrNumber || '')}">
             </div>
+            ${buildMaterialHazardSelectorHtml('edit-material', material.hazardType)}
             ${buildModalCheckboxRow('edit-material-friable', '', material.friable ? 'checked' : '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
@@ -1502,6 +1806,7 @@ function openEditMaterialModal(materialId) {
         material.unit = newUnit;
         material.hmrNumber = (document.getElementById('edit-material-hmr').value || '').trim() || undefined;
         material.friable = document.getElementById('edit-material-friable').checked;
+        material.hazardType = readMaterialHazardFromForm('edit-material');
         saveCurrentProject();
         renderProject();
     });
@@ -1880,6 +2185,7 @@ async function printBulkSampleForm(project, material, bulkSamples, formData = {}
         }
 
         const zip = new PizZipClass(arrayBuffer);
+        repairDocxPlaceholderTags(zip);
         const docOptions = {
             paragraphLoop: true,
             linebreaks: true,
@@ -1916,6 +2222,408 @@ async function printBulkSampleForm(project, material, bulkSamples, formData = {}
     }
 }
 
+// ============================================
+// WIPE SAMPLES (LEAD)
+// ============================================
+
+function openAddWipeSampleModal() {
+    if (!getProjectHazardSummary(currentProject).hasLead) {
+        showNotification('Wipe samples require at least one Pb site material.', true);
+        return;
+    }
+    const containmentOptions = (currentProject.containments || []).map(c =>
+        `<option value="${c.id}">${escapeHtml(getContainmentDisplayName(c.name))}</option>`
+    ).join('');
+
+    const modal = createModal('Add Wipe Sample', `
+        <div class="space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample ID</label>
+                    <input type="text" id="wipe-sample-id" class="w-full p-3 border rounded-lg font-mono bg-gray-50" value="${escapeHtml(getNextWipeSampleId())}" readonly>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Date Sampled</label>
+                    <input type="date" id="wipe-sample-date" class="w-full p-3 border rounded-lg" value="${getTodayLocal()}">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
+                    <select id="wipe-sample-type" class="w-full p-3 border rounded-lg bg-white">
+                        <option value="Clearance">Clearance</option>
+                        <option value="Pre-Start Wipe Sample">Pre-Start Wipe Sample</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Containment</label>
+                    <select id="wipe-sample-containment" class="w-full p-3 border rounded-lg bg-white" required>
+                        <option value="">-- Select --</option>
+                        ${containmentOptions}
+                    </select>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Substrate</label>
+                    <input type="text" id="wipe-sample-substrate" class="w-full p-3 border rounded-lg" placeholder="e.g., Concrete, Drywall">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Component</label>
+                    <input type="text" id="wipe-sample-component" class="w-full p-3 border rounded-lg" placeholder="e.g., Floor, Window sill">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ft²</label>
+                    <input type="text" id="wipe-sample-sqft" class="w-full p-3 border rounded-lg" placeholder="Square footage sampled">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Location / Comments</label>
+                    <input type="text" id="wipe-sample-location" class="w-full p-3 border rounded-lg" placeholder="Optional">
+                </div>
+            </div>
+        </div>
+    `, () => {
+        const containmentId = document.getElementById('wipe-sample-containment').value;
+        if (!containmentId) { showNotification('Select a containment.', true); return false; }
+        const containment = currentProject.containments?.find(c => c.id === containmentId);
+        const ctx = getWipeContextFromContainment(containment || {});
+        if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
+        currentProject.wipeSamples.push({
+            id: generateId(),
+            sampleId: document.getElementById('wipe-sample-id').value.trim() || getNextWipeSampleId(),
+            type: document.getElementById('wipe-sample-type').value,
+            containmentId,
+            containmentName: containment?.name || '',
+            buildingName: ctx.buildingName,
+            spaceName: ctx.spaceName,
+            substrate: document.getElementById('wipe-sample-substrate').value.trim(),
+            component: document.getElementById('wipe-sample-component').value.trim(),
+            squareFeet: document.getElementById('wipe-sample-sqft').value.trim(),
+            locationComment: document.getElementById('wipe-sample-location').value.trim(),
+            date: document.getElementById('wipe-sample-date').value || getTodayLocal(),
+            inspectorName: typeof getInspectorProfile === 'function' ? (getInspectorProfile().name || '') : '',
+            autoCreated: false,
+            createdAt: Date.now()
+        });
+        saveCurrentProject();
+        renderProject();
+        _shellRefresh();
+    });
+}
+
+function openEditWipeSampleModal(sampleId) {
+    const sample = (currentProject.wipeSamples || []).find(s => s.id === sampleId);
+    if (!sample) return;
+    const containmentOptions = (currentProject.containments || []).map(c =>
+        `<option value="${c.id}" ${c.id === sample.containmentId ? 'selected' : ''}>${escapeHtml(getContainmentDisplayName(c.name))}</option>`
+    ).join('');
+
+    const modal = createModal('Edit Wipe Sample', `
+        <div class="space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample ID</label>
+                    <input type="text" id="wipe-edit-sample-id" class="w-full p-3 border rounded-lg font-mono" value="${escapeHtml(sample.sampleId || '')}">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Date Sampled</label>
+                    <input type="date" id="wipe-edit-date" class="w-full p-3 border rounded-lg" value="${sample.date || getTodayLocal()}">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
+                    <select id="wipe-edit-type" class="w-full p-3 border rounded-lg bg-white">
+                        <option value="Clearance" ${sample.type === 'Clearance' ? 'selected' : ''}>Clearance</option>
+                        <option value="Pre-Start Wipe Sample" ${sample.type === 'Pre-Start Wipe Sample' || sample.type === 'Pre-Abatement' ? 'selected' : ''}>Pre-Start Wipe Sample</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Containment</label>
+                    <select id="wipe-edit-containment" class="w-full p-3 border rounded-lg bg-white">
+                        ${containmentOptions}
+                    </select>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Substrate</label>
+                    <input type="text" id="wipe-edit-substrate" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.substrate || '')}">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Component</label>
+                    <input type="text" id="wipe-edit-component" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.component || '')}">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ft²</label>
+                    <input type="text" id="wipe-edit-sqft" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.squareFeet || '')}">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Location / Comments</label>
+                    <input type="text" id="wipe-edit-location" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.locationComment || '')}">
+                </div>
+            </div>
+        </div>
+    `, () => {
+        const containmentId = document.getElementById('wipe-edit-containment').value;
+        const containment = currentProject.containments?.find(c => c.id === containmentId);
+        const ctx = getWipeContextFromContainment(containment || sample);
+        Object.assign(sample, {
+            sampleId: document.getElementById('wipe-edit-sample-id').value.trim() || sample.sampleId,
+            type: document.getElementById('wipe-edit-type').value,
+            containmentId,
+            containmentName: containment?.name || sample.containmentName || '',
+            buildingName: ctx.buildingName || sample.buildingName || '',
+            spaceName: ctx.spaceName || sample.spaceName || '',
+            substrate: document.getElementById('wipe-edit-substrate').value.trim(),
+            component: document.getElementById('wipe-edit-component').value.trim(),
+            squareFeet: document.getElementById('wipe-edit-sqft').value.trim(),
+            locationComment: document.getElementById('wipe-edit-location').value.trim(),
+            date: document.getElementById('wipe-edit-date').value || sample.date
+        });
+        saveCurrentProject();
+        renderProject();
+        _shellRefresh();
+    });
+
+    const editFooter = modal.querySelector('.modal-footer');
+    if (editFooter) {
+        editFooter.classList.remove('justify-end');
+        editFooter.classList.add('justify-between');
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'btn btn-danger';
+        deleteBtn.textContent = 'Delete Sample';
+        deleteBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!confirm('Delete this wipe sample? This cannot be undone.')) return;
+            dismissModal(modal);
+            deleteWipeSample(sampleId);
+        });
+        editFooter.insertBefore(deleteBtn, editFooter.firstChild);
+    }
+}
+
+function deleteWipeSample(sampleId) {
+    currentProject.wipeSamples = (currentProject.wipeSamples || []).filter(s => s.id !== sampleId);
+    saveCurrentProject();
+    renderProject();
+    _shellRefresh();
+}
+
+function openPrintWipeSamplesModal() {
+    const wipeSamples = currentProject.wipeSamples || [];
+    if (wipeSamples.length === 0) {
+        showNotification('No wipe samples to print.', true);
+        return;
+    }
+
+    const primarySample = wipeSamples[0] || {};
+    const inspectorName = primarySample.inspectorName || (typeof getInspectorProfile === 'function' ? getInspectorProfile().name : '') || '';
+    const inspectorEmail = (typeof getInspectorProfile === 'function' ? getInspectorProfile().email : '') || '';
+
+    const sampleCheckboxesHtml = wipeSamples.map(sample => buildModalSelectionOption(
+        `print-wipe-sample-${sample.id}`,
+        'print-wipe-sample-checkbox',
+        sample.id,
+        true,
+        escapeHtml(sample.sampleId || sample.id || 'No ID'),
+        `${escapeHtml(sample.type || 'Wipe')} · ${escapeHtml(sample.containmentName || '')}`
+    )).join('');
+
+    const modal = createModal('Print Lead Wipe Chain of Custody', `
+        <p class="text-sm text-gray-600 mb-4">Select wipe samples and complete the form to generate the lab submission.</p>
+        <div class="space-y-4">
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <label class="block text-sm font-medium text-gray-700">Select Samples to Print</label>
+                    <div class="flex gap-2">
+                        <button type="button" id="print-wipe-select-all" class="text-xs font-medium" style="color:#4f46e5;">Select All</button>
+                        <span class="text-gray-300">|</span>
+                        <button type="button" id="print-wipe-select-none" class="text-xs font-medium" style="color:#4f46e5;">Select None</button>
+                    </div>
+                </div>
+                <div id="print-wipe-samples-list" class="modal-selection-box max-h-48 overflow-y-auto">
+                    ${sampleCheckboxesHtml}
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Collected By</label>
+                    <input type="text" id="print-wipe-inspector" class="w-full p-2.5 border rounded-lg" value="${escapeHtml(inspectorName)}">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Bill 2 / Lab Account Number</label>
+                    <input type="text" id="print-wipe-lab-number" class="w-full p-2.5 border rounded-lg" placeholder="e.g., LAB-001">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Send Results To (Email)</label>
+                    <input type="email" id="print-wipe-email" class="w-full p-2.5 border rounded-lg" value="${escapeHtml(inspectorEmail)}">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Laboratory</label>
+                    <input type="text" id="print-wipe-lab" class="w-full p-2.5 border rounded-lg" placeholder="e.g., FACS, EMSL">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Type of Analysis</label>
+                    <select id="print-wipe-analysis" class="w-full p-2.5 border rounded-lg bg-white">
+                        ${buildLeadAnalysisOptionsHtml(LEAD_ANALYSIS_OPTIONS[0])}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Turn Around Time</label>
+                    <input type="text" id="print-wipe-turnaround" class="w-full p-2.5 border rounded-lg" placeholder="e.g., 24-Hour, 5-Day">
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Special Instructions</label>
+                <textarea id="print-wipe-instructions" rows="2" class="w-full p-2.5 border rounded-lg" placeholder="Optional special instructions for the lab..."></textarea>
+            </div>
+        </div>
+    `, async () => {
+        const selectedIds = Array.from(document.querySelectorAll('.print-wipe-sample-checkbox:checked')).map(cb => cb.value);
+        if (selectedIds.length === 0) {
+            showNotification('Please select at least one sample to print.', true);
+            return false;
+        }
+        const selectedSamples = wipeSamples.filter(s => selectedIds.includes(s.id));
+        const formData = {
+            inspectorName: document.getElementById('print-wipe-inspector').value.trim(),
+            inspectorEmail: document.getElementById('print-wipe-email').value.trim(),
+            labNumber: document.getElementById('print-wipe-lab-number').value.trim(),
+            lab: document.getElementById('print-wipe-lab').value.trim(),
+            analysisType: document.getElementById('print-wipe-analysis').value,
+            turnAroundTime: document.getElementById('print-wipe-turnaround').value.trim(),
+            specialInstructions: document.getElementById('print-wipe-instructions').value.trim()
+        };
+        await printWipeSampleForm(currentProject, selectedSamples, formData);
+    });
+
+    setTimeout(() => {
+        const cbs = document.querySelectorAll('.print-wipe-sample-checkbox');
+        const selectAllBtn = document.getElementById('print-wipe-select-all');
+        const selectNoneBtn = document.getElementById('print-wipe-select-none');
+        selectAllBtn?.addEventListener('click', () => { cbs.forEach(cb => cb.checked = true); });
+        selectNoneBtn?.addEventListener('click', () => { cbs.forEach(cb => cb.checked = false); });
+    }, 50);
+}
+
+async function printWipeSampleForm(project, wipeSamples, formData = {}) {
+    try {
+        const DocxtemplaterClass = window.Docxtemplater || (typeof Docxtemplater !== 'undefined' ? Docxtemplater : null);
+        const PizZipClass = window.PizZip || (typeof PizZip !== 'undefined' ? PizZip : null);
+        if (!DocxtemplaterClass || !PizZipClass) {
+            showNotification('Document generation library is not loaded. Please refresh the page.', true);
+            return;
+        }
+
+        const formatDate = (dateString) => {
+            if (!dateString) return '';
+            const date = new Date(dateString + (dateString.includes('T') ? '' : 'T00:00:00'));
+            if (isNaN(date.getTime())) return '';
+            return `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}/${date.getFullYear()}`;
+        };
+
+        const formInspectorName = formData.inspectorName || '';
+        const sampleDates = wipeSamples.map(s => s.date).filter(Boolean);
+        const uniqueDates = [...new Set(sampleDates)].sort();
+        const dateCollected = uniqueDates.length > 1
+            ? `${formatDate(uniqueDates[0])} - ${formatDate(uniqueDates[uniqueDates.length - 1])}`
+            : (uniqueDates.length === 1 ? formatDate(uniqueDates[0]) : '');
+
+        const samplesWipe = wipeSamples.map(sample => ({
+            sampleID: sample.sampleId || sample.id || '',
+            substrate: sample.substrate || '',
+            component: sample.component || '',
+            quantity: sample.squareFeet || '',
+            buildingName: sample.buildingName || '',
+            spaceName: sample.spaceName || '',
+            locationComment: sample.locationComment || ''
+        }));
+
+        const templateData = {
+            date: formatDate(getTodayLocal()),
+            projectNumber: project.projectNumber || '',
+            siteName: project.siteName || '',
+            clientName: project.clientName || '',
+            client: project.clientName || '',
+            inspectorName: formInspectorName,
+            dateCollected,
+            analysisType: formData.analysisType || LEAD_ANALYSIS_OPTIONS[0],
+            turnAroundTime: formData.turnAroundTime || '',
+            spectialInstructions: formData.specialInstructions || '',
+            inspectorEmail: formData.inspectorEmail || '',
+            laboratory: formData.lab || '',
+            samplesWipe,
+            ...buildChainOfCustodyTemplateData(formData)
+        };
+
+        showNotification('Loading Lead Wipe template...');
+        const templateName = 'Lead Wipe Template.docx';
+        let arrayBuffer;
+        if (window.electronAPI?.readTemplate) {
+            const result = await window.electronAPI.readTemplate(templateName);
+            if (!result.success) throw new Error(result.error || 'Failed to read template');
+            const buf = result.data;
+            arrayBuffer = buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        } else {
+            const response = await fetch(`./templates/${templateName}?t=${Date.now()}`, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`Failed to load template: ${response.statusText}`);
+            arrayBuffer = await response.arrayBuffer();
+        }
+
+        const zip = new PizZipClass(arrayBuffer);
+        // #region agent log
+        fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a62bad'},body:JSON.stringify({sessionId:'a62bad',location:'project.js:printWipeSampleForm',message:'wipe zip before normalize',data:{paths:Object.keys(zip.files||{}),backslashPaths:Object.keys(zip.files||{}).filter(p=>p.includes('\\'))},timestamp:Date.now(),hypothesisId:'H1-binary-asText'})}).catch(()=>{});
+        // #endregion
+        repairDocxPlaceholderTags(zip);
+        // #region agent log
+        fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a62bad'},body:JSON.stringify({sessionId:'a62bad',location:'project.js:printWipeSampleForm',message:'wipe zip after repair',data:{paths:Object.keys(zip.files||{}),hasDocument:!!zip.file('word/document.xml')},timestamp:Date.now(),hypothesisId:'H1-binary-asText',runId:'post-fix'})}).catch(()=>{});
+        // #endregion
+        const doc = new DocxtemplaterClass(zip, {
+            paragraphLoop: true,
+            linebreaks: true,
+            delimiters: { start: '{', end: '}' },
+            nullGetter: () => ''
+        });
+        doc.render(templateData);
+        const outZip = doc.getZip();
+
+        const blob = outZip.generate({
+            type: 'blob',
+            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        });
+
+        const fileName = `Lead_Wipe_COC_${project.projectNumber || 'Project'}_${formatDate(getTodayLocal()).replace(/\//g, '_')}.docx`;
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+        showNotification('Lead wipe COC document generated successfully.');
+    } catch (error) {
+        console.error('Error generating lead wipe document:', error);
+        const msg = String(error?.message || error || '');
+        if (/duplicate open tag|duplicate close tag|TemplateError/i.test(msg) || error?.properties?.id?.includes?.('duplicate')) {
+            showNotification('Lead wipe template has broken placeholders (often in the footer). Restart the app, then try again. If it persists, re-save templates/Lead Wipe Template.docx from the repo copy.', true);
+        } else {
+            showNotification('Failed to generate document. Check the console for details.', true);
+        }
+    }
+}
+
 function openAddMaterialToSpaceModal(buildingId, spaceId) {
     const building = currentProject.buildings?.find(b => b.id === buildingId);
     const space = building?.spaces?.find(s => s.id === spaceId);
@@ -1940,6 +2648,9 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Or Enter Custom Material Name</label>
                 <input type="text" id="space-material-name" class="w-full p-3 border rounded-lg" placeholder="e.g., 9x9 VAT">
+            </div>
+            <div id="space-custom-hazard-wrap">
+                ${buildMaterialHazardSelectorHtml('space-custom', 'asbestos')}
             </div>
             <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -1972,7 +2683,8 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
                 unit = siteMaterial.unit || unit;
             }
         } else if (name) {
-            siteMaterial = findOrCreateSiteMaterial(name, unit, quantity);
+            const customHazard = readMaterialHazardFromForm('space-custom');
+            siteMaterial = findOrCreateSiteMaterial(name, unit, quantity, customHazard);
             if (siteMaterial) {
                 name = siteMaterial.name;
                 unit = siteMaterial.unit || unit;
@@ -2028,6 +2740,7 @@ function openVisualInspectionModal(inspectionType, containmentName) {
         : 'Final Visual Inspection';
 
     return new Promise((resolve) => {
+        closeAllModals();
         const modal = document.createElement('div');
         modal.className = 'modal active';
 
@@ -2133,22 +2846,7 @@ function openVisualInspectionModal(inspectionType, containmentName) {
  * Only for non-regulated areas. Sets containmentId (dropdown) instead of location text.
  */
 function createClearanceAirSamples(containment, inspectionData) {
-    const projectNumber = currentProject.projectNumber || 'PJ00000';
     const existingSamples = currentProject.airSamples || [];
-
-    // Find the next sequence number for clearance samples
-    const prefix = `${projectNumber}-CA`;
-    let maxSeq = 0;
-    existingSamples.forEach(s => {
-        const sId = s.sampleId || s.id || '';
-        if (sId.startsWith(prefix)) {
-            const part = sId.replace(prefix, '');
-            if (/^\d+$/.test(part)) {
-                const num = parseInt(part, 10);
-                if (num > maxSeq) maxSeq = num;
-            }
-        }
-    });
 
     // Auto-generated samples: default date to day after creation (inspector can change in sample details)
     const defaultSampleDate = getTomorrowLocal();
@@ -2158,11 +2856,12 @@ function createClearanceAirSamples(containment, inspectionData) {
 
     // Create 5 clearance samples - use containment dropdown, not location text
     for (let i = 1; i <= 5; i++) {
-        const sampleId = `${prefix}${String(maxSeq + i).padStart(3, '0')}`;
+        const sampleId = getNextAirSampleId('Clearance', 'asbestos');
         const newSample = {
             id: generateId(),
             sampleId: sampleId,
             type: 'Clearance',
+            hazardType: 'asbestos',
             date: defaultSampleDate,
             startTime: '',
             stopTime: '',
@@ -2182,6 +2881,64 @@ function createClearanceAirSamples(containment, inspectionData) {
 
     currentProject.airSamples = existingSamples;
     console.log(`Created 5 clearance air samples for containment: ${containmentName}`);
+}
+
+/**
+ * Create 1 clearance wipe sample when transitioning to Containment Clearance (lead projects).
+ */
+function createClearanceWipeSample(containment, inspectionData) {
+    if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
+    const { buildingName, spaceName } = getWipeContextFromContainment(containment);
+    const containmentId = containment?.id || '';
+    const containmentName = (containment?.name && containment.name.trim()) ? containment.name.trim() : 'Unknown Containment';
+    const newSample = {
+        id: generateId(),
+        sampleId: getNextWipeSampleId(),
+        type: 'Clearance',
+        containmentId,
+        containmentName,
+        buildingName,
+        spaceName,
+        substrate: '',
+        component: '',
+        squareFeet: '',
+        locationComment: '',
+        date: getTomorrowLocal(),
+        inspectorName: inspectionData?.inspectorName || '',
+        autoCreated: true,
+        createdAt: Date.now()
+    };
+    currentProject.wipeSamples.push(newSample);
+    console.log(`Created clearance wipe sample for containment: ${containmentName}`);
+}
+
+/**
+ * Create 1 pre-start wipe sample for Washoe CSD lead projects at containment creation.
+ */
+function createPreAbatementWipeSample(containment, inspectorName) {
+    if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
+    const { buildingName, spaceName } = getWipeContextFromContainment(containment);
+    const containmentId = containment?.id || '';
+    const containmentName = (containment?.name && containment.name.trim()) ? containment.name.trim() : 'Unknown Containment';
+    const newSample = {
+        id: generateId(),
+        sampleId: getNextWipeSampleId(),
+        type: 'Pre-Start Wipe Sample',
+        containmentId,
+        containmentName,
+        buildingName,
+        spaceName,
+        substrate: '',
+        component: '',
+        squareFeet: '',
+        locationComment: '',
+        date: getTodayLocal(),
+        inspectorName: inspectorName || '',
+        autoCreated: true,
+        createdAt: Date.now()
+    };
+    currentProject.wipeSamples.push(newSample);
+    console.log(`Created pre-start wipe sample for containment: ${containmentName}`);
 }
 
 function buildModalCheckboxRow(id, inputClass, extraAttrs, labelHtml, rowClass = '', labelClass = '') {
@@ -2393,10 +3150,21 @@ function openAddContainmentModal() {
             });
         });
         
+        if (selectedSpaces.length === 0) {
+            alert('Please select at least one space for this containment.');
+            return false;
+        }
+
+        const aggregatedMaterials = Array.from(materialsMap.values());
+        if (aggregatedMaterials.length === 0) {
+            alert('Please assign at least one material to this containment.');
+            return false;
+        }
+
         const initialStage = document.getElementById('new-containment-stage').value;
         
         if (!currentProject.containments) currentProject.containments = [];
-        currentProject.containments.push({
+        const newContainment = {
             id: generateId(),
             name,
             buildingId,
@@ -2404,7 +3172,7 @@ function openAddContainmentModal() {
             stage: initialStage,
             regulatedArea: false,
             spaces: selectedSpaces,
-            materials: Array.from(materialsMap.values()),
+            materials: aggregatedMaterials,
             dailyLogs: [],
             visualInspections: [],
             workerRoster: [],
@@ -2414,7 +3182,16 @@ function openAddContainmentModal() {
                 previousStage: null
             }],
             createdAt: Date.now()
-        });
+        };
+        currentProject.containments.push(newContainment);
+
+        const containmentHazards = getContainmentMaterialHazards(newContainment);
+        if (containmentHazards.hasLead && isWashoeClient(currentProject.clientName)
+            && initialStage === STAGE_CONTAINMENT_PREPARATION) {
+            const inspectorName = typeof getInspectorProfile === 'function' ? (getInspectorProfile().name || '') : '';
+            createPreAbatementWipeSample(newContainment, inspectorName);
+        }
+
         saveCurrentProject();
         renderProject();
     });
@@ -2659,7 +3436,16 @@ function openEditContainmentModal(containmentId) {
                 }
             });
         });
+        if (selectedSpaces.length === 0) {
+            showEditContainmentStatus('Please select at least one space for this containment.', true);
+            return false;
+        }
+
         const aggregatedMaterials = Array.from(materialsMap.values());
+        if (aggregatedMaterials.length === 0) {
+            showEditContainmentStatus('Please assign at least one material to this containment.', true);
+            return false;
+        }
         
         const newStage = document.getElementById('edit-containment-stage')?.value;
         const previousStage = currentStage; // normalized at modal open time
@@ -2780,22 +3566,35 @@ function openEditContainmentModal(containmentId) {
         containment.regulatedArea = regulatedArea;
         containment.updatedAt = Date.now();
         
-        // Create clearance air samples if transitioning to Containment Clearance
-        // and NOT a regulated area (Final inspection passed)
+        const containmentHazards = getContainmentMaterialHazards({
+            ...containment,
+            materials: aggregatedMaterials,
+            spaces: selectedSpaces
+        });
+        const createdAir = [];
+        const createdWipes = [];
+
+        // Create clearance samples if transitioning to Containment Clearance (Final inspection passed)
         if (inspectionType === 'Final' &&
             newStage === STAGE_CONTAINMENT_CLEARANCE &&
-            visualInspectionData?.passed &&
-            !containment.regulatedArea) {
-            createClearanceAirSamples(containment, visualInspectionData);
-            console.log('Auto-created 5 clearance air samples for:', containment.name);
+            visualInspectionData?.passed) {
+            if (containmentHazards.hasAsbestos && !regulatedArea) {
+                createClearanceAirSamples(containment, visualInspectionData);
+                createdAir.push('5 clearance air samples');
+            }
+            if (containmentHazards.hasLead) {
+                createClearanceWipeSample(containment, visualInspectionData);
+                createdWipes.push('1 clearance wipe sample');
+            }
         }
         
         saveCurrentProject();
         
         if (requiresInspection) {
             // Modal was already closed for inspection flow
-            const message = (inspectionType === 'Final' && !containment.regulatedArea)
-                ? 'Containment saved. 5 clearance air samples created.'
+            const parts = [...createdAir, ...createdWipes];
+            const message = parts.length
+                ? `Containment saved. ${parts.join(' and ')} created.`
                 : 'Containment saved and stage updated.';
             showNotification(message, false);
             renderProject();
@@ -2911,8 +3710,6 @@ function openAddAirSampleModal() {
         `<option value="${c.id}">${escapeHtml(getContainmentDisplayName(c.name))}</option>`
     ).join('');
     
-    const suggestedId = getNextAirSampleId('Area');
-    
     const modal = createModal('Add Air Sample', `
         <div class="space-y-4">
             <div>
@@ -2922,7 +3719,7 @@ function openAddAirSampleModal() {
             <div class="grid grid-cols-2 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample ID</label>
-                    ${buildAirSampleIdFieldHtml('new-sample-id', 'new-sample-id-suffix', 'Area', suggestedId, false)}
+                    <div id="new-sample-id-container"></div>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
@@ -2933,6 +3730,7 @@ function openAddAirSampleModal() {
                     </select>
                 </div>
             </div>
+            ${buildAirSampleHazardSelectorHtml('new-sample', currentProject)}
             
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Location / Comments</label>
@@ -2989,7 +3787,12 @@ function openAddAirSampleModal() {
         </div>
     `, () => {
         const sampleType = document.getElementById('new-sample-type').value;
-        const sampleId = buildAirSampleIdFromSuffix(sampleType, document.getElementById('new-sample-id-suffix').value.trim());
+        const hazardType = normalizeHazardType(document.getElementById('new-sample-hazard')?.value);
+        if (!hazardType || !document.getElementById('new-sample-hazard')?.value) {
+            alert('Please select a hazard type (Asb or Pb).');
+            return false;
+        }
+        const sampleId = resolveAirSampleIdFromForm(sampleType, hazardType, document.getElementById('new-sample-id-suffix')?.value.trim());
         if (!sampleId) {
             alert('Please enter a sample ID');
             return false;
@@ -3008,6 +3811,7 @@ function openAddAirSampleModal() {
             id: generateId(),
             sampleId,
             type: sampleType,
+            hazardType,
             location: document.getElementById('new-sample-location').value.trim(),
             containmentId: containmentIdVal,
             containmentName: containment?.name || '',
@@ -3024,7 +3828,7 @@ function openAddAirSampleModal() {
         renderProject();
     });
 
-    wireAirSampleIdTypeChange(modal, 'new-sample-type', 'new-sample-id', 'new-sample-id-suffix');
+    wireAirSampleIdTypeChange(modal, 'new-sample-type', 'new-sample-hazard', 'new-sample-id-container', 'new-sample-id', 'new-sample-id-suffix');
 }
 
 function openEditAirSampleModal(sampleId) {
@@ -3064,23 +3868,28 @@ function openEditAirSampleModal(sampleId) {
         ? `${formColExpandedCss} min-width: 0; display: flex; flex-direction: column; gap: 0.35rem;`
         : 'flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.35rem;';
 
+    const sampleHazard = getAirSampleHazardType(sample);
+    const resolvedType = ['Personal', 'Clearance'].includes(sample.type) ? sample.type : 'Area';
+
     const modal = createModal('Edit Air Sample', `
         <div id="edit-air-sample-layout" style="display: flex; gap: 1rem; align-items: flex-start; min-width:0;">
             <div id="edit-air-sample-form-col" style="${formColStyle}">
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem 0.75rem;">
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample ID</label>
-                        ${buildAirSampleIdFieldHtml('edit-sample-id', 'edit-sample-id-suffix', sample.type || 'Area', sample.sampleId || '', true)}
+                        <div id="edit-sample-id-container"></div>
                     </div>
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample Type</label>
                         <select id="edit-sample-type" class="w-full border rounded bg-white" style="padding:0.3rem 0.5rem; font-size:0.875rem;">
-                            <option value="Area" ${sample.type !== 'Personal' && sample.type !== 'Clearance' ? 'selected' : ''}>Area</option>
-                            <option value="Personal" ${sample.type === 'Personal' ? 'selected' : ''}>Personal</option>
-                            <option value="Clearance" ${sample.type === 'Clearance' ? 'selected' : ''}>Clearance</option>
+                            <option value="Area" ${resolvedType === 'Area' ? 'selected' : ''}>Area</option>
+                            <option value="Personal" ${resolvedType === 'Personal' ? 'selected' : ''}>Personal</option>
+                            <option value="Clearance" ${resolvedType === 'Clearance' ? 'selected' : ''}>Clearance</option>
                         </select>
                     </div>
                 </div>
+
+                ${buildAirSampleHazardSelectorHtml('edit-sample', currentProject, sampleHazard)}
                 
                 <div>
                     <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Location / Comments</label>
@@ -3163,7 +3972,12 @@ function openEditAirSampleModal(sampleId) {
         </div>
     `, () => {
         const editSampleType = document.getElementById('edit-sample-type').value;
-        const sampleIdVal = buildAirSampleIdFromSuffix(editSampleType, document.getElementById('edit-sample-id-suffix').value.trim());
+        const editHazardType = normalizeHazardType(document.getElementById('edit-sample-hazard')?.value);
+        if (!document.getElementById('edit-sample-hazard')?.value) {
+            alert('Please select a hazard type (Asb or Pb).');
+            return false;
+        }
+        const sampleIdVal = resolveAirSampleIdFromForm(editSampleType, editHazardType, document.getElementById('edit-sample-id-suffix')?.value.trim());
         if (!sampleIdVal) {
             alert('Please enter a sample ID');
             return false;
@@ -3171,6 +3985,7 @@ function openEditAirSampleModal(sampleId) {
         
         sample.sampleId = sampleIdVal;
         sample.type = editSampleType;
+        sample.hazardType = editHazardType;
         sample.location = document.getElementById('edit-sample-location').value.trim();
         const containmentIdVal = document.getElementById('edit-sample-containment').value;
         sample.containmentId = containmentIdVal;
@@ -3236,7 +4051,7 @@ function openEditAirSampleModal(sampleId) {
     });
 
     modal.querySelector('.modal-content')?.classList.add('air-sample-edit-modal');
-    wireAirSampleIdTypeChange(modal, 'edit-sample-type', 'edit-sample-id', 'edit-sample-id-suffix', { currentSampleId: sample.sampleId || '' });
+    wireAirSampleIdTypeChange(modal, 'edit-sample-type', 'edit-sample-hazard', 'edit-sample-id-container', 'edit-sample-id', 'edit-sample-id-suffix', { currentSampleId: sample.sampleId || '', compact: true, autoSuggestOnTypeChange: false });
 
     const editFooter = modal.querySelector('.modal-footer');
     if (editFooter) {
@@ -3250,8 +4065,8 @@ function openEditAirSampleModal(sampleId) {
             e.preventDefault();
             e.stopPropagation();
             if (!confirm('Delete this air sample? This cannot be undone.')) return;
-            modal.remove();
-            deleteAirSample(sampleId);
+            dismissModal(modal);
+            deleteAirSample(sampleId, true);
         });
         editFooter.insertBefore(deleteBtn, editFooter.firstChild);
     }
@@ -3333,8 +4148,8 @@ function openEditAirSampleModal(sampleId) {
     }, 100);
 }
 
-function deleteAirSample(sampleId) {
-    if (!confirm('Delete this air sample? This cannot be undone.')) return;
+function deleteAirSample(sampleId, skipConfirm = false) {
+    if (!skipConfirm && !confirm('Delete this air sample? This cannot be undone.')) return;
     currentProject.airSamples = currentProject.airSamples.filter(s => s.id !== sampleId);
     saveCurrentProject();
     renderProject();
@@ -3717,6 +4532,7 @@ function renderWorkerRosterView(project) {
 }
 
 function openEditWorkerModal(worker) {
+    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
 
@@ -3893,6 +4709,7 @@ function openProjectDailyLogModal(logId) {
     const selectedIds = (existingLog?.workers || []).map(w => w.id);
     const defaultTotal = existingLog?.workersTotal ?? (selectedIds.length || workerRoster.length || 0);
 
+    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
 
@@ -4123,6 +4940,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
         return;
     }
 
+    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.style.zIndex = '10001';
@@ -4850,6 +5668,7 @@ function openProjectDailyLogEntryModal(logId) {
 
     const negativePressureHtml = buildNegativePressureHtml(containmentsRequiringPressure);
 
+    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.innerHTML = `
@@ -5009,6 +5828,7 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
     });
     const negativePressureHtml = buildNegativePressureHtml(containmentsRequiringPressure, readingsById);
 
+    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.innerHTML = `
@@ -5454,10 +6274,7 @@ function openPrintAirSamplesModal() {
             <div class="grid grid-cols-2 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Type of Analysis</label>
-                    <select id="print-air-analysis" class="w-full p-2.5 border rounded-lg bg-white">
-                        <option value="PCM: NIOSH 7400">PCM: NIOSH 7400</option>
-                        <option value="TEM: NIOSH 7402">TEM: NIOSH 7402</option>
-                    </select>
+                    <select id="print-air-analysis" class="w-full p-2.5 border rounded-lg bg-white"></select>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Turn Around Time</label>
@@ -5479,6 +6296,12 @@ function openPrintAirSamplesModal() {
         }
 
         const selectedSamples = airSamples.filter(s => selectedSampleIds.includes(s.id));
+        const hasLead = selectedSamples.some(s => getAirSampleHazardType(s) === 'lead');
+        const hasNonLead = selectedSamples.some(s => getAirSampleHazardType(s) !== 'lead');
+        if (hasLead && hasNonLead) {
+            showNotification('Print Pb air samples separately from Asb air samples.', true);
+            return false;
+        }
 
         const formData = {
             inspectorName: document.getElementById('print-air-inspector').value.trim(),
@@ -5493,6 +6316,22 @@ function openPrintAirSamplesModal() {
         await printAirSampleForm(currentProject, selectedSamples, formData);
     });
 
+    const updateAirAnalysisOptions = () => {
+        const analysisEl = document.getElementById('print-air-analysis');
+        if (!analysisEl) return;
+        const selectedIds = Array.from(document.querySelectorAll('.print-sample-checkbox:checked')).map(cb => cb.value);
+        const selected = airSamples.filter(s => selectedIds.includes(s.id));
+        const useLead = selected.length > 0 && selected.every(s => getAirSampleHazardType(s) === 'lead');
+        const prev = analysisEl.value;
+        if (useLead) {
+            analysisEl.innerHTML = buildLeadAnalysisOptionsHtml(prev && LEAD_ANALYSIS_OPTIONS.includes(prev) ? prev : LEAD_ANALYSIS_OPTIONS[0]);
+        } else {
+            analysisEl.innerHTML = `
+                <option value="PCM: NIOSH 7400"${prev === 'PCM: NIOSH 7400' ? ' selected' : ''}>PCM: NIOSH 7400</option>
+                <option value="TEM: NIOSH 7402"${prev === 'TEM: NIOSH 7402' ? ' selected' : ''}>TEM: NIOSH 7402</option>`;
+        }
+    };
+
     // Wire up select all/none
     setTimeout(() => {
         const sampleCheckboxes = document.querySelectorAll('.print-sample-checkbox');
@@ -5503,11 +6342,13 @@ function openPrintAirSamplesModal() {
         const updateSampleCount = () => {
             const checkedCount = document.querySelectorAll('.print-sample-checkbox:checked').length;
             if (sampleCountEl) sampleCountEl.innerHTML = `<strong>${checkedCount}</strong> sample${checkedCount !== 1 ? 's' : ''} selected`;
+            updateAirAnalysisOptions();
         };
 
         sampleCheckboxes.forEach(cb => cb.addEventListener('change', updateSampleCount));
         selectAllBtn?.addEventListener('click', () => { sampleCheckboxes.forEach(cb => cb.checked = true); updateSampleCount(); });
         selectNoneBtn?.addEventListener('click', () => { sampleCheckboxes.forEach(cb => cb.checked = false); updateSampleCount(); });
+        updateAirAnalysisOptions();
     }, 50);
 }
 
@@ -5612,6 +6453,7 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
 
         const arrayBuffer = await response.arrayBuffer();
         const zip = new PizZipClass(arrayBuffer);
+        repairDocxPlaceholderTags(zip);
         const docOptions = {
             paragraphLoop: true,
             linebreaks: true,
@@ -5627,6 +6469,7 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
             if (docOptions.modules && docOptions.modules.length > 0) {
                 docOptions.modules = [];
                 const zip2 = new PizZipClass(arrayBuffer);
+                repairDocxPlaceholderTags(zip2);
                 doc = new DocxtemplaterClass(zip2, docOptions);
                 doc.render({ ...templateData, image: '', signature: '' });
             } else {
@@ -5700,12 +6543,12 @@ function printDailyLog(project, dailyLog) {
         const clientName = project.clientName || '';
         const clientContact = project.clientContactName || '';
         const clientPhone = project.clientPhone || '';
-        const clientFax = project.clientFax || '';
+        const clientFax = '';
         const siteName = project.siteName || '';
         const contractor = project.contractor || '';
         const personnelCount = dailyLog.workersTotal || dailyLog.workers?.length || 0;
         const contractorPhone = project.contractorPhone || '';
-        const contractorFax = project.contractorFax || '';
+        const contractorFax = '';
         const projectNumber = project.projectNumber || '';
         const inspectorName = dailyLog.inspectorName || '';
         const inspectorInitials = getInitials(inspectorName);
@@ -5834,6 +6677,7 @@ function printDailyLog(project, dailyLog) {
             })
             .then(arrayBuffer => {
                 const zip = new PizZipClass(arrayBuffer);
+                repairDocxPlaceholderTags(zip);
                 const docOptions = {
                     paragraphLoop: true,
                     linebreaks: true,
@@ -5992,11 +6836,8 @@ function applyPhoneFormatting(input) {
 }
 
 function createModal(title, content, onSave) {
-    // Defensive: clean up any orphaned modals first. This is a redundancy
-    // against a recurring bug where a stuck modal (one that lost its `active`
-    // state but stayed in the DOM, or one that was double-spawned) intercepts
-    // pointer events on the new modal's text inputs.
-    cleanupOrphanedModals();
+    // Only one modal at a time — stacked overlays block text input on the visible form.
+    closeAllModals();
 
     const modal = document.createElement('div');
     modal.className = 'modal active';
@@ -6026,7 +6867,7 @@ function createModal(title, content, onSave) {
     modal.addEventListener('click', (e) => {
         // Only close if the click started AND ended on the backdrop
         if (e.target === modal && mouseDownOnBackdrop) {
-            modal.remove();
+            dismissModal(modal);
         }
         // Reset the flag
         mouseDownOnBackdrop = false;
@@ -6038,7 +6879,7 @@ function createModal(title, content, onSave) {
         cancelBtn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            modal.remove();
+            dismissModal(modal);
         });
     }
     
@@ -6054,10 +6895,10 @@ function createModal(title, content, onSave) {
                 const asyncResult = await result;
                 if (asyncResult !== false) {
                     // Only remove if modal is still in DOM (async flow may have removed it)
-                    if (modal.parentNode) modal.remove();
+                    if (modal.parentNode) dismissModal(modal);
                 }
             } else if (result !== false) {
-                modal.remove();
+                dismissModal(modal);
             }
         });
     }
@@ -6166,6 +7007,14 @@ function escapeHtml(text) {
 }
 
 /**
+ * Remove all modal overlays from the DOM. Prevents stacked modals from
+ * leaving an invisible full-screen layer that blocks text input.
+ */
+function closeAllModals() {
+    document.querySelectorAll('.modal').forEach(m => m.remove());
+}
+
+/**
  * Remove stuck/orphaned modal elements from the DOM.
  * Redundancy against a recurring bug where text inputs in modals become
  * un-editable because a previous modal failed to clean up, leaving an
@@ -6177,13 +7026,15 @@ function cleanupOrphanedModals() {
     document.querySelectorAll('.modal').forEach(m => {
         const hasContent = !!m.querySelector('.modal-content');
         const isActive = m.classList.contains('active');
-        // Remove anything that is either inactive (stale) or has no content
-        // (broken state). Active, well-formed modals are left alone so async
-        // multi-modal flows continue to work.
         if (!isActive || !hasContent) {
             m.remove();
         }
     });
+}
+
+function dismissModal(modal) {
+    if (modal && modal.parentNode) modal.remove();
+    cleanupOrphanedModals();
 }
 
 // Safe-image-src helper. Photos stored in projects round-trip through Excel and
@@ -6423,6 +7274,7 @@ async function exportWorkerRosterDoc(project) {
         }
         const arrayBuffer = await response.arrayBuffer();
         const zip = new PizZipClass(arrayBuffer);
+        repairDocxPlaceholderTags(zip);
         const docOptions = {
             paragraphLoop: true,
             linebreaks: true,
@@ -6478,6 +7330,13 @@ window.openEditMaterialModal = openEditMaterialModal;
 window.deleteMaterial = deleteMaterial;
 window.openBulkSampleModal = openBulkSampleModal;
 window.openPrintBulkSamplesModal = openPrintBulkSamplesModal;
+window.openAddWipeSampleModal = openAddWipeSampleModal;
+window.openEditWipeSampleModal = openEditWipeSampleModal;
+window.deleteWipeSample = deleteWipeSample;
+window.openPrintWipeSamplesModal = openPrintWipeSamplesModal;
+window.getProjectHazardSummary = getProjectHazardSummary;
+window.getAirSampleHazardType = getAirSampleHazardType;
+window.hazardTypeLabel = hazardTypeLabel;
 window.openEditContainmentModal = openEditContainmentModal;
 window.deleteContainment = deleteContainment;
 window.openEditAirSampleModal = openEditAirSampleModal;

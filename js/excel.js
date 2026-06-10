@@ -70,13 +70,15 @@ function exportProjectToExcel(projectData) {
 
     // Materials Master List Sheet
     if (projectData.materials && projectData.materials.length > 0) {
-      const materialsListData = [['Material ID', 'Material Name', 'Total Quantity', 'Unit']];
+      const materialsListData = [['Material ID', 'Material Name', 'Total Quantity', 'Unit', 'Hazard']];
       projectData.materials.forEach(material => {
+        const hazard = (material.hazardType || 'asbestos').toLowerCase() === 'lead' ? 'Pb' : 'Asb';
         materialsListData.push([
           material.id || '',
           material.name || material.materialName || '',
           material.totalQuantity || 0,
-          exportUnit(material.unit)
+          exportUnit(material.unit),
+          hazard
         ]);
       });
       const materialsListSheet = XLSX.utils.aoa_to_sheet(materialsListData);
@@ -175,6 +177,22 @@ function exportProjectToExcel(projectData) {
       const bulkSheet = XLSX.utils.aoa_to_sheet(bulkData);
       XLSX.utils.book_append_sheet(workbook, bulkSheet, 'Bulk Samples');
       protectSheet(bulkSheet);
+    }
+
+    // Wipe Samples Sheet
+    if (projectData.wipeSamples && projectData.wipeSamples.length > 0) {
+      const wipeData = [['Sample ID', 'Type', 'Containment ID', 'Containment Name', 'Building', 'Space', 'Substrate', 'Component', 'ft²', 'Date', 'Inspector Name', 'Location/Comments', 'Auto-Created']];
+      projectData.wipeSamples.forEach(s => {
+        wipeData.push([
+          s.sampleId || s.id || '', s.type || '', s.containmentId || '', s.containmentName || '',
+          s.buildingName || '', s.spaceName || '', s.substrate || '', s.component || '',
+          s.squareFeet || '', s.date || '', s.inspectorName || '', s.locationComment || '',
+          s.autoCreated ? 'Yes' : 'No'
+        ]);
+      });
+      const wipeSheet = XLSX.utils.aoa_to_sheet(wipeData);
+      XLSX.utils.book_append_sheet(workbook, wipeSheet, 'Wipe Samples');
+      protectSheet(wipeSheet);
     }
 
     // Daily Logs Sheet
@@ -440,12 +458,15 @@ function importProjectFromExcel(fileBuffer) {
       projectData.materials = [];
       materials.slice(1).forEach(row => {
         if (row.length >= 2) {
+          const hazardRaw = (row[4] || 'Asb').toString().trim().toLowerCase();
+          const hazardType = hazardRaw === 'pb' || hazardRaw === 'lead' ? 'lead' : 'asbestos';
           projectData.materials.push({
             id: row[0] || _genId('mat'),
             name: row[1] || '',
             materialName: row[1] || '',
             totalQuantity: parseFloat(row[2]) || 0,
-            unit: importUnit(row[3])
+            unit: importUnit(row[3]),
+            hazardType
           });
         }
       });
@@ -598,6 +619,33 @@ function importProjectFromExcel(fileBuffer) {
       });
     }
 
+    // Wipe Samples
+    if (workbook.SheetNames.includes('Wipe Samples')) {
+      const wipeRows = XLSX.utils.sheet_to_json(workbook.Sheets['Wipe Samples'], { header: 1 });
+      projectData.wipeSamples = [];
+      wipeRows.slice(1).forEach(row => {
+        if (row.length >= 2) {
+          projectData.wipeSamples.push({
+            id: _genId('ws'),
+            sampleId: row[0] || '',
+            type: row[1] || '',
+            containmentId: row[2] || '',
+            containmentName: row[3] || '',
+            buildingName: row[4] || '',
+            spaceName: row[5] || '',
+            substrate: row[6] || '',
+            component: row[7] || '',
+            squareFeet: row[8] || '',
+            date: row[9] || '',
+            inspectorName: row[10] || '',
+            locationComment: row[11] || '',
+            autoCreated: String(row[12] || '').toLowerCase() === 'yes',
+            createdAt: Date.now()
+          });
+        }
+      });
+    }
+
     // Bulk Samples
     if (workbook.SheetNames.includes('Bulk Samples')) {
       const bulkRows = XLSX.utils.sheet_to_json(workbook.Sheets['Bulk Samples'], { header: 1 });
@@ -637,6 +685,10 @@ function importProjectFromExcel(fileBuffer) {
     }
 
     projectData.bulkSamples = projectData.bulkSamples || [];
+    projectData.wipeSamples = projectData.wipeSamples || [];
+    (projectData.materials || []).forEach(m => {
+      if (!m.hazardType) m.hazardType = 'asbestos';
+    });
     return _finalizeImportedProject(projectData, workbook);
   } catch (error) {
     console.error('Error importing project from Excel:', error);
