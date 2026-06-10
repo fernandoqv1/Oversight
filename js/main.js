@@ -97,9 +97,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key !== 'Escape') return;
         const modals = document.querySelectorAll('.modal.active');
         if (modals.length > 0) {
-            modals[modals.length - 1].remove();
+            dismissModal(modals[modals.length - 1]);
+        } else {
+            cleanupOrphanedModals();
         }
-        cleanupOrphanedModals();
     });
 
     // Migrate any older project data before the dashboard reads it. This is
@@ -153,8 +154,22 @@ function migrateProject(project) {
     if (!Array.isArray(project.materials)) project.materials = [];
     if (!Array.isArray(project.containments)) project.containments = [];
     if (!Array.isArray(project.airSamples)) project.airSamples = [];
+    if (!Array.isArray(project.bulkSamples)) project.bulkSamples = [];
+    if (!Array.isArray(project.wipeSamples)) project.wipeSamples = [];
     if (!Array.isArray(project.dailyLogs)) project.dailyLogs = [];
     if (!Array.isArray(project.workerRoster)) project.workerRoster = [];
+    (project.materials || []).forEach(m => {
+        if (!m.hazardType) m.hazardType = 'asbestos';
+    });
+    (project.airSamples || []).forEach(s => {
+        if (String(s.type || '').toLowerCase() === 'lead') {
+            s.hazardType = 'lead';
+            s.type = 'Area';
+        } else if (!s.hazardType) {
+            const id = s.sampleId || '';
+            s.hazardType = /-Pb-(AS|PS|CA)\d+$/i.test(id) ? 'lead' : 'asbestos';
+        }
+    });
     return project;
 }
 
@@ -509,11 +524,8 @@ function openNewProjectModal(existingProject = null) {
     const contactName = isEdit ? (existingProject.clientContactName || '') : '';
     const contactPhone = isEdit ? (existingProject.clientContactPhone || '') : '';
     const clientPhone = isEdit ? (existingProject.clientPhone || '') : '';
-    const clientFax = isEdit ? (existingProject.clientFax || '') : '';
     const contractorPhone = isEdit ? (existingProject.contractorPhone || '') : '';
-    const contractorFax = isEdit ? (existingProject.contractorFax || '') : '';
     const projectFolderPath = isEdit ? (existingProject.projectFolderPath || '') : '';
-    
     const content = `
         <div class="space-y-4">
             <div class="grid grid-cols-2 gap-2">
@@ -545,15 +557,9 @@ function openNewProjectModal(existingProject = null) {
                 <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Name</label>
                 <input type="text" id="np-client-name" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="Client / Owner name" value="${escapeHtml(clientName)}">
             </div>
-            <div class="grid grid-cols-2 gap-2">
-                <div>
-                    <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Phone</label>
-                    <input type="tel" id="np-client-phone" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="(555) 123-4567" value="${escapeHtml(clientPhone)}">
-                </div>
-                <div>
-                    <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Fax</label>
-                    <input type="tel" id="np-client-fax" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="(555) 123-4567" value="${escapeHtml(clientFax)}">
-                </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Phone</label>
+                <input type="tel" id="np-client-phone" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="(555) 123-4567" value="${escapeHtml(clientPhone)}">
             </div>
             <div class="grid grid-cols-2 gap-2">
                 <div>
@@ -570,15 +576,9 @@ function openNewProjectModal(existingProject = null) {
                 <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Name</label>
                 <input type="text" id="np-contractor" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="Contractor company name" value="${escapeHtml(contractor)}">
             </div>
-            <div class="grid grid-cols-2 gap-2">
-                <div>
-                    <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Phone Number</label>
-                    <input type="tel" id="np-contractor-phone" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="(555) 123-4567" value="${escapeHtml(contractorPhone)}">
-                </div>
-                <div>
-                    <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Fax</label>
-                    <input type="tel" id="np-contractor-fax" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="(555) 123-4567" value="${escapeHtml(contractorFax)}">
-                </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Phone Number</label>
+                <input type="tel" id="np-contractor-phone" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="(555) 123-4567" value="${escapeHtml(contractorPhone)}">
             </div>
             <div class="grid grid-cols-2 gap-2">
                 <div>
@@ -610,7 +610,7 @@ function openNewProjectModal(existingProject = null) {
             alert('Please enter a site address');
             return false;
         }
-        
+
         // When editing, spread existing project first to preserve all data (worker roster, logs, etc.)
         const projectData = {
             ...(isEdit ? existingProject : {}),
@@ -624,11 +624,9 @@ function openNewProjectModal(existingProject = null) {
             foremanName: document.getElementById('np-foreman-name').value.trim(),
             foremanPhone: document.getElementById('np-foreman-phone').value.trim(),
             contractorPhone: document.getElementById('np-contractor-phone').value.trim(),
-            contractorFax: document.getElementById('np-contractor-fax').value.trim(),
             clientContactName: document.getElementById('np-contact-name').value.trim(),
             clientContactPhone: document.getElementById('np-contact-phone').value.trim(),
             clientPhone: document.getElementById('np-client-phone').value.trim(),
-            clientFax: document.getElementById('np-client-fax').value.trim(),
             projectFolderPath: document.getElementById('np-project-folder')?.value.trim() || undefined,
             created: isEdit ? existingProject.created : new Date().toISOString(),
             lastModified: new Date().toISOString(),
@@ -636,18 +634,39 @@ function openNewProjectModal(existingProject = null) {
             buildings: isEdit ? existingProject.buildings : [],
             materials: isEdit ? existingProject.materials : [],
             airSamples: isEdit ? existingProject.airSamples : [],
-            bulkSamples: isEdit ? (existingProject.bulkSamples || []) : []
+            bulkSamples: isEdit ? (existingProject.bulkSamples || []) : [],
+            wipeSamples: isEdit ? (existingProject.wipeSamples || []) : []
         };
 
         if (isEdit && existingProject.projectNumber && existingProject.projectNumber !== projectNumber) {
             const escapedOld = existingProject.projectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const sampleIdRe = new RegExp(`^${escapedOld}-(AS|PS|CA)(\\d{3})$`, 'i');
+            const pbAirRe = new RegExp(`^${escapedOld}-Pb-(AS|PS|CA)(\\d+)$`, 'i');
             (projectData.airSamples || []).forEach(sample => {
                 const id = sample.sampleId || '';
-                const match = id.match(sampleIdRe);
+                let match = id.match(pbAirRe);
                 if (match) {
-                    sample.sampleId = `${projectNumber}-${match[1].toUpperCase()}${match[2]}`;
+                    sample.sampleId = `${projectNumber}-Pb-${match[1].toUpperCase()}${match[2]}`;
+                    return;
                 }
+                const asbAirRe = new RegExp(`^${escapedOld}-(AS|PS|CA)(\\d+)$`, 'i');
+                match = id.match(asbAirRe);
+                if (match) sample.sampleId = `${projectNumber}-${match[1].toUpperCase()}${match[2]}`;
+            });
+            const legacyLeadRe = new RegExp(`^${escapedOld}-(\\d{2})Pb$`, 'i');
+            (projectData.airSamples || []).forEach(sample => {
+                const id = sample.sampleId || '';
+                const match = id.match(legacyLeadRe);
+                if (match) {
+                    sample.hazardType = 'lead';
+                    if (sample.type === 'Lead') sample.type = 'Area';
+                    sample.sampleId = `${projectNumber}-Pb-AS${match[1]}`;
+                }
+            });
+            const wipeRe = new RegExp(`^${escapedOld}-W(\\d+)$`, 'i');
+            (projectData.wipeSamples || []).forEach(sample => {
+                const id = sample.sampleId || '';
+                const match = id.match(wipeRe);
+                if (match) sample.sampleId = `${projectNumber}-W${match[1]}`;
             });
         }
         
@@ -678,6 +697,13 @@ function openNewProjectModal(existingProject = null) {
 }
 
 /**
+ * Remove all modal overlays from the DOM.
+ */
+function closeAllModals() {
+    document.querySelectorAll('.modal').forEach(m => m.remove());
+}
+
+/**
  * Remove stuck/orphaned modal elements from the DOM.
  * Redundancy against a recurring bug where text inputs in modals become
  * un-editable because a previous modal failed to clean up, leaving an
@@ -693,10 +719,14 @@ function cleanupOrphanedModals() {
     });
 }
 
+function dismissModal(modal) {
+    if (modal && modal.parentNode) modal.remove();
+    cleanupOrphanedModals();
+}
+
 // Simple modal creator for main.js
 function createModal(title, content, onSave) {
-    // Defensive: clean up any orphaned modals before opening a new one.
-    cleanupOrphanedModals();
+    closeAllModals();
 
     const modal = document.createElement('div');
     modal.className = 'modal active';
@@ -724,17 +754,17 @@ function createModal(title, content, onSave) {
     modal.addEventListener('click', (e) => {
         // Only close if the click started AND ended on the backdrop
         if (e.target === modal && mouseDownOnBackdrop) {
-            modal.remove();
+            dismissModal(modal);
         }
         // Reset the flag
         mouseDownOnBackdrop = false;
     });
     
-    modalContent.querySelector('.modal-cancel-btn')?.addEventListener('click', () => modal.remove());
+    modalContent.querySelector('.modal-cancel-btn')?.addEventListener('click', () => dismissModal(modal));
     modalContent.querySelector('.modal-save-btn')?.addEventListener('click', () => {
         const result = onSave();
         if (result !== false) {
-            modal.remove();
+            dismissModal(modal);
         }
     });
     
@@ -906,8 +936,7 @@ function escapeHtml(text) {
 
 function showInputModal(message) {
     return new Promise((resolve) => {
-        // Defensive: clean up any orphaned modals before opening a new one.
-        cleanupOrphanedModals();
+        closeAllModals();
         const modal = document.createElement('div');
         modal.className = 'modal active';
         modal.style.position = 'fixed';
@@ -1188,6 +1217,72 @@ async function downloadArchivedProject(projectId, projectName) {
         };
 
         // Template document generator - uses ImageModule for {%image}/{%%image} signatures
+        const repairDocxPlaceholderXml = (xml) => {
+            const mergedRun = (tag) => `<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr><w:t>${tag}</w:t></w:r>`;
+            const rPr = String.raw`(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?`;
+            const run = String.raw`<w:r\b(?:\s[^>]*)?>${rPr}<w:t(?:\s[^>]*)?>`;
+            const runEnd = String.raw`<\/w:t><\/w:r>`;
+            const proof = String.raw`\s*(?:<w:proofErr[^>]*\/?>\s*)*`;
+            xml = xml.replace(
+                new RegExp(`${run}\\{\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}\\}${runEnd}`, 'g'),
+                (_m, tagName) => mergedRun(`{${tagName.trim()}}`)
+            );
+            xml = xml.replace(
+                /(<w:r\b(?:\s[^>]*)?>(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\{([#\/]?[\w.]+)\}([^<{}]+)<\/w:t><\/w:r>/g,
+                (_m, rOpen, tag, trailing) => `${rOpen}<w:t>{${tag}}</w:t></w:r>${mergedRun(trailing)}`
+            );
+            xml = xml.replace(
+                /(<w:r\b(?:\s[^>]*)?>(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\} \{<\/w:t><\/w:r>/g,
+                '$1<w:t>}</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr><w:t>{</w:t></w:r>'
+            );
+            xml = xml.replace(
+                new RegExp(`${run}\\{\\/${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+                (_m, tagName) => mergedRun(`{/${tagName.trim()}}`)
+            );
+            xml = xml.replace(
+                new RegExp(`${run}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+                (_m, part1, part2) => {
+                    const name = (part1 + part2).trim();
+                    if (!/^[\w#/.]+$/.test(name)) return _m;
+                    return mergedRun(`{${name}}`);
+                }
+            );
+            xml = xml.replace(
+                new RegExp(`${run}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+                (_m, tagName) => {
+                    const name = tagName.trim();
+                    if (!/^[\w#/.]+$/.test(name)) return _m;
+                    return mergedRun(`{${name}}`);
+                }
+            );
+            return xml;
+        };
+        const repairDocxPlaceholderTags = (zip) => {
+            if (!zip || !zip.files) return;
+            Object.keys(zip.files).forEach(path => {
+                if (!path.includes('\\')) return;
+                const normalized = path.replace(/\\/g, '/');
+                if (normalized === path) return;
+                const fileObj = zip.files[path];
+                if (!fileObj) return;
+                if (!zip.files[normalized]) {
+                    const content = typeof fileObj.asUint8Array === 'function'
+                        ? fileObj.asUint8Array()
+                        : fileObj.asBinary();
+                    zip.file(normalized, content, { binary: true });
+                }
+                delete zip.files[path];
+            });
+            Object.keys(zip.files).forEach(path => {
+                if (!/^word[\\/](document|header\d+|footer\d+)\.xml$/i.test(path)) return;
+                const file = zip.file(path);
+                if (!file) return;
+                const original = file.asText();
+                const xml = repairDocxPlaceholderXml(original);
+                if (xml !== original) zip.file(path, xml);
+            });
+        };
+
         const generateDocBlob = async (templatePath, templateData) => {
             try {
                 const cacheBuster = `?t=${Date.now()}`;
@@ -1201,10 +1296,12 @@ async function downloadArchivedProject(projectId, projectName) {
                 }
                 const arrayBuffer = await response.arrayBuffer();
                 const docZip = new PizZipClass(arrayBuffer);
+                repairDocxPlaceholderTags(docZip);
                 const docOptions = {
                     paragraphLoop: true,
                     linebreaks: true,
-                    delimiters: { start: '{', end: '}' }
+                    delimiters: { start: '{', end: '}' },
+                    nullGetter: () => ''
                 };
                 const signatureImageModule = typeof createSignatureImageModule === 'function' ? createSignatureImageModule() : null;
                 if (signatureImageModule) docOptions.modules = [signatureImageModule];
@@ -1312,13 +1409,13 @@ async function downloadArchivedProject(projectId, projectName) {
                     client: project.clientName || '',
                     contact: project.clientContactName || '',
                     clientPhone: project.clientContactPhone || project.clientPhone || '',
-                    clientFax: project.clientFax || '',
+                    clientFax: '',
                     projectSite: project.siteName || '',
                     workLocation: workLocation,
                     contractor: project.contractor || '',
                     personnelCount: String(dailyLog.workersTotal || (dailyLog.workers || []).length || 0),
                     contractorPhone: project.foremanPhone || project.contractorPhone || '',
-                    contractorFax: project.contractorFax || '',
+                    contractorFax: '',
                     negativePressure: negativePressure,
                     samples: samples,
                     logEntries: logEntries,
