@@ -57,15 +57,33 @@ function Parse-DateString([string]$raw) {
 }
 
 function Get-PhotoDate($folderObj, $fileItem) {
+    $dateTaken = $folderObj.GetDetailsOf($fileItem, 12)
+    $mediaCreated = $folderObj.GetDetailsOf($fileItem, 27)
     $modified = $folderObj.GetDetailsOf($fileItem, 3)
     $created  = $folderObj.GetDetailsOf($fileItem, 4)
-    $isoDate = Parse-DateString $modified
-    $source = 'modified'
+
+    $isoDate = Parse-DateString $dateTaken
+    $source = 'taken'
+    $label = if ($dateTaken) { [string]$dateTaken } else { '' }
+
+    if (-not $isoDate) {
+        $isoDate = Parse-DateString $mediaCreated
+        $source = 'media'
+        if ($mediaCreated) { $label = [string]$mediaCreated }
+    }
+    if (-not $isoDate) {
+        $isoDate = Parse-DateString $modified
+        $source = 'modified'
+        if ($modified) { $label = [string]$modified }
+    }
     if (-not $isoDate) {
         $isoDate = Parse-DateString $created
         $source = 'created'
+        if ($created) { $label = [string]$created }
     }
-    $label = if ($modified) { [string]$modified } elseif ($created) { [string]$created } else { '' }
+    if (-not $label) {
+        $label = if ($modified) { [string]$modified } elseif ($created) { [string]$created } else { '' }
+    }
     return @{ IsoDate = $isoDate; Label = $label; Source = $source; FastPath = $false }
 }
 
@@ -184,6 +202,13 @@ function Test-FolderMatchesDateFilter([string]$folderName, [string]$dateFilter) 
     foreach ($prefix in (Get-IosDateFolderPrefixes $dateFilter)) {
         if ($folderName -like "$prefix*") { return $true }
     }
+    return $false
+}
+
+function Test-ShouldWalkFolder([string]$folderName, [string]$dateFilter, [bool]$restrictFolders) {
+    if (-not $restrictFolders -or -not $dateFilter) { return $true }
+    if (Test-FolderMatchesDateFilter $folderName $dateFilter) { return $true }
+    # iOS stores photos in numbered APPLE folders with no date in the name — always walk them.
     if ($folderName -match '^\d{3}APPLE$') { return $true }
     return $false
 }
@@ -214,39 +239,25 @@ function Collect-Photos($rootItem, [string]$DateFilter, [bool]$IncludeThumbs, [b
         Initialize-ShellThumbnailHelper
     }
 
-    function Walk($folderItem, [string]$relPath, [bool]$folderMatchesDate, [bool]$skipUnmatchedFolders) {
+    function Walk($folderItem, [string]$relPath, [bool]$skipUnmatchedFolders) {
         $folder = $folderItem.GetFolder
         if (-not $folder) { return }
         foreach ($fileItem in Get-MtpFolderItems $folder) {
             if ($fileItem.IsFolder) {
                 $childPath = if ($relPath) { "$relPath\$($fileItem.Name)" } else { $fileItem.Name }
-                $childMatches = Test-FolderMatchesDateFilter $fileItem.Name $DateFilter
-                if ($skipUnmatchedFolders -and $DateFilter -and -not $childMatches) { continue }
-                Walk $fileItem $childPath ($folderMatchesDate -or $childMatches) $skipUnmatchedFolders
+                if (-not (Test-ShouldWalkFolder $fileItem.Name $DateFilter $skipUnmatchedFolders)) { continue }
+                Walk $fileItem $childPath $skipUnmatchedFolders
                 continue
             }
             $ext = [System.IO.Path]::GetExtension($fileItem.Name).ToLower()
             if ($script:SkipExtensions -contains $ext) { continue }
             if ($script:ImageExtensions -notcontains $ext) { continue }
 
-            if ($folderMatchesDate -and $DateFilter) {
-                $dateInfo = @{
-                    IsoDate  = $DateFilter
-                    Label    = ''
-                    Source   = 'folder'
-                    FastPath = $true
-                }
-            } else {
-                $dateInfo = Get-PhotoDate $folder $fileItem
-                $dateInfo.FastPath = $false
-            }
+            $dateInfo = Get-PhotoDate $folder $fileItem
 
-            if ($DateFilter -and -not $folderMatchesDate) {
+            if ($DateFilter) {
                 if ($dateInfo.IsoDate -and $dateInfo.IsoDate -ne $DateFilter) { continue }
-                if (-not $dateInfo.IsoDate) {
-                    $filterYm = ($DateFilter -replace '-', '').Substring(0, 6)
-                    if ($relPath -notmatch $filterYm) { continue }
-                }
+                if (-not $dateInfo.IsoDate) { continue }
             }
 
             $thumbBase64 = $null
@@ -259,11 +270,7 @@ function Collect-Photos($rootItem, [string]$DateFilter, [bool]$IncludeThumbs, [b
     }
 
     $script:collectedPhotos = @()
-    Walk $rootItem '' $false $RestrictFolders
-    if ($RestrictFolders -and $DateFilter -and $script:collectedPhotos.Count -eq 0) {
-        $script:collectedPhotos = @()
-        Walk $rootItem '' $false $false
-    }
+    Walk $rootItem '' $RestrictFolders
     return $script:collectedPhotos
 }
 
@@ -520,12 +527,10 @@ function Get-FileThumbnailBase64($fileItem, [int]$Size = 1280) {
     }
 }
 
-function Test-PhotoMatchesFilter($photo, [string]$dateFilter, [string]$filterYm) {
+function Test-PhotoMatchesFilter($photo, [string]$dateFilter) {
     if (-not $dateFilter) { return $true }
     $photoDate = [string]$photo.date
-    if ($photoDate) { return ($photoDate -eq $dateFilter) }
-    if ($filterYm -and [string]$photo.relPath -match $filterYm) { return $true }
-    return $false
+    return ($photoDate -eq $dateFilter)
 }
 
 function Get-PhoneListResult([string]$DeviceName, [string]$DateFilter, [bool]$IncludeThumbs) {
@@ -542,24 +547,12 @@ function Get-PhoneListResult([string]$DeviceName, [string]$DateFilter, [bool]$In
 
     [void](Wait-MtpStorageReady $storageRoot)
     $restrictFolders = [bool]($DateFilter -and $DateFilter.Trim())
-    $allPhotos = Collect-Photos $storageRoot $DateFilter $IncludeThumbs $restrictFolders
-    $filterYm = ''
-    if ($DateFilter) {
-        $digits = $DateFilter -replace '-',''
-        if ($digits.Length -ge 6) { $filterYm = $digits.Substring(0, 6) }
-    }
-
-    $photos = @()
-    foreach ($photo in $allPhotos) {
-        if (Test-PhotoMatchesFilter $photo $DateFilter $filterYm) {
-            $photos += $photo
-        }
-    }
+    $photos = Collect-Photos $storageRoot $DateFilter $IncludeThumbs $restrictFolders
 
     return @{
         success       = $true
         photos        = @($photos)
-        totalOnDevice = @($allPhotos).Count
+        totalOnDevice = @($photos).Count
         includeThumbs = $IncludeThumbs
     }
 }
