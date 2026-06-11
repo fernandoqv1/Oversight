@@ -657,7 +657,16 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
 .modal-check-label--strong { font-weight:600 !important; }
 .modal-check-title { display:block; font-weight:600; line-height:1.35; }
 .modal-check-subtitle { display:block; margin-top:3px; font-size:12px; font-weight:400; color:var(--text-muted); line-height:1.4; }
-.modal-check-pill { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; background:color-mix(in oklch,var(--accent) 12%,var(--surface)); color:var(--accent); font-size:12px; font-weight:500; line-height:1.35; }
+.modal-check-pill { display:inline-flex; align-items:center; flex-wrap:wrap; gap:4px; padding:2px 8px; border-radius:999px; background:color-mix(in oklch,var(--accent) 12%,var(--surface)); color:var(--accent); font-size:12px; font-weight:500; line-height:1.35; }
+.modal-check-pill-name { font-weight:600; }
+.modal-check-pill-sep { opacity:0.65; }
+.modal-check-pill-qty-wrap { display:inline-flex; align-items:center; gap:3px; }
+.modal-check-pill .containment-material-qty { width:3.75rem !important; padding:1px 4px !important; border:1px solid transparent !important; border-radius:4px; background:color-mix(in oklch,var(--accent) 18%,var(--surface)) !important; font-size:12px !important; font-weight:600; text-align:center; color:var(--accent); box-shadow:none !important; }
+.modal-check-pill .containment-material-qty:hover:not(:disabled), .modal-check-pill .containment-material-qty:focus:not(:disabled) { border-color:var(--accent) !important; background:var(--surface) !important; outline:none; box-shadow:0 0 0 2px var(--accent-soft) !important; }
+.modal-check-pill .containment-material-qty:disabled { opacity:0.45; cursor:not-allowed; }
+.modal-check-pill-unit { font-weight:500; }
+.modal-check-pill-avail { font-size:11px; font-weight:400; opacity:0.8; white-space:nowrap; }
+.modal-check-row--fully-assigned { opacity:0.55; }
 .modal-check-sublist { margin:10px 0 0 30px; padding:4px 0 4px 12px; border-left:2px solid var(--border); display:flex; flex-direction:column; gap:8px; }
 .modal-check-sublist-empty { margin:8px 0 0 30px; padding-left:12px; font-size:12px; color:var(--text-muted); }
 .modal-check-warn { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; background:var(--warn-bg); color:var(--warn); white-space:nowrap; }

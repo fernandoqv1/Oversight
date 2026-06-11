@@ -3030,12 +3030,128 @@ function buildModalSelectionOption(id, checkboxClass, valueAttr, checked, titleH
     return `<div class="modal-selection-option">${buildModalCheckboxRow(id, checkboxClass, attrs, label)}</div>`;
 }
 
+function getContainmentMaterialAllocations(buildingId, excludeContainmentId = null) {
+    const map = new Map();
+    (currentProject.containments || []).forEach(c => {
+        if (excludeContainmentId && c.id === excludeContainmentId) return;
+        if (buildingId && c.buildingId !== buildingId) return;
+        (c.spaces || []).forEach(cs => {
+            const spaceName = cs.spaceName || cs.name;
+            if (!spaceName) return;
+            (cs.materials || []).forEach(mat => {
+                if (!mat.name) return;
+                const key = `${spaceName}::${mat.name}`;
+                map.set(key, (map.get(key) || 0) + (parseFloat(mat.quantity) || 0));
+            });
+        });
+    });
+    return map;
+}
+
+function readContainmentSpacesFromPicker(listSelector, building, excludeContainmentId = null) {
+    const materialAllocations = getContainmentMaterialAllocations(building.id, excludeContainmentId);
+    const listEl = document.querySelector(listSelector);
+    if (!listEl) {
+        return { ok: false, error: 'Spaces list not found.' };
+    }
+
+    const selectedSpaces = [];
+    const selectedSpaceCheckboxes = listEl.querySelectorAll('.containment-space-cb:checked');
+    if (selectedSpaceCheckboxes.length === 0) {
+        return { ok: false, error: 'Please select at least one space for this containment.' };
+    }
+
+    for (const checkbox of selectedSpaceCheckboxes) {
+        const spaceId = checkbox.dataset.spaceId;
+        const spaceName = checkbox.dataset.spaceName || '';
+        const space = building.spaces?.find(s => s.id === spaceId);
+        if (!space) continue;
+
+        const matCbs = listEl.querySelectorAll(
+            `.containment-material-cb[data-space-id="${CSS.escape(spaceId)}"]:checked`
+        );
+        const selectedMaterials = [];
+
+        for (const mc of matCbs) {
+            const idx = parseInt(mc.dataset.materialIndex, 10);
+            const m = (space.materials || [])[idx];
+            if (!m) continue;
+
+            const row = mc.closest('.modal-check-row');
+            const qtyInput = row?.querySelector('.containment-material-qty');
+            const qty = parseFloat(qtyInput?.value);
+            const spaceQty = parseFloat(m.quantity) || 0;
+            const key = `${spaceName}::${m.name}`;
+            const allocatedElsewhere = materialAllocations.get(key) || 0;
+            const maxAllowed = Math.max(0, spaceQty - allocatedElsewhere);
+
+            if (!Number.isFinite(qty) || qty <= 0) {
+                return {
+                    ok: false,
+                    error: `Enter a quantity greater than 0 for ${m.name} in ${space.name}.`
+                };
+            }
+            if (qty > maxAllowed + 0.0001) {
+                return {
+                    ok: false,
+                    error: `${m.name} in ${space.name} cannot exceed ${maxAllowed} ${displayUnit(m.unit)} available for this containment.`
+                };
+            }
+
+            selectedMaterials.push({
+                materialId: m.materialId || null,
+                name: m.name,
+                quantity: qty,
+                unit: m.unit || ''
+            });
+        }
+
+        selectedSpaces.push({
+            id: space.id,
+            spaceName: space.name,
+            name: space.name,
+            materials: selectedMaterials
+        });
+    }
+
+    const materialsMap = new Map();
+    selectedSpaces.forEach(sp => {
+        (sp.materials || []).forEach(mat => {
+            const key = `${mat.name}_${mat.unit}`;
+            if (!materialsMap.has(key)) {
+                materialsMap.set(key, {
+                    materialId: mat.materialId || null,
+                    materialName: mat.name,
+                    name: mat.name,
+                    totalQuantity: 0,
+                    quantity: 0,
+                    unit: mat.unit
+                });
+            }
+            const existing = materialsMap.get(key);
+            existing.totalQuantity += parseFloat(mat.quantity) || 0;
+            existing.quantity += parseFloat(mat.quantity) || 0;
+            if (mat.materialId && !existing.materialId) {
+                existing.materialId = mat.materialId;
+            }
+        });
+    });
+
+    const aggregatedMaterials = Array.from(materialsMap.values());
+    if (aggregatedMaterials.length === 0) {
+        return { ok: false, error: 'Please assign at least one material to this containment.' };
+    }
+
+    return { ok: true, selectedSpaces, aggregatedMaterials };
+}
+
 function buildContainmentSpacePickerCard(space, options = {}) {
     const {
         isInOther = false,
         otherContainments = [],
         isSpaceChecked = false,
-        preselMatNames = null,
+        preselMatMap = null,
+        materialAllocations = null,
         defaultAllMaterialsChecked = true
     } = options;
 
@@ -3052,16 +3168,40 @@ function buildContainmentSpacePickerCard(space, options = {}) {
     } else {
         materialsHtml = `<div class="modal-check-sublist" data-space-id="${escapeHtml(space.id)}">${
             (space.materials || []).map((m, idx) => {
-                const isMatChecked = isSpaceChecked && preselMatNames
-                    ? preselMatNames.has(m.name)
-                    : defaultAllMaterialsChecked;
+                const spaceQty = parseFloat(m.quantity) || 0;
+                const allocKey = `${space.name}::${m.name}`;
+                const allocatedElsewhere = materialAllocations?.get(allocKey) || 0;
+                const remaining = Math.max(0, spaceQty - allocatedElsewhere);
+                const preselQty = preselMatMap?.get(m.name);
+                const isPreselected = isSpaceChecked && preselMatMap?.has(m.name);
+                const isFullyAllocated = remaining <= 0 && !isPreselected;
+                const isMatChecked = isPreselected
+                    || (!isSpaceChecked && defaultAllMaterialsChecked && remaining > 0)
+                    || false;
+                const defaultQty = preselQty != null
+                    ? preselQty
+                    : (remaining > 0 ? remaining : spaceQty);
                 const matCbId = `containment-mat-cb-${space.id}-${idx}`;
-                const pill = `<span class="modal-check-pill">${escapeHtml(m.name)} \u00b7 ${parseFloat(m.quantity || 0).toLocaleString()} ${escapeHtml(displayUnit(m.unit))}</span>`;
+                const qtyValue = isMatChecked ? defaultQty : (remaining > 0 ? remaining : '');
+                const pill = `<span class="modal-check-pill">
+                    <span class="modal-check-pill-name">${escapeHtml(m.name)}</span>
+                    <span class="modal-check-pill-sep" aria-hidden="true">\u00b7</span>
+                    <span class="modal-check-pill-qty-wrap">
+                        <input type="number" class="containment-material-qty" value="${qtyValue !== '' ? qtyValue : ''}"
+                            min="0" step="any" max="${remaining > 0 ? remaining : spaceQty}"
+                            data-space-qty="${spaceQty}" data-remaining="${remaining}"
+                            title="Quantity for this containment"
+                            ${isMatChecked ? '' : 'disabled'}>
+                        <span class="modal-check-pill-unit">${escapeHtml(displayUnit(m.unit))}</span>
+                    </span>
+                    <span class="modal-check-pill-avail">of ${spaceQty.toLocaleString()} ${escapeHtml(displayUnit(m.unit))}</span>
+                </span>`;
                 return buildModalCheckboxRow(
                     matCbId,
                     'containment-material-cb',
-                    `data-space-id="${escapeHtml(space.id)}" data-material-name="${escapeHtml(m.name)}" data-material-index="${idx}" ${isMatChecked ? 'checked' : ''}`,
-                    pill
+                    `data-space-id="${escapeHtml(space.id)}" data-material-name="${escapeHtml(m.name)}" data-material-index="${idx}" data-max-quantity="${spaceQty}" ${isMatChecked ? 'checked' : ''} ${isFullyAllocated ? 'disabled' : ''}`,
+                    pill,
+                    isFullyAllocated ? 'modal-check-row--fully-assigned' : ''
                 );
             }).join('')
         }</div>`;
@@ -3081,7 +3221,38 @@ function buildContainmentSpacePickerCard(space, options = {}) {
         </div>`;
 }
 
-function wireContainmentSpacePickerList(spacesList, materialsInContainments) {
+function wireContainmentSpacePickerList(spacesList, materialAllocations) {
+    const syncMaterialRow = (mc) => {
+        const row = mc.closest('.modal-check-row');
+        const qtyInput = row?.querySelector('.containment-material-qty');
+        if (!qtyInput) return;
+
+        const sid = mc.dataset.spaceId;
+        const spaceCb = spacesList.querySelector(`.containment-space-cb[data-space-id="${sid}"]`);
+        const spaceName = spaceCb?.dataset.spaceName || '';
+        const matName = mc.dataset.materialName || '';
+        const spaceQty = parseFloat(mc.dataset.maxQuantity) || parseFloat(qtyInput.dataset.spaceQty) || 0;
+        const allocated = materialAllocations?.get(`${spaceName}::${matName}`) || 0;
+        const remaining = Math.max(0, spaceQty - allocated);
+
+        qtyInput.disabled = !mc.checked;
+        qtyInput.max = remaining > 0 ? remaining : spaceQty;
+        qtyInput.dataset.remaining = String(remaining);
+
+        if (mc.checked) {
+            const current = parseFloat(qtyInput.value);
+            if (!Number.isFinite(current) || current <= 0) {
+                qtyInput.value = remaining > 0 ? remaining : '';
+            } else if (current > remaining && remaining >= 0) {
+                qtyInput.value = remaining;
+            }
+        }
+    };
+
+    spacesList.querySelectorAll('.containment-material-cb').forEach(mc => {
+        mc.addEventListener('change', () => syncMaterialRow(mc));
+    });
+
     spacesList.querySelectorAll('.containment-space-cb').forEach(cb => {
         cb.addEventListener('change', () => {
             const sid = cb.dataset.spaceId;
@@ -3089,14 +3260,34 @@ function wireContainmentSpacePickerList(spacesList, materialsInContainments) {
             spacesList.querySelectorAll(`.containment-material-cb[data-space-id="${sid}"]`).forEach(mc => {
                 if (cb.checked) {
                     const matName = mc.dataset.materialName || '';
-                    const key = `${spaceName}::${matName}`;
-                    mc.checked = !(materialsInContainments && materialsInContainments.has(key));
+                    const spaceQty = parseFloat(mc.dataset.maxQuantity) || 0;
+                    const allocated = materialAllocations?.get(`${spaceName}::${matName}`) || 0;
+                    const remaining = Math.max(0, spaceQty - allocated);
+                    if (!mc.disabled) {
+                        mc.checked = remaining > 0;
+                    }
                 } else {
                     mc.checked = false;
                 }
+                syncMaterialRow(mc);
             });
         });
     });
+
+    spacesList.querySelectorAll('.containment-material-qty').forEach(input => {
+        ['click', 'mousedown'].forEach(evt => {
+            input.addEventListener(evt, e => e.stopPropagation());
+        });
+        input.addEventListener('focus', () => {
+            const mc = input.closest('.modal-check-row')?.querySelector('.containment-material-cb');
+            if (mc && !mc.disabled && !mc.checked) {
+                mc.checked = true;
+                syncMaterialRow(mc);
+            }
+        });
+    });
+
+    spacesList.querySelectorAll('.containment-material-cb').forEach(syncMaterialRow);
 }
 
 function openAddContainmentModal() {
@@ -3155,76 +3346,13 @@ function openAddContainmentModal() {
             return false;
         }
         setLastBuildingId(currentProject.id, buildingId);
-        
-        // Get selected spaces and the inspector-selected materials within each
-        const selectedSpaceCheckboxes = document.querySelectorAll('#new-containment-spaces-list .containment-space-cb:checked');
-        const selectedSpaces = [];
-        
-        selectedSpaceCheckboxes.forEach(checkbox => {
-            const spaceId = checkbox.dataset.spaceId;
-            const space = building.spaces?.find(s => s.id === spaceId);
-            if (!space) return;
-            
-            // Only include materials whose checkbox is checked for this space
-            const matCbs = document.querySelectorAll(
-                `#new-containment-spaces-list .containment-material-cb[data-space-id="${CSS.escape(spaceId)}"]:checked`
-            );
-            const selectedMaterials = [];
-            matCbs.forEach(mc => {
-                const idx = parseInt(mc.dataset.materialIndex, 10);
-                const m = (space.materials || [])[idx];
-                if (m) {
-                    selectedMaterials.push({
-                        materialId: m.materialId || null,
-                        name: m.name,
-                        quantity: m.quantity || 0,
-                        unit: m.unit || ''
-                    });
-                }
-            });
-            
-            selectedSpaces.push({
-                id: space.id,
-                spaceName: space.name,
-                name: space.name,
-                materials: selectedMaterials
-            });
-        });
-        
-        // Aggregate materials from selected spaces (only the ones the inspector kept checked)
-        const materialsMap = new Map();
-        selectedSpaces.forEach(space => {
-            (space.materials || []).forEach(mat => {
-                const key = `${mat.name}_${mat.unit}`;
-                if (!materialsMap.has(key)) {
-                    materialsMap.set(key, {
-                        materialId: mat.materialId || null,
-                        materialName: mat.name,
-                        name: mat.name,
-                        totalQuantity: 0,
-                        quantity: 0,
-                        unit: mat.unit
-                    });
-                }
-                const existing = materialsMap.get(key);
-                existing.totalQuantity += parseFloat(mat.quantity) || 0;
-                existing.quantity += parseFloat(mat.quantity) || 0;
-                if (mat.materialId && !existing.materialId) {
-                    existing.materialId = mat.materialId;
-                }
-            });
-        });
-        
-        if (selectedSpaces.length === 0) {
-            alert('Please select at least one space for this containment.');
-            return false;
-        }
 
-        const aggregatedMaterials = Array.from(materialsMap.values());
-        if (aggregatedMaterials.length === 0) {
-            alert('Please assign at least one material to this containment.');
+        const pickerResult = readContainmentSpacesFromPicker('#new-containment-spaces-list', building);
+        if (!pickerResult.ok) {
+            alert(pickerResult.error);
             return false;
         }
+        const { selectedSpaces, aggregatedMaterials } = pickerResult;
 
         const initialStage = document.getElementById('new-containment-stage').value;
         
@@ -3301,17 +3429,7 @@ function openAddContainmentModal() {
                     }
                 });
                 
-                // Determine which materials in each space are already in a containment
-                const materialsInContainments = new Map();
-                (currentProject.containments || []).forEach(containment => {
-                    (containment.spaces || []).forEach(cs => {
-                        const spaceName = cs.spaceName || cs.name;
-                        (cs.materials || []).forEach(mat => {
-                            const key = `${spaceName}::${mat.name}`;
-                            materialsInContainments.set(key, true);
-                        });
-                    });
-                });
+                const materialAllocations = getContainmentMaterialAllocations(buildingId);
 
                 spacesList.innerHTML = building.spaces.map(space => {
                     const isInOther = spacesInOtherContainments.has(space.name);
@@ -3320,11 +3438,12 @@ function openAddContainmentModal() {
                         isInOther,
                         otherContainments,
                         isSpaceChecked: false,
+                        materialAllocations,
                         defaultAllMaterialsChecked: false
                     });
                 }).join('');
 
-                wireContainmentSpacePickerList(spacesList, materialsInContainments);
+                wireContainmentSpacePickerList(spacesList, materialAllocations);
                 
                 spacesSection.classList.remove('hidden');
             });
@@ -3341,13 +3460,16 @@ function openEditContainmentModal(containmentId) {
     
     // Get preselected space names
     const preselectedSpaceNames = new Set((containment.spaces || []).map(s => s.spaceName || s.name || s.id));
-    // Map of space name -> Set of currently-included material names for that space
+    // Map of space name -> Map of material name -> quantity for this containment
     const preselectedMaterialsBySpace = new Map();
     (containment.spaces || []).forEach(s => {
         const key = s.spaceName || s.name || s.id;
         if (!key) return;
-        const matNames = new Set((s.materials || []).map(m => m.name).filter(Boolean));
-        preselectedMaterialsBySpace.set(key, matNames);
+        const matMap = new Map();
+        (s.materials || []).forEach(m => {
+            if (m.name) matMap.set(m.name, parseFloat(m.quantity) || 0);
+        });
+        preselectedMaterialsBySpace.set(key, matMap);
     });
     
     const buildingOptions = (currentProject.buildings || []).map(b => 
@@ -3442,75 +3564,17 @@ function openEditContainmentModal(containmentId) {
             return false;
         }
         setLastBuildingId(currentProject.id, buildingId);
-        
-        // Get selected spaces and the inspector-selected materials within each
-        const selectedSpaceCheckboxes = document.querySelectorAll('#edit-containment-spaces-list .containment-space-cb:checked');
-        const selectedSpaces = [];
-        
-        selectedSpaceCheckboxes.forEach(checkbox => {
-            const spaceId = checkbox.dataset.spaceId;
-            const space = building.spaces?.find(s => s.id === spaceId);
-            if (!space) return;
-            
-            // Only include materials whose checkbox is checked for this space
-            const matCbs = document.querySelectorAll(
-                `#edit-containment-spaces-list .containment-material-cb[data-space-id="${CSS.escape(spaceId)}"]:checked`
-            );
-            const selectedMaterials = [];
-            matCbs.forEach(mc => {
-                const idx = parseInt(mc.dataset.materialIndex, 10);
-                const m = (space.materials || [])[idx];
-                if (m) {
-                    selectedMaterials.push({
-                        materialId: m.materialId || null,
-                        name: m.name,
-                        quantity: m.quantity || 0,
-                        unit: m.unit || ''
-                    });
-                }
-            });
-            
-            selectedSpaces.push({
-                id: space.id,
-                spaceName: space.name,
-                name: space.name,
-                materials: selectedMaterials
-            });
-        });
-        
-        // Aggregate materials from selected spaces (only the ones the inspector kept checked)
-        const materialsMap = new Map();
-        selectedSpaces.forEach(space => {
-            (space.materials || []).forEach(mat => {
-                const key = `${mat.name}_${mat.unit}`;
-                if (!materialsMap.has(key)) {
-                    materialsMap.set(key, {
-                        materialId: mat.materialId || null,
-                        materialName: mat.name,
-                        name: mat.name,
-                        totalQuantity: 0,
-                        quantity: 0,
-                        unit: mat.unit
-                    });
-                }
-                const existing = materialsMap.get(key);
-                existing.totalQuantity += parseFloat(mat.quantity) || 0;
-                existing.quantity += parseFloat(mat.quantity) || 0;
-                if (mat.materialId && !existing.materialId) {
-                    existing.materialId = mat.materialId;
-                }
-            });
-        });
-        if (selectedSpaces.length === 0) {
-            showEditContainmentStatus('Please select at least one space for this containment.', true);
-            return false;
-        }
 
-        const aggregatedMaterials = Array.from(materialsMap.values());
-        if (aggregatedMaterials.length === 0) {
-            showEditContainmentStatus('Please assign at least one material to this containment.', true);
+        const pickerResult = readContainmentSpacesFromPicker(
+            '#edit-containment-spaces-list',
+            building,
+            containmentId
+        );
+        if (!pickerResult.ok) {
+            showEditContainmentStatus(pickerResult.error, true);
             return false;
         }
+        const { selectedSpaces, aggregatedMaterials } = pickerResult;
         
         const newStage = document.getElementById('edit-containment-stage')?.value;
         const previousStage = currentStage; // normalized at modal open time
@@ -3714,33 +3778,24 @@ function openEditContainmentModal(containmentId) {
             }
         });
         
-        // Determine which materials in each space are already in another containment
-        const materialsInOtherContainments = new Map();
-        (currentProject.containments || []).forEach(c => {
-            if (c.id === containmentId) return;
-            (c.spaces || []).forEach(cs => {
-                const spaceName = cs.spaceName || cs.name;
-                (cs.materials || []).forEach(mat => {
-                    materialsInOtherContainments.set(`${spaceName}::${mat.name}`, true);
-                });
-            });
-        });
+        const materialAllocations = getContainmentMaterialAllocations(buildingId, containmentId);
 
         spacesList.innerHTML = building.spaces.map(space => {
             const isInOther = spacesInOtherContainments.has(space.name);
             const otherContainments = isInOther ? spacesInOtherContainments.get(space.name) : [];
             const isPreselected = preselectedNames.has(space.name) || preselectedNames.has(space.id);
-            const preselMatNames = preselectedMatsMap?.get(space.name) || preselectedMatsMap?.get(space.id);
+            const preselMatMap = preselectedMatsMap?.get(space.name) || preselectedMatsMap?.get(space.id);
             return buildContainmentSpacePickerCard(space, {
                 isInOther,
                 otherContainments,
                 isSpaceChecked: isPreselected,
-                preselMatNames: isPreselected ? preselMatNames : null,
+                preselMatMap: isPreselected ? preselMatMap : null,
+                materialAllocations,
                 defaultAllMaterialsChecked: false
             });
         }).join('');
 
-        wireContainmentSpacePickerList(spacesList, materialsInOtherContainments);
+        wireContainmentSpacePickerList(spacesList, materialAllocations);
         
         spacesSection.classList.remove('hidden');
     };
