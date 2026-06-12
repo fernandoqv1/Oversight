@@ -415,18 +415,32 @@ ipcMain.on('native-confirm', (event, message) => {
 
 function scheduleAppleDriverSetup() {
   if (process.platform !== 'win32') return;
-  setTimeout(() => {
-    appleDrivers.ensureAppleDrivers({
-      onProgress: (msg) => {
-        if (msg && String(msg).trim()) {
-          console.log('[apple-drivers]', String(msg).trim());
-        }
-      },
-    }).then((result) => {
+  setTimeout(async () => {
+    try {
+      if (appleDrivers.checkDriverStatus() === 'installed') return;
+      // Installing the MSI requires elevation, which surfaces as a UAC prompt
+      // for "Windows Installer" — confusing when it appears out of nowhere on
+      // launch. The installer/updater handles the driver silently now (setup
+      // runs perMachine/elevated), so at runtime attempt at most once per app
+      // version instead of nagging on every launch.
+      const markerPath = path.join(app.getPath('userData'), 'apple-driver-attempt.json');
+      try {
+        const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
+        if (marker && marker.version === app.getVersion()) return;
+      } catch { /* no marker yet — first attempt for this version */ }
+      await fs.writeFile(markerPath, JSON.stringify({ version: app.getVersion(), at: new Date().toISOString() }));
+
+      const result = await appleDrivers.ensureAppleDrivers({
+        onProgress: (msg) => {
+          if (msg && String(msg).trim()) {
+            console.log('[apple-drivers]', String(msg).trim());
+          }
+        },
+      });
       console.log('[apple-drivers] startup result:', result.status, result.method || '');
-    }).catch((err) => {
+    } catch (err) {
       console.warn('[apple-drivers] startup failed:', err.message);
-    });
+    }
   }, 4000);
 }
 
@@ -613,7 +627,13 @@ function parseTiffExifOrientation(buffer, tiffStart) {
   for (let i = 0; i < entries; i += 1) {
     const entry = ifd0 + 2 + i * 12;
     if (entry + 12 > buffer.length) break;
-    if (readU16(entry) === 0x0112) return readU16(entry + 8);
+    if (readU16(entry) === 0x0112) {
+      const value = readU16(entry + 8);
+      // EXIF orientation is 1-8; anything else means we misparsed the
+      // container (seen with HEIC scans returning values like 35508) and
+      // must not be used to rotate the image.
+      return value >= 1 && value <= 8 ? value : null;
+    }
   }
   return null;
 }
@@ -674,14 +694,14 @@ function applyExifOrientationToJpegBuffer(jpegBuffer, orientation) {
 }
 
 async function heicBufferToOrientedJpeg(input, quality = 0.9) {
-  const orientation = readExifOrientationFromBuffer(input);
+  // libheif (heic-convert) applies the HEIC display transforms (irot/imir)
+  // during decode — verified against real iPhone captures — so the converted
+  // JPEG is already upright. Rotating again based on the container's EXIF
+  // orientation tag double-rotates portrait photos.
   const heicConvert = require('heic-convert');
   const output = await heicConvert({ buffer: input, format: 'JPEG', quality });
-  let jpeg = Buffer.isBuffer(output) ? output : Buffer.from(output);
-  if (orientation && orientation !== 1) {
-    jpeg = applyExifOrientationToJpegBuffer(jpeg, orientation);
-  }
-  return { jpeg, orientation };
+  const jpeg = Buffer.isBuffer(output) ? output : Buffer.from(output);
+  return { jpeg, orientation: 1 };
 }
 
 async function normalizePhonePhotoFile(localPath) {
@@ -732,10 +752,9 @@ async function buildThumbnailJpeg(filePath, maxDim = PHONE_PREVIEW_MAX_DIM) {
 
   if (format === 'heic') {
     try {
-      let jpegBuffer = await convertHeicBuffer();
-      if (sourceOrientation && sourceOrientation !== 1) {
-        jpegBuffer = applyExifOrientationToJpegBuffer(jpegBuffer, sourceOrientation);
-      }
+      // libheif already applied the display transforms during decode; do not
+      // rotate again (double-rotates portraits).
+      const jpegBuffer = await convertHeicBuffer();
       const img = nativeImage.createFromBuffer(jpegBuffer);
       return resizeNativeImage(img, maxDim);
     } catch {
