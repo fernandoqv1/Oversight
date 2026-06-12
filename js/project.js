@@ -109,8 +109,12 @@ function setLastBuildingId(projectId, buildingId) {
 function applyLastBuildingSelection(selectEl) {
     if (!selectEl || !currentProject?.id) return;
     const last = getLastBuildingId(currentProject.id);
-    if (last && Array.from(selectEl.options).some(o => o.value === last)) {
+    if (last && selectEl.value !== last && Array.from(selectEl.options).some(o => o.value === last)) {
         selectEl.value = last;
+        // Dependent UI (e.g. the spaces list) renders in 'change' listeners,
+        // which setting .value programmatically does not fire. Call this only
+        // AFTER the listeners are attached.
+        selectEl.dispatchEvent(new Event('change', { bubbles: true }));
     }
 }
 
@@ -1521,8 +1525,9 @@ function openAddSpaceFromHeader() {
             <select id="${selectId}" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">${optionsHtml}</select>
         </div>`,
         () => {
+            // Read what the user actually selected — pre-selecting the last
+            // building happens at open, never here (it would override their pick).
             const sel = document.getElementById(selectId);
-            if (sel) applyLastBuildingSelection(sel);
             const id = sel && sel.value;
             if (!id) return false;
             setLastBuildingId(currentProject.id, id);
@@ -1530,6 +1535,8 @@ function openAddSpaceFromHeader() {
             return true;
         }
     );
+    const buildingPickerSelect = document.getElementById(selectId);
+    if (buildingPickerSelect) applyLastBuildingSelection(buildingPickerSelect);
 }
 
 function openAddSpaceModal(buildingId) {
@@ -3402,7 +3409,6 @@ function openAddContainmentModal() {
         wireContainmentNameSuffix('new-containment-name', 'new-containment-suffix');
         const buildingSelect = document.getElementById('new-containment-building');
         if (buildingSelect) {
-            applyLastBuildingSelection(buildingSelect);
             buildingSelect.addEventListener('change', function() {
                 if (this.value) setLastBuildingId(currentProject.id, this.value);
                 const buildingId = this.value;
@@ -3452,9 +3458,11 @@ function openAddContainmentModal() {
                 }).join('');
 
                 wireContainmentSpacePickerList(spacesList, materialAllocations);
-                
+
                 spacesSection.classList.remove('hidden');
             });
+            // After the listener, so the dispatched change renders the spaces.
+            applyLastBuildingSelection(buildingSelect);
         }
     }, 100);
 }
@@ -3816,12 +3824,17 @@ function openEditContainmentModal(containmentId) {
             if (containment.buildingId) {
                 renderSpacesForBuilding(containment.buildingId, preselectedSpaceNames, preselectedMaterialsBySpace);
             }
-            
-            applyLastBuildingSelection(buildingSelect);
+
             buildingSelect.addEventListener('change', function() {
                 if (this.value) setLastBuildingId(currentProject.id, this.value);
                 renderSpacesForBuilding(this.value, preselectedSpaceNames, preselectedMaterialsBySpace);
             });
+            // Only auto-select for containments without a building — overriding
+            // an existing assignment with the "last used" building silently
+            // mismatched the select and the rendered spaces.
+            if (!containment.buildingId) {
+                applyLastBuildingSelection(buildingSelect);
+            }
         }
     }, 100);
 }
