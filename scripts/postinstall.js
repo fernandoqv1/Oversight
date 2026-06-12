@@ -81,3 +81,13 @@ try {
 } catch (err) {
   console.warn('libimobiledevice setup skipped:', err.message);
 }
+
+try {
+  const { spawnSync } = require('child_process');
+  spawnSync(process.execPath, [path.join(__dirname, 'ensure-apple-drivers-asset.js')], {
+    stdio: 'inherit',
+    cwd: root,
+  });
+} catch (err) {
+  console.warn('Apple driver asset setup skipped:', err.message);
+}

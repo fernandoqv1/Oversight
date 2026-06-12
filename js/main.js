@@ -1218,41 +1218,47 @@ async function downloadArchivedProject(projectId, projectName) {
 
         // Template document generator - uses ImageModule for {%image}/{%%image} signatures
         const repairDocxPlaceholderXml = (xml) => {
-            const mergedRun = (tag) => `<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr><w:t>${tag}</w:t></w:r>`;
+            // Merged runs keep the FIRST original run's properties (font, size,
+            // bold, ...) so repaired placeholders render with the template's
+            // formatting instead of the document default. The Arial fallback
+            // only applies when the original run had no properties at all.
+            const fallbackRPr = '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr>';
+            const mergedRun = (tag, rPrXml) => `<w:r>${rPrXml || fallbackRPr}<w:t>${tag}</w:t></w:r>`;
             const rPr = String.raw`(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?`;
             const run = String.raw`<w:r\b(?:\s[^>]*)?>${rPr}<w:t(?:\s[^>]*)?>`;
+            const runCap = String.raw`<w:r\b(?:\s[^>]*)?>(${rPr})<w:t(?:\s[^>]*)?>`;
             const runEnd = String.raw`<\/w:t><\/w:r>`;
             const proof = String.raw`\s*(?:<w:proofErr[^>]*\/?>\s*)*`;
             xml = xml.replace(
-                new RegExp(`${run}\\{\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}\\}${runEnd}`, 'g'),
-                (_m, tagName) => mergedRun(`{${tagName.trim()}}`)
+                new RegExp(`${runCap}\\{\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}\\}${runEnd}`, 'g'),
+                (_m, rPr1, tagName) => mergedRun(`{${tagName.trim()}}`, rPr1)
             );
             xml = xml.replace(
-                /(<w:r\b(?:\s[^>]*)?>(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\{([#\/]?[\w.]+)\}([^<{}]+)<\/w:t><\/w:r>/g,
-                (_m, rOpen, tag, trailing) => `${rOpen}<w:t>{${tag}}</w:t></w:r>${mergedRun(trailing)}`
+                /(<w:r\b(?:\s[^>]*)?>)((?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\{([#\/]?[\w.]+)\}([^<{}]+)<\/w:t><\/w:r>/g,
+                (_m, rOpen, rPr1, tag, trailing) => `${rOpen}${rPr1}<w:t>{${tag}}</w:t></w:r>${mergedRun(trailing, rPr1)}`
             );
             xml = xml.replace(
-                /(<w:r\b(?:\s[^>]*)?>(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\} \{<\/w:t><\/w:r>/g,
-                '$1<w:t>}</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr><w:t>{</w:t></w:r>'
+                /(<w:r\b(?:\s[^>]*)?>)((?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\} \{<\/w:t><\/w:r>/g,
+                (_m, rOpen, rPr1) => `${rOpen}${rPr1}<w:t>}</w:t></w:r>${mergedRun('{', rPr1)}`
             );
             xml = xml.replace(
-                new RegExp(`${run}\\{\\/${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
-                (_m, tagName) => mergedRun(`{/${tagName.trim()}}`)
+                new RegExp(`${runCap}\\{\\/${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+                (_m, rPr1, tagName) => mergedRun(`{/${tagName.trim()}}`, rPr1)
             );
             xml = xml.replace(
-                new RegExp(`${run}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
-                (_m, part1, part2) => {
+                new RegExp(`${runCap}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+                (_m, rPr1, part1, part2) => {
                     const name = (part1 + part2).trim();
                     if (!/^[\w#/.]+$/.test(name)) return _m;
-                    return mergedRun(`{${name}}`);
+                    return mergedRun(`{${name}}`, rPr1);
                 }
             );
             xml = xml.replace(
-                new RegExp(`${run}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
-                (_m, tagName) => {
+                new RegExp(`${runCap}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
+                (_m, rPr1, tagName) => {
                     const name = tagName.trim();
                     if (!/^[\w#/.]+$/.test(name)) return _m;
-                    return mergedRun(`{${name}}`);
+                    return mergedRun(`{${name}}`, rPr1);
                 }
             );
             return xml;

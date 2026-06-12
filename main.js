@@ -161,6 +161,7 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
   setupAutoUpdater();
+  scheduleAppleDriverSetup();
 
   const updater = getAutoUpdater();
   if (updater) {
@@ -360,6 +361,74 @@ ipcMain.handle('read-template', async (event, templatePath) => {
 // ---------- Phone Photo Import (libimobiledevice + MTP fallback) ----------
 
 const phoneImobile = require('./lib/phone-imobile');
+const appleDrivers = require('./lib/apple-drivers');
+
+// Native alert()/confirm() replacements. Chromium's built-in dialogs break the
+// renderer's focus state in Electron: after closing one, text inputs and
+// <select> dropdowns stop accepting clicks until the page reloads. Routing the
+// dialogs through Electron's own message box (plus a blur/focus cycle) avoids
+// that. Synchronous IPC keeps the blocking `if (!confirm(...))` semantics that
+// the renderer call sites rely on.
+function showNativeMessageBox(event, options) {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = dialog.showMessageBoxSync(win, options);
+  if (win && !win.isDestroyed()) {
+    // Re-assert focus so the renderer keeps receiving input events.
+    win.blur();
+    win.focus();
+    win.webContents.focus();
+  }
+  return result;
+}
+
+ipcMain.on('native-alert', (event, message) => {
+  try {
+    showNativeMessageBox(event, {
+      type: 'info',
+      message: String(message ?? ''),
+      buttons: ['OK'],
+      defaultId: 0,
+      noLink: true,
+    });
+  } catch (error) {
+    console.error('native-alert error:', error);
+  }
+  event.returnValue = true;
+});
+
+ipcMain.on('native-confirm', (event, message) => {
+  try {
+    const choice = showNativeMessageBox(event, {
+      type: 'question',
+      message: String(message ?? ''),
+      buttons: ['OK', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    event.returnValue = choice === 0;
+  } catch (error) {
+    console.error('native-confirm error:', error);
+    event.returnValue = false;
+  }
+});
+
+function scheduleAppleDriverSetup() {
+  if (process.platform !== 'win32') return;
+  setTimeout(() => {
+    appleDrivers.ensureAppleDrivers({
+      onProgress: (msg) => {
+        if (msg && String(msg).trim()) {
+          console.log('[apple-drivers]', String(msg).trim());
+        }
+      },
+    }).then((result) => {
+      console.log('[apple-drivers] startup result:', result.status, result.method || '');
+    }).catch((err) => {
+      console.warn('[apple-drivers] startup failed:', err.message);
+    });
+  }, 4000);
+}
 
 function getPhotoBridgeScript() {
   if (app.isPackaged) {
@@ -453,13 +522,16 @@ function sniffImageFormat(buffer) {
   return 'unknown';
 }
 
-function iosPhotoDedupKey(fileName) {
+function iosPhotoDedupKey(fileName, folderPath) {
   const upper = String(fileName || '').toUpperCase();
+  // Scope the key to the containing folder: iPhone photo numbering wraps at
+  // 9999, so the same IMG_#### can legitimately exist in different folders.
+  const scope = String(folderPath || '').toUpperCase();
   const edited = upper.match(/^IMG_E(\d+)/);
-  if (edited) return { key: edited[1], edited: true };
+  if (edited) return { key: `${scope}|${edited[1]}`, edited: true };
   const original = upper.match(/^IMG_(\d+)/);
-  if (original) return { key: original[1], edited: false };
-  return { key: upper, edited: false };
+  if (original) return { key: `${scope}|${original[1]}`, edited: false };
+  return { key: `${scope}|${upper}`, edited: false };
 }
 
 function dedupeIosMtpPhotos(photos) {
@@ -467,15 +539,18 @@ function dedupeIosMtpPhotos(photos) {
   const groups = new Map();
   for (const photo of photos) {
     const name = photo.name || path.basename(photo.path || '');
-    const { key, edited } = iosPhotoDedupKey(name);
+    const folder = photo.relPath != null ? photo.relPath : path.dirname(String(photo.path || ''));
+    const { key, edited } = iosPhotoDedupKey(name, folder);
     const existing = groups.get(key);
     if (!existing) {
       groups.set(key, { photo, edited });
       continue;
     }
-    // Prefer original (IMG_####) over edited duplicate (IMG_E####) for reliable MTP copy
-    if (!edited && existing.edited) {
-      groups.set(key, { photo, edited: false });
+    // Prefer the edited variant (IMG_E####): it is what the user sees in the
+    // Photos app, and the original of an edited pair frequently stalls during
+    // MTP copy until the per-file timeout (verified against a real device).
+    if (edited && !existing.edited) {
+      groups.set(key, { photo, edited: true });
     }
   }
   return Array.from(groups.values()).map((entry) => entry.photo);
@@ -524,7 +599,7 @@ function resizeNativeImage(img, maxDim = PHONE_PREVIEW_MAX_DIM) {
       h = maxDim;
     }
   }
-  return img.resize({ width: Math.max(1, w), height: Math.max(1, h), quality: 'best' }).toJPEG(100);
+  return img.resize({ width: Math.max(1, w), height: Math.max(1, h), quality: 'best' }).toJPEG(88);
 }
 
 function parseTiffExifOrientation(buffer, tiffStart) {
@@ -595,10 +670,10 @@ function applyExifOrientationToJpegBuffer(jpegBuffer, orientation) {
     default: break;
   }
   if (!img || img.isEmpty()) return jpegBuffer;
-  return img.toJPEG(100);
+  return img.toJPEG(90);
 }
 
-async function heicBufferToOrientedJpeg(input, quality = 0.92) {
+async function heicBufferToOrientedJpeg(input, quality = 0.9) {
   const orientation = readExifOrientationFromBuffer(input);
   const heicConvert = require('heic-convert');
   const output = await heicConvert({ buffer: input, format: 'JPEG', quality });
@@ -615,11 +690,14 @@ async function normalizePhonePhotoFile(localPath) {
   const orientation = readExifOrientationFromBuffer(input);
 
   if (format === 'heic') {
-    const { jpeg } = await heicBufferToOrientedJpeg(input, 0.92);
+    const { jpeg } = await heicBufferToOrientedJpeg(input, 0.9);
     const baseName = path.basename(localPath, path.extname(localPath));
     const outPath = path.join(path.dirname(localPath), `${baseName}.jpg`);
     await fs.writeFile(outPath, jpeg);
-    if (outPath !== localPath) {
+    // iPhones serve HEIC content under .JPG names; outPath then differs from
+    // localPath only by extension case, which is the SAME file on Windows —
+    // unlinking it would delete the converted JPEG we just wrote.
+    if (outPath.toLowerCase() !== localPath.toLowerCase()) {
       try { await fs.unlink(localPath); } catch { /* ignore */ }
     }
     return outPath;
@@ -643,7 +721,9 @@ async function buildThumbnailJpeg(filePath, maxDim = PHONE_PREVIEW_MAX_DIM) {
 
   async function convertHeicBuffer() {
     const heicConvert = require('heic-convert');
-    const output = await heicConvert({ buffer: input, format: 'JPEG', quality: 1 });
+    // quality 1 is dramatically slower to encode and ~2-3x larger for no
+    // visible gain in a photo-log context; 0.9 keeps conversion fast.
+    const output = await heicConvert({ buffer: input, format: 'JPEG', quality: 0.9 });
     return Buffer.isBuffer(output) ? output : Buffer.from(output);
   }
 
@@ -691,7 +771,7 @@ async function buildThumbnailJpeg(filePath, maxDim = PHONE_PREVIEW_MAX_DIM) {
   }
 }
 
-async function importDevicePhotosToTemp(deviceName, photoPaths) {
+async function importDevicePhotosToTemp(deviceName, photoPaths, deviceOptions) {
   const paths = Array.isArray(photoPaths) ? photoPaths.filter((p) => typeof p === 'string' && p) : [];
   if (paths.length === 0) {
     return { byName: new Map(), errors: [] };
@@ -699,6 +779,19 @@ async function importDevicePhotosToTemp(deviceName, photoPaths) {
 
   const tempDir = toWindowsPath(path.join(app.getPath('temp'), 'oversight-phone-thumbs', `${Date.now()}-import`));
   await fs.mkdir(tempDir, { recursive: true });
+
+  const backend = normalizePhoneBackend(deviceOptions);
+  if (backend.backend === 'libimobiledevice' && backend.udid) {
+    const importResult = await phoneImobile.importPhotos(backend.udid, paths, tempDir);
+    const byName = new Map();
+    for (const item of importResult.imported || []) {
+      if (item?.name && item?.localPath) {
+        byName.set(item.name, item.localPath);
+      }
+    }
+    return { byName, errors: importResult.errors || [], tempDir };
+  }
+
   const timeoutMs = Math.min(600000, 45000 + paths.length * 90000);
   const importResult = await runPhotoBridge(
     ['-Action', 'import', '-DeviceName', deviceName, '-Files', JSON.stringify(paths), '-DestDir', tempDir],
@@ -730,21 +823,63 @@ function serializePhonePreviewPhotos(photos) {
     path: photo.path,
     previewPath: photo.previewPath || undefined,
     previewMimeType: photo.previewMimeType || undefined,
+    thumbBase64: photo.thumbBase64 || undefined,
+    thumbMimeType: photo.thumbMimeType || undefined,
     index,
   }));
 }
 
-async function buildHighResPreviewsFromDevice(deviceName, photos, onProgress) {
+async function buildHighResPreviewsFromDevice(deviceName, photos, onProgress, deviceOptions) {
   if (!deviceName || !Array.isArray(photos) || photos.length === 0) return photos;
 
-  const paths = photos.map((photo) => photo.path).filter(Boolean);
-  const total = photos.length;
-  const jobStartMs = Date.now();
-  const copyBudgetSec = estimatePreviewSeconds(total, 'copying');
-  const previewBudgetSec = estimatePreviewSeconds(total, 'previews');
+  const toProcess = photos.filter((photo) => photo?.path && !photo.thumbBase64);
+  if (toProcess.length === 0) return photos;
+
+  const backend = normalizePhoneBackend(deviceOptions);
   const report = (payload) => {
     if (typeof onProgress === 'function') onProgress(payload);
   };
+
+  if (backend.backend !== 'libimobiledevice' || !backend.udid) {
+    const paths = toProcess.map((photo) => photo.path);
+    const photoByPath = new Map(toProcess.map((photo) => [photo.path, photo]));
+    report({ phase: 'shell', completed: 0, total: paths.length });
+    const thumbs = await fetchMtpShellThumbnails(deviceName, paths, (batchThumbs, completed, total) => {
+      for (const thumb of batchThumbs) {
+        if (!thumb?.success || !thumb.base64) continue;
+        const photo = photoByPath.get(thumb.path);
+        if (!photo) continue;
+        report({
+          phase: 'shell',
+          completed,
+          total,
+          photo: { ...photo, thumbBase64: thumb.base64, thumbMimeType: thumb.mimeType || 'image/jpeg' },
+        });
+      }
+      report({ phase: 'shell', completed, total });
+    });
+    const thumbByPath = new Map();
+    for (const thumb of thumbs) {
+      if (thumb?.path && thumb.success && thumb.base64) {
+        thumbByPath.set(thumb.path, thumb);
+      }
+    }
+    return photos.map((photo) => {
+      const thumb = thumbByPath.get(photo.path);
+      if (!thumb) return photo;
+      return {
+        ...photo,
+        thumbBase64: thumb.base64,
+        thumbMimeType: thumb.mimeType || 'image/jpeg',
+      };
+    });
+  }
+
+  const paths = toProcess.map((photo) => photo.path).filter(Boolean);
+  const total = paths.length;
+  const jobStartMs = Date.now();
+  const copyBudgetSec = estimatePreviewSeconds(total, 'copying');
+  const previewBudgetSec = estimatePreviewSeconds(total, 'previews');
 
   const reportCopyProgress = () => {
     const elapsedSec = (Date.now() - jobStartMs) / 1000;
@@ -761,7 +896,7 @@ async function buildHighResPreviewsFromDevice(deviceName, photos, onProgress) {
 
   let byName;
   try {
-    ({ byName } = await importDevicePhotosToTemp(deviceName, paths));
+    ({ byName } = await importDevicePhotosToTemp(deviceName, paths, deviceOptions));
     for (const photo of photos) {
       const localPath = findImportedLocalPath(byName, photo.path);
       if (localPath) {
@@ -786,17 +921,26 @@ async function buildHighResPreviewsFromDevice(deviceName, photos, onProgress) {
     secondsRemaining: remainingPreviewSeconds(total, 0, previewStartMs, previewBudgetSec),
   });
 
-  for (let index = 0; index < photos.length; index += 1) {
-    const photo = photos[index];
+  for (let index = 0; index < toProcess.length; index += 1) {
+    const photo = toProcess[index];
     if (!photo?.path) {
-      results.push(photo);
       continue;
     }
     const localPath = findImportedLocalPath(byName, photo.path);
     let updated = photo;
     if (localPath) {
       try {
-        const jpeg = await buildThumbnailJpeg(localPath);
+        let thumbSourcePath = localPath;
+        try {
+          thumbSourcePath = await normalizePhonePhotoFile(localPath);
+          // Normalizing may convert HEIC to a .jpg alongside (removing the
+          // original); repoint the full-copy cache so a later import reuses
+          // the converted file instead of re-copying from the device.
+          phoneFullCopyCache.set(`${deviceName}|${photo.path}`, thumbSourcePath);
+        } catch {
+          /* use original path */
+        }
+        const jpeg = await buildThumbnailJpeg(thumbSourcePath);
         if (jpeg) {
           const safeName = path.basename(photo.path).replace(/[^a-zA-Z0-9._-]/g, '_');
           const previewPath = path.join(previewRoot, `${index}-${safeName}.jpg`);
@@ -832,51 +976,71 @@ async function buildHighResPreviewsFromDevice(deviceName, photos, onProgress) {
     });
   }
 
-  return results;
+  const updatedByPath = new Map(results.map((photo) => [photo.path, photo]));
+  return photos.map((photo) => updatedByPath.get(photo.path) || photo);
 }
 
 function toWindowsPath(filePath) {
   return String(filePath).replace(/\//g, '\\');
 }
 
-async function fetchMtpShellThumbnails(deviceName, photoPaths) {
+async function fetchMtpShellThumbnails(deviceName, photoPaths, onBatch) {
   const paths = Array.isArray(photoPaths) ? photoPaths.filter((p) => typeof p === 'string' && p) : [];
   if (paths.length === 0) return [];
 
-  const normalizedPaths = paths.map((p) => toWindowsPath(p));
-  const timeoutMs = Math.min(120000, 20000 + normalizedPaths.length * 2500);
-  const result = await runPhotoBridge(
-    ['-Action', 'thumbnails', '-DeviceName', deviceName, '-Files', JSON.stringify(normalizedPaths)],
-    timeoutMs
-  );
-
-  if (!result.success) {
-    throw new Error(result.error || 'Shell thumbnail request failed');
-  }
-
-  const byNormalized = new Map();
-  for (let i = 0; i < paths.length; i += 1) {
-    byNormalized.set(normalizedPaths[i], paths[i]);
-  }
-
+  // Fetch in batches so each PowerShell invocation gets its own timeout —
+  // one global capped timeout meant a large photo set timed out as a whole
+  // and the UI got zero thumbnails. Batches also let the renderer paint
+  // tiles progressively via onBatch.
+  const BATCH_SIZE = 24;
   const fetched = [];
-  for (const thumb of result.thumbnails || []) {
-    const normalizedKey = toWindowsPath(thumb.path);
-    const originalPath = byNormalized.get(normalizedKey) || thumb.path;
-    const response = {
-      path: originalPath,
-      success: !!(thumb.success && thumb.base64),
-      base64: thumb.base64 || undefined,
-      mimeType: result.mimeType || 'image/jpeg',
-    };
-    if (response.success) {
-      phoneThumbCache.set(`${deviceName}|${originalPath}`, {
-        success: true,
-        base64: response.base64,
-        mimeType: response.mimeType,
-      });
+  for (let start = 0; start < paths.length; start += BATCH_SIZE) {
+    const batch = paths.slice(start, start + BATCH_SIZE);
+    const normalizedBatch = batch.map((p) => toWindowsPath(p));
+    const timeoutMs = 30000 + normalizedBatch.length * 2500;
+    let result;
+    try {
+      result = await runPhotoBridge(
+        ['-Action', 'thumbnails', '-DeviceName', deviceName, '-Files', JSON.stringify(normalizedBatch)],
+        timeoutMs
+      );
+    } catch (error) {
+      console.warn(`Thumbnail batch ${start}-${start + batch.length} failed:`, error.message);
+      continue;
     }
-    fetched.push(response);
+    if (!result.success) {
+      console.warn(`Thumbnail batch ${start}-${start + batch.length} failed:`, result.error);
+      continue;
+    }
+
+    const byNormalized = new Map();
+    for (let i = 0; i < batch.length; i += 1) {
+      byNormalized.set(normalizedBatch[i], batch[i]);
+    }
+
+    const batchFetched = [];
+    for (const thumb of result.thumbnails || []) {
+      const normalizedKey = toWindowsPath(thumb.path);
+      const originalPath = byNormalized.get(normalizedKey) || thumb.path;
+      const response = {
+        path: originalPath,
+        success: !!(thumb.success && thumb.base64),
+        base64: thumb.base64 || undefined,
+        mimeType: result.mimeType || 'image/jpeg',
+      };
+      if (response.success) {
+        phoneThumbCache.set(`${deviceName}|${originalPath}`, {
+          success: true,
+          base64: response.base64,
+          mimeType: response.mimeType,
+        });
+      }
+      batchFetched.push(response);
+    }
+    fetched.push(...batchFetched);
+    if (typeof onBatch === 'function') {
+      onBatch(batchFetched, Math.min(start + batch.length, paths.length), paths.length);
+    }
   }
 
   return fetched;
@@ -896,7 +1060,7 @@ async function fetchMtpCopyThumbnails(deviceName, photoPaths) {
   }));
 }
 
-async function runPhotoBridge(args, timeoutMs) {
+async function runPhotoBridge(args, timeoutMs, options = {}) {
   let bridgeArgs = [...args];
   const filesIdx = bridgeArgs.indexOf('-Files');
   if (filesIdx !== -1 && filesIdx + 1 < bridgeArgs.length) {
@@ -929,15 +1093,46 @@ async function runPhotoBridge(args, timeoutMs) {
     const proc = spawn('powershell.exe', psArgs, { windowsHide: true });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => {
-      proc.kill('SIGTERM');
-      reject(new Error('Phone import operation timed out'));
-    }, timeoutMs);
+    let stderrLineBuf = '';
 
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    // When the bridge streams progress, treat timeoutMs as an INACTIVITY
+    // window (reset on any output) instead of an absolute cap — a multi-photo
+    // import legitimately outlives any fixed total budget, but a healthy one
+    // never goes silent for long.
+    const inactivityMode = typeof options.onProgress === 'function';
+    let timer = null;
+    const armTimer = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        proc.kill('SIGTERM');
+        reject(new Error('Phone import operation timed out'));
+      }, timeoutMs);
+    };
+    armTimer();
+
+    proc.stdout.on('data', (d) => {
+      stdout += d.toString();
+      if (inactivityMode) armTimer();
+    });
+    proc.stderr.on('data', (d) => {
+      const text = d.toString();
+      if (inactivityMode) armTimer();
+      stderrLineBuf += text;
+      let nl;
+      while ((nl = stderrLineBuf.indexOf('\n')) !== -1) {
+        const line = stderrLineBuf.slice(0, nl).trim();
+        stderrLineBuf = stderrLineBuf.slice(nl + 1);
+        if (line.startsWith('PROGRESS ')) {
+          if (typeof options.onProgress === 'function') {
+            try { options.onProgress(JSON.parse(line.slice(9))); } catch { /* ignore malformed */ }
+          }
+        } else if (line) {
+          stderr += `${line}\n`;
+        }
+      }
+    });
     proc.on('close', (code) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (code !== 0 && !stdout.trim()) {
         reject(new Error(stderr.trim() || `PowerShell exited with code ${code}`));
         return;
@@ -950,7 +1145,7 @@ async function runPhotoBridge(args, timeoutMs) {
       }
     });
     proc.on('error', (err) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       reject(err);
     });
   });
@@ -969,7 +1164,7 @@ function cachePhotosFromListResult(deviceName, photos) {
   }
 }
 
-ipcMain.handle('load-phone-photo-previews', async (event, deviceName, photos) => {
+ipcMain.handle('load-phone-photo-previews', async (event, deviceName, photos, deviceOptions) => {
   try {
     if (!deviceName || typeof deviceName !== 'string') {
       return { success: false, error: 'Device name is required' };
@@ -980,7 +1175,7 @@ ipcMain.handle('load-phone-photo-previews', async (event, deviceName, photos) =>
         event.sender.send('phone-import-preview-progress', payload);
       }
     };
-    const upgraded = await buildHighResPreviewsFromDevice(deviceName, list, sendProgress);
+    const upgraded = await buildHighResPreviewsFromDevice(deviceName, list, sendProgress, deviceOptions);
     cachePhotosFromListResult(deviceName, upgraded);
     return { success: true, photos: serializePhonePreviewPhotos(upgraded) };
   } catch (error) {
@@ -989,17 +1184,41 @@ ipcMain.handle('load-phone-photo-previews', async (event, deviceName, photos) =>
   }
 });
 
-ipcMain.handle('upgrade-phone-photo-previews', async (_event, deviceName, photos) => {
+ipcMain.handle('upgrade-phone-photo-previews', async (_event, deviceName, photos, deviceOptions) => {
   try {
     if (!deviceName || typeof deviceName !== 'string') {
       return { success: false, error: 'Device name is required' };
     }
-    const upgraded = await buildHighResPreviewsFromDevice(deviceName, Array.isArray(photos) ? photos : []);
+    const upgraded = await buildHighResPreviewsFromDevice(
+      deviceName,
+      Array.isArray(photos) ? photos : [],
+      undefined,
+      deviceOptions
+    );
     cachePhotosFromListResult(deviceName, upgraded);
     return { success: true, photos: serializePhonePreviewPhotos(upgraded) };
   } catch (error) {
     console.error('upgrade-phone-photo-previews error:', error);
     return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('check-apple-drivers', () => {
+  return { status: appleDrivers.checkDriverStatus() };
+});
+
+ipcMain.handle('ensure-apple-drivers', async (event) => {
+  try {
+    return await appleDrivers.ensureAppleDrivers({
+      onProgress: (msg) => {
+        if (event.sender && !event.sender.isDestroyed()) {
+          event.sender.send('apple-drivers-progress', { message: msg });
+        }
+      },
+    });
+  } catch (error) {
+    console.error('ensure-apple-drivers error:', error);
+    return { status: 'failed', error: error.message };
   }
 });
 
@@ -1035,6 +1254,8 @@ ipcMain.handle('list-phone-photos', async (_event, deviceName, dateFilter, devic
       return { success: false, error: 'Device name is required' };
     }
 
+    const backend = normalizePhoneBackend(deviceOptions);
+
     const args = ['-Action', 'list', '-DeviceName', deviceName];
     if (dateFilter && typeof dateFilter === 'string') {
       args.push('-DateFilter', dateFilter);
@@ -1051,11 +1272,11 @@ ipcMain.handle('list-phone-photos', async (_event, deviceName, dateFilter, devic
       console.warn('MTP list failed; trying libimobiledevice:', error.message);
     }
 
-    const backend = normalizePhoneBackend(deviceOptions);
     if (backend.backend === 'libimobiledevice' && backend.udid) {
       try {
         const result = await phoneImobile.list(backend.udid, dateFilter || '');
-        if (result.success && Array.isArray(result.photos) && result.photos.length > 0) {
+        if (result.success && Array.isArray(result.photos)) {
+          result.photos = dedupeIosMtpPhotos(result.photos);
           return { ...result, backend: 'libimobiledevice' };
         }
       } catch (error) {
@@ -1070,7 +1291,7 @@ ipcMain.handle('list-phone-photos', async (_event, deviceName, dateFilter, devic
   }
 });
 
-async function importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backend) {
+async function importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backend, onCopyProgress) {
   const imported = [];
   const errors = [];
   const uncachedPaths = [];
@@ -1094,10 +1315,11 @@ async function importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backe
   }
 
   if (uncachedPaths.length > 0) {
+    const onProgress = typeof onCopyProgress === 'function' ? onCopyProgress : null;
     let remoteResult;
     if (backend.backend === 'libimobiledevice' && backend.udid) {
       try {
-        remoteResult = await phoneImobile.importPhotos(backend.udid, uncachedPaths, tempDir);
+        remoteResult = await phoneImobile.importPhotos(backend.udid, uncachedPaths, tempDir, onProgress);
         if ((remoteResult.imported || []).length === 0) {
           remoteResult = null;
         }
@@ -1107,9 +1329,12 @@ async function importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backe
     }
     if (!remoteResult) {
       const filesJson = JSON.stringify(uncachedPaths);
+      // 120s of SILENCE (not total runtime) — the bridge streams per-attempt
+      // progress, so a healthy import of any size never trips this.
       remoteResult = await runPhotoBridge(
         ['-Action', 'import', '-DeviceName', deviceName, '-Files', filesJson, '-DestDir', tempDir],
-        120000
+        120000,
+        onProgress ? { onProgress } : {}
       );
     }
     for (const item of remoteResult.imported || []) {
@@ -1121,7 +1346,7 @@ async function importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backe
   return { success: true, imported, errors };
 }
 
-ipcMain.handle('import-phone-photos', async (_event, deviceName, filePaths, deviceOptions) => {
+ipcMain.handle('import-phone-photos', async (event, deviceName, filePaths, deviceOptions) => {
   try {
     if (!deviceName || typeof deviceName !== 'string') {
       return { success: false, error: 'Device name is required' };
@@ -1133,14 +1358,64 @@ ipcMain.handle('import-phone-photos', async (_event, deviceName, filePaths, devi
     const tempDir = toWindowsPath(path.join(app.getPath('temp'), 'oversight-phone-import', Date.now().toString()));
     await fs.mkdir(tempDir, { recursive: true });
 
-    const copyResult = await importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backend);
+    const sendProgress = (payload) => {
+      if (event.sender && !event.sender.isDestroyed()) {
+        event.sender.send('phone-import-progress', payload);
+      }
+    };
+
+    // Convert each photo (HEIC decode etc.) as soon as its copy lands instead
+    // of waiting for the whole batch — total time becomes copy-time + one
+    // conversion instead of copies + all conversions back to back.
+    const pipelinedNormalize = new Map();
+    const startNormalize = (name, localPath) => {
+      const key = String(name || '').toLowerCase();
+      if (!key || pipelinedNormalize.has(key)) return;
+      pipelinedNormalize.set(key, normalizePhonePhotoFile(localPath).catch((err) => ({ __error: err })));
+    };
+
+    const onCopyProgress = (payload) => {
+      if (!payload || payload.phase !== 'copying') return;
+      sendProgress({
+        phase: 'copying',
+        completed: Number(payload.completed) || 0,
+        total: Number(payload.total) || filePaths.length,
+        name: payload.name || '',
+        attempt: payload.attempt,
+      });
+      if (payload.ok && payload.localPath) {
+        startNormalize(payload.name, payload.localPath);
+      }
+    };
+
+    const copyResult = await importPhonePhotosFromDevice(deviceName, filePaths, tempDir, backend, onCopyProgress);
     const normalizedImported = [];
     const normalizeErrors = [];
+    const requestedByName = new Map(
+      filePaths.map((p) => [path.basename(String(p)).toLowerCase(), String(p)])
+    );
 
-    for (const item of copyResult.imported || []) {
+    const items = copyResult.imported || [];
+    let processed = 0;
+    for (const item of items) {
       if (!item?.localPath) continue;
       try {
-        const normalizedPath = await normalizePhonePhotoFile(item.localPath);
+        const itemKey = String(item.name || path.basename(item.localPath)).toLowerCase();
+        let normalizedPath;
+        const pipelined = pipelinedNormalize.get(itemKey);
+        if (pipelined) {
+          const result = await pipelined;
+          if (result && result.__error) throw result.__error;
+          normalizedPath = result;
+        } else {
+          normalizedPath = await normalizePhonePhotoFile(item.localPath);
+        }
+        // Cache the converted copy so re-importing the same photo (e.g. into
+        // another daily log) skips the slow device copy entirely.
+        const requestedPath = requestedByName.get(itemKey);
+        if (requestedPath) {
+          phoneFullCopyCache.set(`${deviceName}|${requestedPath}`, normalizedPath);
+        }
         normalizedImported.push({
           name: path.basename(normalizedPath),
           localPath: normalizedPath,
@@ -1150,6 +1425,8 @@ ipcMain.handle('import-phone-photos', async (_event, deviceName, filePaths, devi
         normalizeErrors.push(`Could not process '${item.name || path.basename(item.localPath)}': ${err.message}`);
         normalizedImported.push(item);
       }
+      processed += 1;
+      sendProgress({ phase: 'processing', completed: processed, total: items.length, name: item.name || '' });
     }
 
     return {
@@ -1191,7 +1468,13 @@ async function fetchImobilePhotoThumbnails(udid, deviceName, photoPaths) {
       fetched.push({ path: photoPath, success: false });
       continue;
     }
-    const jpeg = await buildThumbnailJpeg(match.localPath);
+    let thumbSourcePath = match.localPath;
+    try {
+      thumbSourcePath = await normalizePhonePhotoFile(match.localPath);
+    } catch {
+      /* use original */
+    }
+    const jpeg = await buildThumbnailJpeg(thumbSourcePath);
     if (!jpeg) {
       fetched.push({ path: photoPath, success: false });
       continue;
@@ -1224,18 +1507,35 @@ async function fetchPhonePhotoThumbnails(deviceName, photoPaths, deviceOptions) 
   const resolved = [...cached];
 
   if (uncached.length > 0) {
-    const withPreviews = await buildHighResPreviewsFromDevice(
-      deviceName,
-      uncached.map((photoPath) => ({ path: photoPath }))
-    );
-    for (const photo of withPreviews) {
-      if (!photo?.path || !photo.thumbBase64) continue;
-      resolved.push({
-        path: photo.path,
-        success: true,
-        base64: photo.thumbBase64,
-        mimeType: photo.thumbMimeType || 'image/jpeg',
-      });
+    const backend = normalizePhoneBackend(deviceOptions);
+    if (backend.backend === 'libimobiledevice' && backend.udid) {
+      const batch = await fetchImobilePhotoThumbnails(backend.udid, deviceName, uncached);
+      for (const thumb of batch.thumbnails || []) {
+        if (thumb?.path && thumb.success && thumb.base64) {
+          resolved.push({
+            path: thumb.path,
+            success: true,
+            base64: thumb.base64,
+            mimeType: thumb.mimeType || 'image/jpeg',
+          });
+        }
+      }
+    } else {
+      const withPreviews = await buildHighResPreviewsFromDevice(
+        deviceName,
+        uncached.map((photoPath) => ({ path: photoPath })),
+        undefined,
+        deviceOptions
+      );
+      for (const photo of withPreviews) {
+        if (!photo?.path || !photo.thumbBase64) continue;
+        resolved.push({
+          path: photo.path,
+          success: true,
+          base64: photo.thumbBase64,
+          mimeType: photo.thumbMimeType || 'image/jpeg',
+        });
+      }
     }
   }
 
@@ -1368,7 +1668,7 @@ ipcMain.handle('convert-image-for-upload', async (_event, byteArray, fileName) =
     if (!isHeic) {
       return { success: false, error: 'Not a HEIC/HEIF file' };
     }
-    const { jpeg } = await heicBufferToOrientedJpeg(input, 0.92);
+    const { jpeg } = await heicBufferToOrientedJpeg(input, 0.9);
     return {
       success: true,
       base64: jpeg.toString('base64'),

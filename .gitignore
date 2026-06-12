@@ -1,5 +1,6 @@
 node_modules/
 bin/libimobiledevice/
+bin/apple-drivers/
 bin/libimobiledevice-suite.zip
 bin/libimobiledevice-tmp/
 bin/libimobiledevice-download/
@@ -17,3 +18,5 @@ build-log*.txt
 .env.*
 templates/~$*.docx
 oversight_example/
+backup/
+templates/_*
