@@ -4316,6 +4316,45 @@ function normalizeStage(stage) {
     return map[stage] || stage || STAGE_CONTAINMENT_PREPARATION;
 }
 
+/** The containment's stage as of the end of the given local day (YYYY-MM-DD),
+ *  reconstructed from stageHistory. Returns null when the containment did not
+ *  exist yet on that day; falls back to the current stage for legacy data
+ *  without usable history. */
+function containmentStageOnDate(containment, dateStr) {
+    const dayEnd = new Date(`${dateStr}T23:59:59.999`).getTime();
+    const history = (Array.isArray(containment?.stageHistory) ? containment.stageHistory : [])
+        .filter(h => h && typeof h.changedAt === 'number')
+        .sort((a, b) => a.changedAt - b.changedAt);
+    if (Number.isNaN(dayEnd) || history.length === 0) return normalizeStage(containment?.stage);
+    let stage = null;
+    for (const h of history) {
+        if (h.changedAt <= dayEnd) stage = h.stage;
+        else break;
+    }
+    if (stage) return normalizeStage(stage);
+    // Every recorded change happened after that day. If the earliest entry is
+    // the creation record (no previousStage), the containment didn't exist yet.
+    const first = history[0];
+    if (first.previousStage) return normalizeStage(first.previousStage);
+    return null;
+}
+
+/** Work-location containments for a daily log: the snapshot stored on the log
+ *  merged with containments whose stage on the log's date was active. The
+ *  snapshot alone goes stale when the stage is changed after the log is
+ *  created (e.g. log entered in the morning, abatement marked active later
+ *  that day), which made generated logs say "No active containments". */
+function getActiveContainmentNamesForLog(project, log) {
+    const snapshot = Array.isArray(log?.activeContainments) ? log.activeContainments : [];
+    const computed = (project?.containments || [])
+        .filter(c => {
+            const stage = containmentStageOnDate(c, log?.date);
+            return stage && ACTIVE_CONTAINMENT_STAGES.includes(stage);
+        })
+        .map(c => c.name || 'Unnamed');
+    return [...new Set([...snapshot, ...computed])];
+}
+
 function renderOverviewCard() {
     _shellRefresh();
     const overviewText = document.getElementById('oversight-project-overview');
@@ -4932,6 +4971,9 @@ function openProjectDailyLogModal(logId) {
             existingLog.inspectorName = inspectorName;
             existingLog.workers = workersOnsite;
             existingLog.workersTotal = workersTotal;
+            // Refresh the snapshot for the (possibly changed) log date.
+            existingLog.activeContainments = getActiveContainmentNamesForLog(
+                currentProject, { date: dateValue, activeContainments: existingLog.activeContainments });
             saveCurrentProject();
             showNotification('Daily log updated.');
             closeModal();
@@ -4939,9 +4981,8 @@ function openProjectDailyLogModal(logId) {
             return;
         }
 
-        const activeContainmentNames = (currentProject.containments || [])
-            .filter(c => ACTIVE_CONTAINMENT_STAGES.includes(normalizeStage(c.stage)))
-            .map(c => c.name || 'Unnamed');
+        // Date-aware: backdated logs pick up what was active on that date, not today.
+        const activeContainmentNames = getActiveContainmentNamesForLog(currentProject, { date: dateValue });
 
         const dailyLog = {
             id: generateId(),
@@ -6192,8 +6233,9 @@ function renderDailyLogView(project) {
     const logsHtml = dailyLogs.length
         ? dailyLogs.map(log => {
             const workersList = (log.workers || []).map(w => `${w.name || 'Worker'}${w.certificationType ? ` (${w.certificationType})` : ''}`).join(', ') || 'No workers listed';
-            const workLocation = (log.activeContainments || []).length > 0
-                ? log.activeContainments.map(n => getContainmentDisplayName(n)).join(', ')
+            const logActiveNames = getActiveContainmentNamesForLog(currentProject, log);
+            const workLocation = logActiveNames.length > 0
+                ? logActiveNames.map(n => getContainmentDisplayName(n)).join(', ')
                 : 'N/A';
             const entriesHtml = (log.entries || []).length
                 ? log.entries.map(entry => `
@@ -6742,8 +6784,9 @@ function printDailyLog(project, dailyLog) {
         const inspectorName = dailyLog.inspectorName || '';
         const inspectorInitials = getInitials(inspectorName);
 
-        // Work location from active containments stored at log creation time
-        const activeContainmentNames = dailyLog.activeContainments || [];
+        // Work location: log snapshot merged with stage history for the log's
+        // date, so stage changes made after the log was created still count.
+        const activeContainmentNames = getActiveContainmentNamesForLog(project, dailyLog);
         const workLocation = activeContainmentNames.length > 0
             ? activeContainmentNames.map(n => getContainmentDisplayName(n)).join(', ')
             : 'No active containments';

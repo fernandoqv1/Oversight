@@ -1380,13 +1380,54 @@ async function downloadArchivedProject(projectId, projectName) {
             }
         };
         
+        // Work-location helpers, scoped locally: project.html loads both this
+        // file and js/project.js, so top-level duplicates would collide.
+        // Mirrors containmentStageOnDate/getActiveContainmentNamesForLog there.
+        const exportNormalizeStage = (stage) => {
+            const map = {
+                'Preparation': 'Containment Preparation',
+                'Active': 'Active Abatement',
+                'Clearance': 'Containment Clearance',
+                'Teardown': 'Containment Teardown',
+                'Completed': 'Abatement Completed'
+            };
+            return map[stage] || stage || 'Containment Preparation';
+        };
+        const exportActiveStages = ['Containment Preparation', 'Active Abatement', 'Containment Clearance'];
+        const exportStageOnDate = (containment, dateStr) => {
+            const dayEnd = new Date(`${dateStr}T23:59:59.999`).getTime();
+            const history = (Array.isArray(containment?.stageHistory) ? containment.stageHistory : [])
+                .filter(h => h && typeof h.changedAt === 'number')
+                .sort((a, b) => a.changedAt - b.changedAt);
+            if (Number.isNaN(dayEnd) || history.length === 0) return exportNormalizeStage(containment?.stage);
+            let stage = null;
+            for (const h of history) {
+                if (h.changedAt <= dayEnd) stage = h.stage;
+                else break;
+            }
+            if (stage) return exportNormalizeStage(stage);
+            const first = history[0];
+            if (first.previousStage) return exportNormalizeStage(first.previousStage);
+            return null;
+        };
+        const exportActiveContainmentNamesForLog = (log) => {
+            const snapshot = Array.isArray(log?.activeContainments) ? log.activeContainments : [];
+            const computed = (project.containments || [])
+                .filter(c => {
+                    const stage = exportStageOnDate(c, log?.date);
+                    return stage && exportActiveStages.includes(stage);
+                })
+                .map(c => c.name || 'Unnamed');
+            return [...new Set([...snapshot, ...computed])];
+        };
+
         // 1. Generate Daily Logs
         const dailyLogs = project.dailyLogs || [];
         if (dailyLogs.length > 0) {
             const dailyLogsFolder = zip.folder('Daily Logs');
-            
+
             for (const dailyLog of dailyLogs) {
-                const activeContainmentNames = dailyLog.activeContainments || [];
+                const activeContainmentNames = exportActiveContainmentNamesForLog(dailyLog);
                 const workLocation = activeContainmentNames.length > 0
                     ? activeContainmentNames.map(n => getContainmentDisplayName(n)).join(', ')
                     : 'No active containments';
