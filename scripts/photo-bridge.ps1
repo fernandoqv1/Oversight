@@ -32,8 +32,12 @@ $ErrorActionPreference = 'Stop'
 
 $script:ImageExtensions = @('.jpg','.jpeg','.png','.heic','.heif','.gif','.bmp','.tiff','.tif')
 $script:SkipExtensions = @('.aae','.mov','.mp4','.m4v')
-$script:PhonePreviewPixelSize = 1280
-$script:PhonePreviewJpegQuality = 96
+# Grid tiles render at ~128px (object-fit:cover, no zoom/lightbox), so a small
+# preview is all that's needed. Requesting <=256px lets Windows return a fast
+# embedded/cached thumbnail instead of decoding the full-res image over MTP per
+# photo — the dominant cost when listing. The full original is copied at import.
+$script:PhonePreviewPixelSize = 256
+$script:PhonePreviewJpegQuality = 82
 
 function Write-JsonOutput($obj) {
     $json = $obj | ConvertTo-Json -Depth 10 -Compress
@@ -100,6 +104,18 @@ function Find-DeviceItem($shell, $deviceName) {
     return $null
 }
 
+# The phone drops out of the Shell namespace when it idles/locks; enumerating
+# wakes it, so a short retry usually brings it back (same pattern as
+# Get-PortableDevicesWithRetry for the list actions).
+function Find-DeviceItemWithRetry($shell, $deviceName, [int]$attempts = 3, [int]$delayMs = 1500) {
+    for ($a = 1; $a -le $attempts; $a++) {
+        $item = Find-DeviceItem $shell $deviceName
+        if ($item) { return $item }
+        if ($a -lt $attempts) { [System.Threading.Thread]::Sleep($delayMs) }
+    }
+    return $null
+}
+
 function Get-MtpFolderItems($folderObj) {
     if (-not $folderObj) { return @() }
     return @($folderObj.Items())
@@ -123,6 +139,10 @@ function Test-ImageFileReady([string]$destPath) {
 }
 
 function Wait-ForFileAtPath([string]$destPath, [int]$timeoutSec = 120) {
+    # Test-ImageFileReady already requires >=1KB plus valid JPEG/HEIC magic
+    # bytes; a stable size across two reads confirms the copy has finished.
+    # (A fixed minimum-size threshold here made photos smaller than it spin
+    # until the timeout even though they had copied successfully.)
     $start = Get-Date
     $lastSize = -1
     $stableReads = 0
@@ -130,7 +150,7 @@ function Wait-ForFileAtPath([string]$destPath, [int]$timeoutSec = 120) {
         if (Test-ImageFileReady $destPath) {
             try {
                 $size = (Get-Item -LiteralPath $destPath).Length
-                if ($size -ge 50000 -and $size -eq $lastSize) {
+                if ($size -gt 0 -and $size -eq $lastSize) {
                     $stableReads++
                     if ($stableReads -ge 2) { return $true }
                 } else {
@@ -141,7 +161,7 @@ function Wait-ForFileAtPath([string]$destPath, [int]$timeoutSec = 120) {
                 $stableReads = 0
             }
         }
-        [System.Threading.Thread]::Sleep(400)
+        [System.Threading.Thread]::Sleep(250)
     }
     return $false
 }
@@ -210,6 +230,11 @@ function Test-ShouldWalkFolder([string]$folderName, [string]$dateFilter, [bool]$
     if (Test-FolderMatchesDateFilter $folderName $dateFilter) { return $true }
     # iOS stores photos in numbered APPLE folders with no date in the name — always walk them.
     if ($folderName -match '^\d{3}APPLE$') { return $true }
+    # Only skip folders that are themselves date-named (e.g. Android "20240115")
+    # but don't match the filter. Always descend into structural container folders
+    # like DCIM / PhotoData / CPLAssets — otherwise the walk never reaches the
+    # APPLE folders that hold the photos and returns nothing.
+    if ($folderName -notmatch '^\d{6,8}') { return $true }
     return $false
 }
 
@@ -234,11 +259,40 @@ function New-PhotoRecord($fileItem, $folderObj, [string]$relPath, $dateInfo, [st
     }
 }
 
-function Collect-Photos($rootItem, [string]$DateFilter, [bool]$IncludeThumbs, [bool]$RestrictFolders) {
-    if ($IncludeThumbs) {
-        Initialize-ShellThumbnailHelper
-    }
+function Get-IosPhotoDedupeInfo([string]$name, [string]$relPath) {
+    $base = [System.IO.Path]::GetFileNameWithoutExtension([string]$name).ToUpper()
+    # Scope the key to the containing folder: iPhone photo numbering wraps at
+    # 9999, so the same IMG_#### can legitimately exist in different folders.
+    $scope = ([string]$relPath).ToUpper()
+    if ($base -match '^IMG_E(\d+)$') { return @{ Key = "$scope|$($Matches[1])"; Edited = $true } }
+    if ($base -match '^IMG_(\d+)$') { return @{ Key = "$scope|$($Matches[1])"; Edited = $false } }
+    return @{ Key = "$scope|$base"; Edited = $false }
+}
 
+function Select-UniqueIosPhotos($records) {
+    # An edited iPhone photo shows up as two files (IMG_1234 + IMG_E1234) plus
+    # .AAE sidecars. Keep one per photo, preferring the edited version: it is
+    # what the user sees in the Photos app, and (verified against a real device)
+    # the edited file copies reliably over MTP while the original of an edited
+    # pair frequently stalls until the per-file timeout.
+    $groups = New-Object System.Collections.Specialized.OrderedDictionary
+    foreach ($rec in $records) {
+        $info = Get-IosPhotoDedupeInfo $rec.name $rec.relPath
+        $key = [string]$info.Key
+        if (-not $groups.Contains($key)) {
+            $groups[$key] = @{ Record = $rec; Edited = $info.Edited }
+            continue
+        }
+        if ($info.Edited -and -not $groups[$key].Edited) {
+            $groups[$key] = @{ Record = $rec; Edited = $true }
+        }
+    }
+    $out = @()
+    foreach ($entry in $groups.Values) { $out += $entry.Record }
+    return $out
+}
+
+function Collect-Photos($rootItem, [string]$DateFilter, [bool]$IncludeThumbs, [bool]$RestrictFolders) {
     function Walk($folderItem, [string]$relPath, [bool]$skipUnmatchedFolders) {
         $folder = $folderItem.GetFolder
         if (-not $folder) { return }
@@ -260,18 +314,42 @@ function Collect-Photos($rootItem, [string]$DateFilter, [bool]$IncludeThumbs, [b
                 if (-not $dateInfo.IsoDate) { continue }
             }
 
-            $thumbBase64 = $null
-            if ($IncludeThumbs) {
-                try { $thumbBase64 = Get-FileThumbnailBase64 $fileItem $script:PhonePreviewPixelSize } catch {}
-            }
-
-            $script:collectedPhotos += (New-PhotoRecord $fileItem $folder $relPath $dateInfo $thumbBase64)
+            $record = New-PhotoRecord $fileItem $folder $relPath $dateInfo $null
+            $script:collectedPhotos += $record
+            $script:collectedItems[[string]$record.path] = $fileItem
         }
     }
 
     $script:collectedPhotos = @()
+    $script:collectedItems = @{}
     Walk $rootItem '' $RestrictFolders
-    return $script:collectedPhotos
+    # Safety net: if the date-restricted walk found nothing (e.g. an unexpected
+    # folder layout), fall back to an unrestricted walk that date-filters per file.
+    if ($RestrictFolders -and $DateFilter -and $script:collectedPhotos.Count -eq 0) {
+        $script:collectedPhotos = @()
+        $script:collectedItems = @{}
+        Walk $rootItem '' $false
+    }
+
+    $unique = @(Select-UniqueIosPhotos $script:collectedPhotos)
+
+    # Thumbnails are generated only for the deduped survivors — edited/original
+    # pairs would otherwise double the thumbnail work for photos never shown.
+    if ($IncludeThumbs) {
+        Initialize-ShellThumbnailHelper
+        foreach ($rec in $unique) {
+            $item = $script:collectedItems[[string]$rec.path]
+            if (-not $item) { continue }
+            $thumb = $null
+            try { $thumb = Get-FileThumbnailBase64 $item $script:PhonePreviewPixelSize } catch {}
+            if ($thumb) {
+                $rec.thumbBase64 = [string]$thumb
+                $rec.thumbMimeType = 'image/jpeg'
+            }
+        }
+    }
+
+    return $unique
 }
 
 function Resolve-PhotoPathInner($rootItem, [string]$photoPath) {
@@ -299,6 +377,56 @@ function Resolve-PhotoPathInner($rootItem, [string]$photoPath) {
         if ($item.Name -eq $fileName -and -not $item.IsFolder) { return $item }
     }
     return $null
+}
+
+# Resolve many photo paths in one pass: group by parent directory, navigate to
+# each directory once, then index its children by name. The per-photo
+# Resolve-PhotoPath walks the folder tree for every file (O(n^2) COM calls over
+# MTP), which is what made bulk thumbnail requests time out.
+function Get-PhotoItemsByPaths($rootItem, $photoPaths) {
+    $resolved = @{}
+    $byDir = @{}
+    foreach ($p in $photoPaths) {
+        $normalized = [string]$p -replace '/', '\'
+        $dir = if ($normalized.Contains('\')) { $normalized.Substring(0, $normalized.LastIndexOf('\')) } else { '' }
+        $name = if ($normalized.Contains('\')) { $normalized.Substring($normalized.LastIndexOf('\') + 1) } else { $normalized }
+        if (-not $byDir.ContainsKey($dir)) { $byDir[$dir] = @{} }
+        $byDir[$dir][$name] = [string]$p
+    }
+
+    foreach ($dir in @($byDir.Keys)) {
+        $candidates = @($dir)
+        if ($dir -match '^DCIM(\\|$)') { $candidates += ($dir -replace '^DCIM\\?', '') } elseif ($dir) { $candidates += "DCIM\$dir" }
+
+        $dirItem = $null
+        foreach ($candidate in $candidates) {
+            $parts = @($candidate -split '\\' | Where-Object { $_ })
+            $current = $rootItem
+            $ok = $true
+            foreach ($part in $parts) {
+                $folder = $current.GetFolder
+                if (-not $folder) { $ok = $false; break }
+                $next = $null
+                foreach ($item in Get-MtpFolderItems $folder) {
+                    if ($item.IsFolder -and $item.Name -eq $part) { $next = $item; break }
+                }
+                if (-not $next) { $ok = $false; break }
+                $current = $next
+            }
+            if ($ok) { $dirItem = $current; break }
+        }
+        if (-not $dirItem) { continue }
+
+        $folder = $dirItem.GetFolder
+        if (-not $folder) { continue }
+        $wanted = $byDir[$dir]
+        foreach ($item in Get-MtpFolderItems $folder) {
+            if (-not $item.IsFolder -and $wanted.ContainsKey($item.Name)) {
+                $resolved[[string]$wanted[$item.Name]] = $item
+            }
+        }
+    }
+    return $resolved
 }
 
 function Resolve-PhotoPath($rootItem, [string]$photoPath) {
@@ -450,7 +578,7 @@ namespace OversightPhone {
                             }
                             if (jpegCodec != null) {
                                 EncoderParameters encParams = new EncoderParameters(1);
-                                encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 96L);
+                                encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 82L);
                                 sized.Save(ms, jpegCodec, encParams);
                             } else {
                                 sized.Save(ms, ImageFormat.Jpeg);
@@ -533,19 +661,41 @@ function Test-PhotoMatchesFilter($photo, [string]$dateFilter) {
     return ($photoDate -eq $dateFilter)
 }
 
+function Get-PortableDevicesWithRetry([int]$attempts = 3, [int]$delayMs = 1500) {
+    # The first Shell enumeration right after a phone is plugged in (or after the
+    # WPD service has been idle) often comes back empty; the enumeration itself
+    # wakes the device, so a short retry finds it.
+    for ($a = 1; $a -le $attempts; $a++) {
+        $devices = @(Get-PortableDevices)
+        if ($devices.Count -gt 0) { return $devices }
+        if ($a -lt $attempts) { [System.Threading.Thread]::Sleep($delayMs) }
+    }
+    return @()
+}
+
+$script:PhoneLockedMessage = 'iPhone storage is not accessible. Unlock your iPhone, tap "Allow" if it asks about photo access, then retry.'
+
 function Get-PhoneListResult([string]$DeviceName, [string]$DateFilter, [bool]$IncludeThumbs) {
     $shell = New-Object -ComObject Shell.Application
-    $deviceItem = Find-DeviceItem $shell $DeviceName
+    $deviceItem = Find-DeviceItemWithRetry $shell $DeviceName
     if (-not $deviceItem) {
         return @{ success = $false; error = "Device '$DeviceName' not found" }
     }
 
     $storageRoot = Get-StorageRoot $deviceItem
     if (-not $storageRoot) {
-        return @{ success = $true; photos = @(); totalOnDevice = 0; includeThumbs = $IncludeThumbs }
+        # Device is visible but exposes no storage: locked phone or photo access not allowed.
+        return @{ success = $true; photos = @(); totalOnDevice = 0; includeThumbs = $IncludeThumbs; phoneLocked = $true; error = $script:PhoneLockedMessage }
     }
 
     [void](Wait-MtpStorageReady $storageRoot)
+    $rootFolder = $storageRoot.GetFolder
+    $rootItems = if ($rootFolder) { @(Get-MtpFolderItems $rootFolder) } else { @() }
+    if ($rootItems.Count -eq 0) {
+        # Storage mounted but empty: a locked iPhone presents exactly this way.
+        return @{ success = $true; photos = @(); totalOnDevice = 0; includeThumbs = $IncludeThumbs; phoneLocked = $true; error = $script:PhoneLockedMessage }
+    }
+
     $restrictFolders = [bool]($DateFilter -and $DateFilter.Trim())
     $photos = Collect-Photos $storageRoot $DateFilter $IncludeThumbs $restrictFolders
 
@@ -567,7 +717,7 @@ function Pick-DefaultPhoneDevice($devices) {
 switch ($Action) {
     'detect' {
         try {
-            $devices = Get-PortableDevices
+            $devices = Get-PortableDevicesWithRetry
             Write-JsonOutput @{ success = $true; devices = @($devices) }
         } catch {
             Write-JsonOutput @{ success = $false; error = $_.Exception.Message }
@@ -590,7 +740,7 @@ switch ($Action) {
 
     'quick-list' {
         try {
-            $devices = Get-PortableDevices
+            $devices = Get-PortableDevicesWithRetry
             if ($devices.Count -eq 0) {
                 Write-JsonOutput @{ success = $true; devices = @(); photos = @(); totalOnDevice = 0 }
                 return
@@ -606,6 +756,7 @@ switch ($Action) {
                 photos        = @($result.photos)
                 totalOnDevice = $result.totalOnDevice
                 includeThumbs = $true
+                phoneLocked   = [bool]$result.phoneLocked
                 backend       = 'mtp'
             }
         } catch {
@@ -636,7 +787,7 @@ switch ($Action) {
             $fileList = Get-RequestedFileList
 
             $shell = New-Object -ComObject Shell.Application
-            $deviceItem = Find-DeviceItem $shell $DeviceName
+            $deviceItem = Find-DeviceItemWithRetry $shell $DeviceName
             if (-not $deviceItem) {
                 Write-JsonOutput @{ success = $false; error = "Device '$DeviceName' not found" }
                 return
@@ -657,33 +808,87 @@ switch ($Action) {
             }
             $imported = @()
             $errors = @()
-            $perFileTimeoutSec = 120
+            # MTP CopyHere stalls out sporadically (roughly half of consecutive
+            # copies in device testing) and a stalled transfer never recovers —
+            # but re-issuing the same copy reliably completes within seconds.
+            # So: short per-attempt timeout with retries, instead of one long
+            # 120s wait that silently eats the file.
+            $perAttemptTimeoutSec = 30
+            $maxAttempts = 3
+
+            # Resolve all requested files in one folder pass instead of a full
+            # per-file tree traversal — the same O(n^2) fix as the thumbnails
+            # action; per-file resolution dominated import time for multi-photo
+            # selections.
+            $itemsByPath = Get-PhotoItemsByPaths $storageRoot @($fileList | ForEach-Object { [string]$_ })
+
+            # Per-file progress lines on stderr ("PROGRESS {json}") so the app
+            # can stream a real progress bar and treat silence as the only
+            # timeout condition.
+            function Write-ImportProgress($payload) {
+                try { [Console]::Error.WriteLine('PROGRESS ' + ($payload | ConvertTo-Json -Compress)) } catch {}
+            }
+
+            $total = @($fileList).Count
+            $done = 0
 
             foreach ($filePath in $fileList) {
                 try {
-                    $srcFile = Resolve-PhotoPath $storageRoot ([string]$filePath)
+                    $srcFile = $itemsByPath[[string]$filePath]
                     if (-not $srcFile) {
-                        $errors += "File '$filePath' not found on device"
-                        continue
+                        $srcFile = Resolve-PhotoPath $storageRoot ([string]$filePath)
                     }
 
                     $fileName = Split-Path $filePath -Leaf
+
+                    if (-not $srcFile) {
+                        $errors += "File '$filePath' not found on device"
+                        $done++
+                        Write-ImportProgress @{ phase = 'copying'; completed = $done; total = $total; name = $fileName; ok = $false }
+                        continue
+                    }
+
                     $destPath = Join-Path $DestDir $fileName
                     if (Test-Path -LiteralPath $destPath) {
                         Remove-Item -LiteralPath $destPath -Force -ErrorAction SilentlyContinue
                     }
 
-                    $destFolder.CopyHere($srcFile, 0x14)
-                    if (Wait-ForFileAtPath $destPath $perFileTimeoutSec) {
+                    $copied = $false
+                    for ($attempt = 1; $attempt -le $maxAttempts -and -not $copied; $attempt++) {
+                        Write-ImportProgress @{ phase = 'copying'; completed = $done; total = $total; name = $fileName; attempt = $attempt }
+                        if ($attempt -gt 1) {
+                            # Refresh the COM session and re-resolve the source
+                            # item before retrying a stalled copy.
+                            $shell = New-Object -ComObject Shell.Application
+                            $destFolder = $shell.NameSpace($DestDir)
+                            $retryDevice = Find-DeviceItem $shell $DeviceName
+                            if ($retryDevice) {
+                                $retryRoot = Get-StorageRoot $retryDevice
+                                if ($retryRoot) {
+                                    $fresh = Resolve-PhotoPath $retryRoot ([string]$filePath)
+                                    if ($fresh) { $srcFile = $fresh }
+                                }
+                            }
+                        }
+                        $destFolder.CopyHere($srcFile, 0x14)
+                        $copied = Wait-ForFileAtPath $destPath $perAttemptTimeoutSec
+                    }
+
+                    $done++
+                    if ($copied) {
                         $imported += [PSCustomObject]@{
                             name      = [string]$fileName
                             localPath = [string]$destPath
                         }
+                        Write-ImportProgress @{ phase = 'copying'; completed = $done; total = $total; name = $fileName; ok = $true; localPath = [string]$destPath }
                     } else {
-                        $errors += "Timed out copying '$fileName'"
+                        $errors += "Timed out copying '$fileName' after $maxAttempts attempts"
+                        Write-ImportProgress @{ phase = 'copying'; completed = $done; total = $total; name = $fileName; ok = $false }
                     }
                 } catch {
+                    $done++
                     $errors += "Error copying '$filePath': $($_.Exception.Message)"
+                    Write-ImportProgress @{ phase = 'copying'; completed = $done; total = $total; name = (Split-Path $filePath -Leaf); ok = $false }
                 }
             }
 
@@ -715,7 +920,7 @@ switch ($Action) {
             }
 
             $shell = New-Object -ComObject Shell.Application
-            $deviceItem = Find-DeviceItem $shell $DeviceName
+            $deviceItem = Find-DeviceItemWithRetry $shell $DeviceName
             if (-not $deviceItem) {
                 Write-JsonOutput @{ success = $false; error = "Device '$DeviceName' not found" }
                 return
@@ -728,12 +933,13 @@ switch ($Action) {
             }
 
             Initialize-ShellThumbnailHelper
+            $itemsByPath = Get-PhotoItemsByPaths $storageRoot $pathList
             $thumbnails = @()
             foreach ($photoPath in $pathList) {
                 $pathKey = [string]$photoPath
                 $base64 = $null
                 try {
-                    $srcFile = Resolve-PhotoPath $storageRoot $pathKey
+                    $srcFile = $itemsByPath[$pathKey]
                     if ($srcFile) {
                         $base64 = Get-FileThumbnailBase64 $srcFile $script:PhonePreviewPixelSize
                     }

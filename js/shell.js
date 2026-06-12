@@ -659,11 +659,22 @@
         if (s.stopTime) acts.push({ when: toActivityDate(s.date, s.stopTime), who:'AIR', type:'sample', text:`Sample ${sampleDisplayId(s)} stopped (${p.projectNumber || siteName(p)})` });
       });
       (p.dailyLogs || []).forEach(l => {
-        if (l.date) acts.push({ when:l.date, who:'LOG', type:'log', text:`Daily log entered (${p.projectNumber || siteName(p)})` });
+        if (!l.date) return;
+        const entries = Array.isArray(l.entries) ? l.entries : [];
+        if (entries.length > 0) {
+          // One activity per log entry, timestamped with the log's date plus the
+          // entry's hour — a bare date string would parse as UTC midnight and
+          // render as the previous evening with a bogus time.
+          entries.forEach(e => {
+            acts.push({ when: toActivityDate(l.date, e.hour), who:'LOG', type:'log', text:`Daily log entry (${p.projectNumber || siteName(p)})` });
+          });
+        } else {
+          acts.push({ when: toActivityDate(l.date, null), who:'LOG', type:'log', text:`Daily log entered (${p.projectNumber || siteName(p)})` });
+        }
       });
       (p.containments || []).forEach(c => {
         (c.stageHistory || []).forEach(h => {
-          if (h.date) acts.push({ when:h.date, who:'STG', type:'stage', text:`${c.name || ''} → ${h.stage} (${p.projectNumber || siteName(p)})` });
+          if (h.date) acts.push({ when: toActivityDate(h.date, null), who:'STG', type:'stage', text:`${c.name || ''} → ${h.stage} (${p.projectNumber || siteName(p)})` });
         });
         (c.visualInspections || []).forEach(v => {
           acts.push({
@@ -1101,15 +1112,15 @@
       else if (s.startTime) out.push({ when: toActivityDate(s.date, s.startTime), who:'AIR', type:'sample', text:`Sample ${sampleDisplayId(s)} started` });
     });
     (p.bulkSamples || []).forEach(s => {
-      out.push({ when: s.date, who:'BLK', type:'sample', text:`Bulk sample ${sampleDisplayId(s)} — ${s.materialName || 'material'}` });
+      out.push({ when: toActivityDate(s.date, null), who:'BLK', type:'sample', text:`Bulk sample ${sampleDisplayId(s)} — ${s.materialName || 'material'}` });
     });
     (p.dailyLogs || []).forEach(l => {
       (l.entries || []).forEach(e => {
-        out.push({ when:e.timestamp || l.date, who:'LOG', type:'log', text:`Log entry: ${(e.notes || '').slice(0, 60)}` });
+        out.push({ when: toActivityDate(l.date, e.hour), who:'LOG', type:'log', text:`Log entry: ${(e.description || '').slice(0, 60)}` });
       });
     });
     (p.containments || []).forEach(c => {
-      (c.stageHistory || []).forEach(h => out.push({ when:h.changedAt || h.date, who:'STG', type:'stage', text:`${containmentLabel(c.name || '')} → ${h.stage}` }));
+      (c.stageHistory || []).forEach(h => out.push({ when:h.changedAt || toActivityDate(h.date, null), who:'STG', type:'stage', text:`${containmentLabel(c.name || '')} → ${h.stage}` }));
       (c.visualInspections || []).forEach(v => out.push({
         when: v.createdAt || v.date,
         who: 'VIS',

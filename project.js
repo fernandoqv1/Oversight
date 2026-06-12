@@ -161,10 +161,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key !== 'Escape') return;
         const modals = document.querySelectorAll('.modal.active');
         if (modals.length > 0) {
-            dismissModal(modals[modals.length - 1]);
-        } else {
-            cleanupOrphanedModals();
+            modals[modals.length - 1].remove();
         }
+        cleanupOrphanedModals();
     });
 
     const urlParams = new URLSearchParams(window.location.search);
@@ -203,8 +202,6 @@ function loadProject(id) {
         if (!currentProject.containments) currentProject.containments = [];
         if (!currentProject.airSamples) currentProject.airSamples = [];
         if (!currentProject.bulkSamples) currentProject.bulkSamples = [];
-        if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
-        migrateProjectHazardData(currentProject);
         if (!currentProject.workerRoster) currentProject.workerRoster = [];
         if (!currentProject.dailyLogs) currentProject.dailyLogs = [];
         currentProject.workerRoster = normalizeWorkerRoster(currentProject.workerRoster);
@@ -441,7 +438,6 @@ function renderMaterials() {
                 <div class="flex justify-between items-start gap-3">
                     <div class="flex-1 min-w-0">
                         <span class="font-medium text-gray-800">${escapeHtml(material.name)}</span>
-                        ${hazardTypeBadgeHtml(material.hazardType)}
                         ${material.friable ? '<span class="ml-2 px-2 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded">Friable</span>' : ''}
                         <div class="text-sm mt-1 space-x-3">
                             <span class="text-gray-500">Total: <strong>${material.totalQuantity || 0}</strong> ${displayUnit(material.unit, 'units')}</span>
@@ -482,9 +478,8 @@ function getAssignedQuantity(materialId) {
     return total;
 }
 
-/** Find an existing site material by name, or create one for tracking in the Materials list.
- *  hazardType is applied only when creating a new material; existing records are never changed. */
-function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0, hazardType = 'asbestos') {
+/** Find an existing site material by name, or create one for tracking in the Materials list. */
+function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0) {
     const trimmed = String(name || '').trim();
     if (!trimmed) return null;
     if (!currentProject.materials) currentProject.materials = [];
@@ -496,8 +491,7 @@ function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0, hazardTyp
             name: trimmed,
             totalQuantity: 0,
             unit: unit || 'SF',
-            friable: false,
-            hazardType: normalizeHazardType(hazardType)
+            friable: false
         };
         currentProject.materials.push(material);
     }
@@ -751,195 +745,102 @@ function getAirSampleTypePrefix(type) {
     const normalized = String(type || '').toLowerCase();
     if (normalized === 'personal') return 'PS';
     if (normalized === 'clearance') return 'CA';
-    if (normalized === 'lead') return 'AS';
     return 'AS';
 }
 
-function normalizeHazardType(value) {
-    const v = String(value || '').toLowerCase();
-    if (v === 'lead' || v === 'pb') return 'lead';
-    return 'asbestos';
-}
-
-function isLeadHazard(hazardType) {
-    return normalizeHazardType(hazardType) === 'lead';
-}
-
-function getAirSampleHazardType(sample) {
-    if (!sample) return 'asbestos';
-    if (sample.hazardType) return normalizeHazardType(sample.hazardType);
-    if (String(sample.type || '').toLowerCase() === 'lead') return 'lead';
-    const id = sample.sampleId || '';
-    if (/-Pb-(AS|PS|CA)\d+$/i.test(id)) return 'lead';
-    return 'asbestos';
-}
-
-function resolveSiteMaterialHazard(materialId, materialName) {
-    const materials = currentProject?.materials || [];
-    if (materialId) {
-        const byId = materials.find(m => m.id === materialId);
-        if (byId) return normalizeHazardType(byId.hazardType);
-    }
-    const norm = (materialName || '').trim().toLowerCase();
-    if (norm) {
-        const byName = materials.find(m => (m.name || '').trim().toLowerCase() === norm);
-        if (byName) return normalizeHazardType(byName.hazardType);
-    }
-    return 'asbestos';
-}
-
-function getProjectHazardSummary(project) {
-    const p = project || currentProject;
-    const materials = p?.materials || [];
-    const hasAsbestos = materials.some(m => normalizeHazardType(m.hazardType) !== 'lead');
-    const hasLead = materials.some(m => normalizeHazardType(m.hazardType) === 'lead');
-    return {
-        hasAsbestos,
-        hasLead,
-        onlyAsbestos: hasAsbestos && !hasLead,
-        onlyLead: hasLead && !hasAsbestos,
-        both: hasAsbestos && hasLead
-    };
-}
-
-function getContainmentMaterialHazards(containment) {
-    let hasAsbestos = false;
-    let hasLead = false;
-    const seen = new Set();
-    const consider = (materialId, name) => {
-        const key = materialId || (name || '').trim().toLowerCase();
-        if (!key || seen.has(key)) return;
-        seen.add(key);
-        const ht = resolveSiteMaterialHazard(materialId, name);
-        if (ht === 'lead') hasLead = true;
-        else hasAsbestos = true;
-    };
-    (containment?.materials || []).forEach(m => consider(m.materialId, m.materialName || m.name));
-    (containment?.spaces || []).forEach(sp => {
-        (sp.materials || []).forEach(m => consider(m.materialId, m.name || m.materialName));
-    });
-    return { hasAsbestos, hasLead };
-}
-
-function formatAirSampleSequence(num) {
-    const n = Math.max(1, parseInt(num, 10) || 1);
-    return n < 100 ? String(n).padStart(2, '0') : String(n);
-}
-
-function buildAirSampleIdPrefix(sampleType, hazardType = 'asbestos') {
+function getNextAirSampleId(type, currentSampleId = null) {
     const projectNum = currentProject?.projectNumber || 'PJ';
-    const typePrefix = getAirSampleTypePrefix(sampleType);
-    if (isLeadHazard(hazardType)) return `${projectNum}-Pb-${typePrefix}`;
-    return `${projectNum}-${typePrefix}`;
-}
-
-function getNextAirSampleId(sampleType, hazardType = 'asbestos', currentSampleId = null) {
-    const prefix = buildAirSampleIdPrefix(sampleType, hazardType);
+    const typePrefix = getAirSampleTypePrefix(type);
+    const prefix = `${projectNum}-${typePrefix}`;
     let nextNum = 1;
-    const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`^${escaped}(\\d+)$`, 'i');
     (currentProject?.airSamples || []).forEach(sample => {
         const id = sample.sampleId || '';
         if (currentSampleId && id === currentSampleId) return;
-        const match = id.match(re);
-        if (match) nextNum = Math.max(nextNum, parseInt(match[1], 10) + 1);
+        if (!id.startsWith(prefix)) return;
+        const suffix = id.slice(prefix.length);
+        if (/^\d+$/.test(suffix)) {
+            nextNum = Math.max(nextNum, parseInt(suffix, 10) + 1);
+        }
     });
-    return `${prefix}${formatAirSampleSequence(nextNum)}`;
+    return `${prefix}${String(nextNum).padStart(3, '0')}`;
 }
 
 function isAutoAirSampleId(value) {
     const projectNum = currentProject?.projectNumber || 'PJ';
     const escapedProject = projectNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`^${escapedProject}(-Pb)?-(AS|PS|CA)\\d{2,}$`, 'i').test(String(value || ''));
+    return new RegExp(`^${escapedProject}-(AS|PS|CA)\\d{3}$`, 'i').test(String(value || ''));
 }
 
-function parseAirSampleIdSuffix(sampleId, sampleType, hazardType = 'asbestos') {
-    const typePrefix = getAirSampleTypePrefix(sampleType);
+function buildAirSampleIdPrefix(type) {
+    const projectNum = currentProject?.projectNumber || 'PJ';
+    return `${projectNum}-${getAirSampleTypePrefix(type)}`;
+}
+
+function parseAirSampleIdSuffix(sampleId, type) {
+    const typePrefix = getAirSampleTypePrefix(type);
     const id = String(sampleId || '').trim();
-    const leadMatch = id.match(new RegExp(`-Pb-${typePrefix}(\\d+)$`, 'i'));
-    if (leadMatch && isLeadHazard(hazardType)) return formatAirSampleSequence(parseInt(leadMatch[1], 10));
-    const asbMatch = id.match(new RegExp(`-${typePrefix}(\\d+)$`, 'i'));
-    if (asbMatch && !isLeadHazard(hazardType)) return formatAirSampleSequence(parseInt(asbMatch[1], 10));
-    if (/^\d+$/.test(id)) return formatAirSampleSequence(parseInt(id, 10));
-    return getNextAirSampleId(sampleType, hazardType).slice(buildAirSampleIdPrefix(sampleType, hazardType).length);
+    const autoMatch = id.match(/^.+-(AS|PS|CA)(\d{1,3})$/i);
+    if (autoMatch && autoMatch[1].toUpperCase() === typePrefix) {
+        return autoMatch[2].padStart(3, '0');
+    }
+    if (/^\d{1,3}$/.test(id)) return id.padStart(3, '0');
+    const generic = id.match(/(AS|PS|CA)(\d{1,3})$/i);
+    if (generic) return generic[2].padStart(3, '0');
+    return getNextAirSampleId(type).slice(buildAirSampleIdPrefix(type).length);
 }
 
-function buildAirSampleIdFromSuffix(sampleType, suffixInput, hazardType = 'asbestos') {
-    const prefix = buildAirSampleIdPrefix(sampleType, hazardType);
+function buildAirSampleIdFromSuffix(type, suffixInput) {
+    const prefix = buildAirSampleIdPrefix(type);
     const digits = String(suffixInput || '').replace(/\D/g, '');
-    const num = parseInt(digits, 10) || 1;
-    return `${prefix}${formatAirSampleSequence(num)}`;
+    const suffix = (digits || '001').padStart(3, '0').slice(-3);
+    return `${prefix}${suffix}`;
 }
 
 function syncAirSampleIdsForProjectNumber(oldProjectNumber, newProjectNumber) {
     if (!oldProjectNumber || !newProjectNumber || oldProjectNumber === newProjectNumber) return;
     const escapedOld = oldProjectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const patterns = [
-        new RegExp(`^(${escapedOld})-Pb-(AS|PS|CA)(\\d+)$`, 'i'),
-        new RegExp(`^(${escapedOld})-(AS|PS|CA)(\\d+)$`, 'i'),
-        new RegExp(`^(${escapedOld})-(\\d{2})Pb$`, 'i')
-    ];
+    const re = new RegExp(`^${escapedOld}-(AS|PS|CA)(\\d{3})$`, 'i');
     (currentProject.airSamples || []).forEach(sample => {
         const id = sample.sampleId || '';
-        let m = id.match(patterns[0]);
-        if (m) { sample.sampleId = `${newProjectNumber}-Pb-${m[2].toUpperCase()}${m[3]}`; return; }
-        m = id.match(patterns[1]);
-        if (m) { sample.sampleId = `${newProjectNumber}-${m[2].toUpperCase()}${m[3]}`; return; }
-        m = id.match(patterns[2]);
-        if (m) {
-            sample.hazardType = 'lead';
-            if (sample.type === 'Lead') sample.type = 'Area';
-            sample.sampleId = getNextAirSampleId(sample.type || 'Area', 'lead');
+        const match = id.match(re);
+        if (match) {
+            sample.sampleId = `${newProjectNumber}-${match[1].toUpperCase()}${match[2]}`;
         }
     });
 }
 
-function buildAirSampleIdFieldHtml(prefixSpanId, suffixInputId, sampleType, hazardType, sampleId, compact) {
-    const prefix = buildAirSampleIdPrefix(sampleType, hazardType);
-    const suffix = parseAirSampleIdSuffix(sampleId, sampleType, hazardType);
+function buildAirSampleIdFieldHtml(prefixSpanId, suffixInputId, type, sampleId, compact) {
+    const prefix = buildAirSampleIdPrefix(type);
+    const suffix = parseAirSampleIdSuffix(sampleId, type);
     const inputStyle = compact
         ? 'padding:0.3rem 0.5rem; font-size:0.875rem; width:3.25rem;'
         : 'padding:0.75rem; width:3.5rem;';
     return `<div class="flex items-center gap-1" style="flex-wrap:nowrap;">
         <span id="${prefixSpanId}" class="font-mono text-gray-600 whitespace-nowrap${compact ? ' text-xs' : ' text-sm'}">${escapeHtml(prefix)}</span>
-        <input type="text" id="${suffixInputId}" class="border rounded font-mono" style="${inputStyle}" value="${escapeHtml(suffix)}" maxlength="4" inputmode="numeric" aria-label="Sample number">
+        <input type="text" id="${suffixInputId}" class="border rounded font-mono" style="${inputStyle}" value="${escapeHtml(suffix)}" maxlength="3" inputmode="numeric" aria-label="Sample number">
     </div>`;
 }
 
-function renderAirSampleIdField(container, sampleType, hazardType, sampleId, compact, prefixSpanId, suffixInputId) {
-    if (!container) return;
-    const ht = normalizeHazardType(hazardType);
-    const suggested = sampleId || getNextAirSampleId(sampleType, ht);
-    container.innerHTML = buildAirSampleIdFieldHtml(prefixSpanId, suffixInputId, sampleType, ht, suggested, compact);
-}
-
-function resolveAirSampleIdFromForm(sampleType, hazardType, suffixValue) {
-    return buildAirSampleIdFromSuffix(sampleType, suffixValue, hazardType);
-}
-
-function wireAirSampleIdTypeChange(modal, typeSelectId, hazardSelectId, containerId, prefixSpanId, suffixInputId, options = {}) {
-    const { currentSampleId = null, autoSuggestOnTypeChange = !currentSampleId, compact = false } = typeof options === 'string'
+function wireAirSampleIdTypeChange(modal, typeSelectId, prefixSpanId, suffixInputId, options = {}) {
+    const { currentSampleId = null, autoSuggestOnTypeChange = !currentSampleId } = typeof options === 'string'
         ? { currentSampleId: options }
         : options;
     const typeSelect = modal.querySelector(`#${typeSelectId}`);
-    const hazardSelect = hazardSelectId ? modal.querySelector(`#${hazardSelectId}`) : null;
-    const container = modal.querySelector(`#${containerId}`);
-    const getHazardType = () => normalizeHazardType(hazardSelect?.value || 'asbestos');
-    const refreshIdField = () => {
-        const sampleType = typeSelect?.value || 'Area';
-        const hazardType = getHazardType();
-        let suggestedId = currentSampleId;
-        if (autoSuggestOnTypeChange || !suggestedId) {
-            suggestedId = getNextAirSampleId(sampleType, hazardType, currentSampleId || '');
+    const prefixEl = modal.querySelector(`#${prefixSpanId}`);
+    const suffixEl = modal.querySelector(`#${suffixInputId}`);
+    typeSelect?.addEventListener('change', () => {
+        const sampleType = typeSelect.value;
+        if (prefixEl) prefixEl.textContent = buildAirSampleIdPrefix(sampleType);
+        if (!suffixEl) return;
+        if (autoSuggestOnTypeChange) {
+            const currentFullId = buildAirSampleIdFromSuffix(sampleType, suffixEl.value.trim());
+            if (!suffixEl.value.trim() || isAutoAirSampleId(currentFullId)) {
+                suffixEl.value = getNextAirSampleId(sampleType, currentSampleId || '').slice(buildAirSampleIdPrefix(sampleType).length);
+            }
+        } else {
+            suffixEl.value = parseAirSampleIdSuffix(suffixEl.value, sampleType);
         }
-        renderAirSampleIdField(container, sampleType, hazardType, suggestedId, compact, prefixSpanId, suffixInputId);
-    };
-    typeSelect?.addEventListener('change', refreshIdField);
-    hazardSelect?.addEventListener('change', () => {
-        if (autoSuggestOnTypeChange) refreshIdField();
-        else renderAirSampleIdField(container, typeSelect?.value || 'Area', getHazardType(), currentSampleId, compact, prefixSpanId, suffixInputId);
     });
-    refreshIdField();
 }
 
 function buildChainOfCustodyTemplateData(formData) {
@@ -954,287 +855,6 @@ function buildChainOfCustodyTemplateData(formData) {
     };
 }
 
-function normalizeDocxZipPaths(zip) {
-    if (!zip || !zip.files) return;
-    Object.keys(zip.files).forEach(path => {
-        if (!path.includes('\\')) return;
-        const normalized = path.replace(/\\/g, '/');
-        if (normalized === path) return;
-        // Access zip.files[path] directly — zip.file() may normalize the argument
-        // to forward slashes before lookup, causing it to miss backslash-keyed entries.
-        const fileObj = zip.files[path];
-        if (!fileObj) return;
-        if (!zip.files[normalized]) {
-            // Binary-safe copy: asText() on media (e.g. word\media\image1.jpeg) throws in browser.
-            const content = typeof fileObj.asUint8Array === 'function'
-                ? fileObj.asUint8Array()
-                : fileObj.asBinary();
-            zip.file(normalized, content, { binary: true });
-        }
-        delete zip.files[path];
-    });
-}
-
-function isDocxPlaceholderPart(path) {
-    return /^word[\\/](document|header\d+|footer\d+)\.xml$/i.test(path);
-}
-
-function repairDocxPlaceholderXml(xml) {
-    // Merged runs keep the FIRST original run's properties (font, size, bold,
-    // ...) so repaired placeholders render with the template's formatting
-    // instead of the document default. The Arial fallback only applies when
-    // the original run had no properties at all.
-    const fallbackRPr = '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr>';
-    const mergedRun = (tag, rPrXml) => `<w:r>${rPrXml || fallbackRPr}<w:t>${tag}</w:t></w:r>`;
-    const rPr = String.raw`(?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?`;
-    const run = String.raw`<w:r\b(?:\s[^>]*)?>${rPr}<w:t(?:\s[^>]*)?>`;
-    const runCap = String.raw`<w:r\b(?:\s[^>]*)?>(${rPr})<w:t(?:\s[^>]*)?>`;
-    const runEnd = String.raw`<\/w:t><\/w:r>`;
-    const proof = String.raw`\s*(?:<w:proofErr[^>]*\/?>\s*)*`;
-    xml = xml.replace(
-        new RegExp(`${runCap}\\{\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}\\}${runEnd}`, 'g'),
-        (_m, rPr1, tagName) => mergedRun(`{${tagName.trim()}}`, rPr1)
-    );
-    xml = xml.replace(
-        /(<w:r\b(?:\s[^>]*)?>)((?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\{([#\/]?[\w.]+)\}([^<{}]+)<\/w:t><\/w:r>/g,
-        (_m, rOpen, rPr1, tag, trailing) => `${rOpen}${rPr1}<w:t>{${tag}}</w:t></w:r>${mergedRun(trailing, rPr1)}`
-    );
-    xml = xml.replace(
-        /(<w:r\b(?:\s[^>]*)?>)((?:<w:rPr(?:\s[^>]*)?>(?:[^<]|<(?!\/w:rPr>))*<\/w:rPr>)?)<w:t(?:\s[^>]*)?>\} \{<\/w:t><\/w:r>/g,
-        (_m, rOpen, rPr1) => `${rOpen}${rPr1}<w:t>}</w:t></w:r>${mergedRun('{', rPr1)}`
-    );
-    xml = xml.replace(
-        new RegExp(`${runCap}\\{\\/${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
-        (_m, rPr1, tagName) => mergedRun(`{/${tagName.trim()}}`, rPr1)
-    );
-    xml = xml.replace(
-        new RegExp(`${runCap}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
-        (_m, rPr1, part1, part2) => {
-            const name = (part1 + part2).trim();
-            if (!/^[\w#/.]+$/.test(name)) return _m;
-            return mergedRun(`{${name}}`, rPr1);
-        }
-    );
-    xml = xml.replace(
-        new RegExp(`${runCap}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
-        (_m, rPr1, tagName) => {
-            const name = tagName.trim();
-            if (!/^[\w#/.]+$/.test(name)) return _m;
-            return mergedRun(`{${name}}`, rPr1);
-        }
-    );
-    return xml;
-}
-
-function repairDocxPlaceholderTags(zip) {
-    if (!zip || typeof zip.file !== 'function') return;
-    normalizeDocxZipPaths(zip);
-    Object.keys(zip.files).forEach(path => {
-        if (!isDocxPlaceholderPart(path)) return;
-        const file = zip.file(path);
-        if (!file) return;
-        const original = file.asText();
-        const xml = repairDocxPlaceholderXml(original);
-        if (xml !== original) zip.file(path, xml);
-    });
-}
-
-const WORKER_ROSTER_EXPIRED_DATE_FIELDS = [
-    'aheraExpired', 'medicalExpired', 'respiratorExpired', 'leadExpired', 'leadMedExpired'
-];
-
-function collectWorkerRosterExpiredDates(rosterRows) {
-    const dates = new Set();
-    (rosterRows || []).forEach(row => {
-        WORKER_ROSTER_EXPIRED_DATE_FIELDS.forEach(field => {
-            const value = row && row[field];
-            if (value && String(value).trim()) dates.add(String(value).trim());
-        });
-    });
-    return dates;
-}
-
-function colorDocxRunTextRed(xml, text) {
-    if (!xml || !text) return xml;
-    const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const textTag = `<w:t(?:\\s[^>]*)?>${escaped}</w:t>`;
-    xml = xml.replace(
-        new RegExp(`(<w:r(?:\\s[^>]*)?>\\s*<w:rPr(?:\\s[^>]*)?>)([\\s\\S]*?)(</w:rPr>\\s*${textTag}</w:r>)`, 'g'),
-        (match, open, inner, close) => {
-            if (/w:color w:val="(?:EE0000|FF0000)"/.test(inner)) return match;
-            return `${open}${inner}<w:color w:val="EE0000"/>${close}`;
-        }
-    );
-    xml = xml.replace(
-        new RegExp(`(<w:r(?:\\s[^>]*)?>)\\s*${textTag}</w:r>`, 'g'),
-        `<w:r><w:rPr><w:color w:val="EE0000"/></w:rPr><w:t>${text}</w:t></w:r>`
-    );
-    return xml;
-}
-
-function applyWorkerRosterExpiredRed(zip, rosterRows) {
-    if (!zip || typeof zip.file !== 'function') return;
-    const expiredDates = collectWorkerRosterExpiredDates(rosterRows);
-    if (expiredDates.size === 0) return;
-    Object.keys(zip.files).forEach(path => {
-        if (!isDocxPlaceholderPart(path)) return;
-        const file = zip.file(path);
-        if (!file) return;
-        let xml = file.asText();
-        let changed = false;
-        expiredDates.forEach(dateStr => {
-            const next = colorDocxRunTextRed(xml, dateStr);
-            if (next !== xml) {
-                xml = next;
-                changed = true;
-            }
-        });
-        if (changed) zip.file(path, xml);
-    });
-}
-
-const LEAD_ANALYSIS_OPTIONS = [
-    'Lead by NIOSH 7300 (ICP)',
-    'Lead by NIOSH 7303 (ICP-MS)',
-    'Lead by NIOSH 7082 (Flame AAS)'
-];
-
-function migrateProjectHazardData(project) {
-    if (!project) return;
-    (project.materials || []).forEach(m => {
-        if (!m.hazardType) m.hazardType = 'asbestos';
-    });
-    (project.airSamples || []).forEach(s => {
-        if (String(s.type || '').toLowerCase() === 'lead') {
-            s.hazardType = 'lead';
-            s.type = 'Area';
-        } else if (!s.hazardType) {
-            const id = s.sampleId || '';
-            s.hazardType = /-Pb-(AS|PS|CA)\d+$/i.test(id) ? 'lead' : 'asbestos';
-        }
-    });
-    (project.wipeSamples || []).forEach(s => {
-        if (s.type === 'Pre-Abatement') s.type = 'Pre-Start Wipe Sample';
-    });
-}
-
-function hazardTypeLabel(hazardType) {
-    return isLeadHazard(hazardType) ? 'Pb' : 'Asb';
-}
-
-function hazardTypeBadgeHtml(hazardType) {
-    const label = hazardTypeLabel(hazardType);
-    const cls = isLeadHazard(hazardType) ? 'bg-orange-100 text-orange-800' : 'bg-yellow-100 text-yellow-800';
-    return `<span class="ml-1 px-2 py-0.5 text-xs ${cls} rounded">${label}</span>`;
-}
-
-function buildMaterialHazardSelectorHtml(namePrefix, selected = 'asbestos') {
-    const ht = normalizeHazardType(selected);
-    const radioName = `${namePrefix}-hazard`;
-    return `<div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Hazard *</label>
-        <div style="display:flex; gap:16px; align-items:center;">
-            ${buildModalRadioRow(`${namePrefix}-hazard-asb`, radioName, 'asbestos', 'Asb', ht !== 'lead')}
-            ${buildModalRadioRow(`${namePrefix}-hazard-pb`, radioName, 'lead', 'Pb', ht === 'lead')}
-        </div>
-    </div>`;
-}
-
-function readMaterialHazardFromForm(namePrefix) {
-    const checked = document.querySelector(`input[name="${namePrefix}-hazard"]:checked`);
-    return normalizeHazardType(checked?.value);
-}
-
-function buildAirSampleHazardSelectorHtml(idPrefix, project, selected = '') {
-    const summary = getProjectHazardSummary(project);
-    let defaultVal = selected ? normalizeHazardType(selected) : '';
-    if (!defaultVal) {
-        if (summary.onlyAsbestos) defaultVal = 'asbestos';
-        else if (summary.onlyLead) defaultVal = 'lead';
-    }
-    const needsChoice = summary.both && !selected;
-    const isCompact = idPrefix.startsWith('edit');
-    const selectStyle = isCompact ? ' style="padding:0.3rem 0.5rem; font-size:0.875rem;"' : '';
-    const selectCls = isCompact ? 'w-full border rounded bg-white' : 'w-full p-3 border rounded-lg bg-white';
-    return `<div>
-        <label class="block ${isCompact ? 'text-xs' : 'text-sm'} font-medium text-gray-700" style="margin-bottom:${isCompact ? '2px' : '4px'};">Hazard *</label>
-        <select id="${idPrefix}-hazard" class="${selectCls}"${selectStyle}>
-            ${needsChoice ? '<option value="" selected>— Select —</option>' : ''}
-            <option value="asbestos" ${defaultVal === 'asbestos' ? 'selected' : ''}>Asb</option>
-            <option value="lead" ${defaultVal === 'lead' ? 'selected' : ''}>Pb</option>
-        </select>
-    </div>`;
-}
-
-function isWashoeClient(name) {
-    const n = (name || '').trim().toLowerCase();
-    return ['washoe county school district', 'washoe county sd', 'washoe csd'].includes(n);
-}
-
-function getNextWipeSampleId() {
-    const projectNum = currentProject?.projectNumber || 'PJ';
-    const prefix = `${projectNum}-W`;
-    let nextNum = 1;
-    (currentProject?.wipeSamples || []).forEach(s => {
-        const id = s.sampleId || '';
-        if (!id.startsWith(prefix)) return;
-        const part = id.slice(prefix.length);
-        if (/^\d+$/.test(part)) nextNum = Math.max(nextNum, parseInt(part, 10) + 1);
-    });
-    return `${prefix}${String(nextNum).padStart(2, '0')}`;
-}
-
-function formatWipeSampleTypeForCoc(type) {
-    const value = String(type || '').trim();
-    if (!value) return 'Wipe';
-    if (/clearance/i.test(value)) return 'Clearance';
-    if (/pre[-\s]?start/i.test(value) || /pre[-\s]?abatement/i.test(value)) return 'Pre-Start';
-    return value;
-}
-
-function resolveWipeContainmentName(sample, project) {
-    const raw = sample.containmentName
-        || (sample.containmentId && (project.containments || []).find(c => c.id === sample.containmentId)?.name)
-        || '';
-    return raw ? getContainmentDisplayName(raw) : '';
-}
-
-function syncWipeSampleIdsForProjectNumber(oldProjectNumber, newProjectNumber) {
-    if (!oldProjectNumber || !newProjectNumber || oldProjectNumber === newProjectNumber) return;
-    const escapedOld = oldProjectNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`^${escapedOld}-W(\\d{2})$`, 'i');
-    (currentProject.wipeSamples || []).forEach(sample => {
-        const id = sample.sampleId || '';
-        const match = id.match(re);
-        if (match) sample.sampleId = `${newProjectNumber}-W${match[1]}`;
-    });
-}
-
-function getWipeContextFromContainment(containment) {
-    const buildingName = containment?.buildingName || '';
-    const spaceName = (containment?.spaces || [])
-        .map(s => s.spaceName || s.name || '')
-        .filter(Boolean)
-        .join(', ');
-    return { buildingName, spaceName };
-}
-
-function buildLeadAnalysisOptionsHtml(selectedValue) {
-    const normalized = selectedValue === 'Lead by Flame AAS NIOSH 7082'
-        ? 'Lead by NIOSH 7082 (Flame AAS)'
-        : selectedValue;
-    return LEAD_ANALYSIS_OPTIONS.map(opt =>
-        `<option value="${escapeHtml(opt)}"${opt === normalized ? ' selected' : ''}>${escapeHtml(opt)}</option>`
-    ).join('');
-}
-
-function projectHasAutoGeneratedSamples(project) {
-    const p = project || currentProject;
-    if (!p) return false;
-    return ((p.airSamples || []).some(s => s.autoCreated)
-        || (p.wipeSamples || []).some(s => s.autoCreated));
-}
-
 // Export for onclick handlers
 window.updateSampleCalc = updateSampleCalc;
 
@@ -1243,7 +863,6 @@ window.updateSampleCalc = updateSampleCalc;
 // ============================================
 
 function openEditProjectModal() {
-    closeAllModals();
     // Create a larger modal for all fields
     const modal = document.createElement('div');
     modal.className = 'modal active';
@@ -1284,9 +903,15 @@ function openEditProjectModal() {
                             <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Name</label>
                             <input type="text" id="edit-client-name" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientName || '')}">
                         </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Phone</label>
-                            <input type="tel" id="edit-client-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientPhone || '')}">
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Phone</label>
+                                <input type="tel" id="edit-client-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientPhone || '')}">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Client Fax</label>
+                                <input type="tel" id="edit-client-fax" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.clientFax || '')}">
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1314,9 +939,15 @@ function openEditProjectModal() {
                             <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Name</label>
                             <input type="text" id="edit-contractor" class="w-full py-2 px-3 text-sm border rounded-lg" placeholder="Contractor company name" value="${escapeHtml(currentProject.contractor || '')}">
                         </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Phone Number</label>
-                            <input type="tel" id="edit-contractor-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.contractorPhone || '')}">
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Phone Number</label>
+                                <input type="tel" id="edit-contractor-phone" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.contractorPhone || '')}">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-700 mb-0.5">Contractor Fax</label>
+                                <input type="tel" id="edit-contractor-fax" class="w-full py-2 px-3 text-sm border rounded-lg" value="${escapeHtml(currentProject.contractorFax || '')}">
+                            </div>
                         </div>
                         <div class="grid grid-cols-2 gap-2">
                             <div>
@@ -1394,13 +1025,12 @@ function openEditProjectModal() {
             alert('Please enter a site name');
             return;
         }
-
+        
         const previousProjectNumber = currentProject.projectNumber || '';
 
         // Update all fields
         currentProject.projectNumber = projectNumber;
         syncAirSampleIdsForProjectNumber(previousProjectNumber, projectNumber);
-        syncWipeSampleIdsForProjectNumber(previousProjectNumber, projectNumber);
         currentProject.siteName = siteName;
         currentProject.name = siteName;
         currentProject.siteAddress = siteAddress;
@@ -1409,9 +1039,11 @@ function openEditProjectModal() {
         currentProject.foremanName = document.getElementById('edit-foreman-name').value.trim();
         currentProject.foremanPhone = document.getElementById('edit-foreman-phone').value.trim();
         currentProject.contractorPhone = document.getElementById('edit-contractor-phone').value.trim();
+        currentProject.contractorFax = document.getElementById('edit-contractor-fax').value.trim();
         currentProject.clientContactName = document.getElementById('edit-contact-name').value.trim();
         currentProject.clientContactPhone = document.getElementById('edit-contact-phone').value.trim();
         currentProject.clientPhone = document.getElementById('edit-client-phone').value.trim();
+        currentProject.clientFax = document.getElementById('edit-client-fax').value.trim();
         currentProject.projectFolderPath = document.getElementById('edit-project-folder')?.value.trim() || undefined;
         
         modal.remove();
@@ -1539,7 +1171,6 @@ function openAddSpaceModal(buildingId) {
 
 // Combined modal for adding/editing space with material assignment
 function openSpaceMaterialModal(building, existingSpace) {
-    closeAllModals();
     const isEdit = !!existingSpace;
     const projectMaterials = currentProject.materials || [];
     
@@ -1559,7 +1190,7 @@ function openSpaceMaterialModal(building, existingSpace) {
                     <input type="checkbox" id="mat-check-${pm.id}" class="h-4 w-4 rounded border-gray-300 text-indigo-600"
                            ${assigned ? 'checked' : ''} onchange="toggleMaterialRow('${pm.id}')">
                     <label for="mat-check-${pm.id}" class="modal-check-label" style="flex:1;">
-                        <span class="modal-check-title">${escapeHtml(pm.name)} ${hazardTypeLabel(pm.hazardType)}</span>
+                        <span class="modal-check-title">${escapeHtml(pm.name)}</span>
                         <span class="modal-check-subtitle">(${remaining > 0 ? remaining : 0} ${displayUnit(pm.unit)} remaining)</span>
                     </label>
                     <div class="flex items-center gap-2" id="mat-qty-row-${pm.id}" style="${assigned ? '' : 'opacity: 0.4'}">
@@ -1690,8 +1321,7 @@ function openSpaceMaterialModal(building, existingSpace) {
             if (!newName) return;
             const newQty = parseFloat(row.querySelector('.new-mat-qty')?.value) || 0;
             const newUnit = row.querySelector('.new-mat-unit')?.value || 'SF';
-            const rowHazard = row.querySelector('input[name$="-hazard"]:checked')?.value || 'asbestos';
-            const siteMat = findOrCreateSiteMaterial(newName, newUnit, newQty, rowHazard);
+            const siteMat = findOrCreateSiteMaterial(newName, newUnit, newQty);
             if (!siteMat) return;
 
             if (newQty > 0) {
@@ -1728,16 +1358,10 @@ function openSpaceMaterialModal(building, existingSpace) {
 
     const newMatContainer = modal.querySelector('#space-new-materials');
     const addInlineMatBtn = modal.querySelector('#add-inline-material-btn');
-    let inlineMatRowCounter = 0;
-    const buildNewMatRow = () => {
-        const rowId = `inline-mat-${++inlineMatRowCounter}`;
-        return `<div class="new-mat-row modal-material-row" style="flex-wrap:wrap;">
+    const buildNewMatRow = () => `
+        <div class="new-mat-row modal-material-row">
             <button type="button" class="new-mat-remove" style="background:transparent;border:none;cursor:pointer;color:var(--text-muted);font-size:18px;line-height:1;padding:0;width:1.25rem;" title="Remove">&times;</button>
-            <input type="text" class="new-mat-name" style="flex:1;min-width:120px;width:auto !important;" placeholder="Material Name">
-            <div style="display:flex;gap:10px;align-items:center;">
-                ${buildModalRadioRow(`${rowId}-hazard-asb`, `${rowId}-hazard`, 'asbestos', 'Asb', true, 'style="padding:0;margin:0;"')}
-                ${buildModalRadioRow(`${rowId}-hazard-pb`, `${rowId}-hazard`, 'lead', 'Pb', false, 'style="padding:0;margin:0;"')}
-            </div>
+            <input type="text" class="new-mat-name" style="flex:1;min-width:0;width:auto !important;" placeholder="Material Name">
             <input type="number" class="new-mat-qty" style="width:5.5rem !important;flex-shrink:0;" min="0" step="any" placeholder="Qty">
             <select class="new-mat-unit" style="width:auto !important;flex-shrink:0;padding:7px 8px;">
                 <option value="SF">ft\u00b2</option>
@@ -1745,8 +1369,8 @@ function openSpaceMaterialModal(building, existingSpace) {
                 <option value="EA">EA</option>
                 <option value="CF">ft\u00b3</option>
             </select>
-        </div>`;
-    };
+        </div>
+    `;
     if (addInlineMatBtn && newMatContainer) {
         addInlineMatBtn.addEventListener('click', () => {
             newMatContainer.insertAdjacentHTML('beforeend', buildNewMatRow());
@@ -1803,7 +1427,6 @@ function openAddMaterialModal() {
                     </select>
                 </div>
             </div>
-            ${buildMaterialHazardSelectorHtml('new-material', 'asbestos')}
             ${buildModalCheckboxRow('new-material-friable', '', '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
@@ -1819,8 +1442,7 @@ function openAddMaterialModal() {
             name,
             totalQuantity: parseFloat(document.getElementById('new-material-quantity').value) || 0,
             unit: document.getElementById('new-material-unit').value,
-            friable: document.getElementById('new-material-friable').checked,
-            hazardType: readMaterialHazardFromForm('new-material')
+            friable: document.getElementById('new-material-friable').checked
         });
         saveCurrentProject();
         renderProject();
@@ -1858,7 +1480,6 @@ function openEditMaterialModal(materialId) {
                 <label class="block text-sm font-medium text-gray-700 mb-1">HMR# (optional)</label>
                 <input type="text" id="edit-material-hmr" class="w-full p-3 border rounded-lg" placeholder="e.g., 01" value="${escapeHtml(material.hmrNumber || '')}">
             </div>
-            ${buildMaterialHazardSelectorHtml('edit-material', material.hazardType)}
             ${buildModalCheckboxRow('edit-material-friable', '', material.friable ? 'checked' : '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
@@ -1881,7 +1502,6 @@ function openEditMaterialModal(materialId) {
         material.unit = newUnit;
         material.hmrNumber = (document.getElementById('edit-material-hmr').value || '').trim() || undefined;
         material.friable = document.getElementById('edit-material-friable').checked;
-        material.hazardType = readMaterialHazardFromForm('edit-material');
         saveCurrentProject();
         renderProject();
     });
@@ -2260,7 +1880,6 @@ async function printBulkSampleForm(project, material, bulkSamples, formData = {}
         }
 
         const zip = new PizZipClass(arrayBuffer);
-        repairDocxPlaceholderTags(zip);
         const docOptions = {
             paragraphLoop: true,
             linebreaks: true,
@@ -2297,404 +1916,6 @@ async function printBulkSampleForm(project, material, bulkSamples, formData = {}
     }
 }
 
-// ============================================
-// WIPE SAMPLES (LEAD)
-// ============================================
-
-function openAddWipeSampleModal() {
-    if (!getProjectHazardSummary(currentProject).hasLead) {
-        showNotification('Wipe samples require at least one Pb site material.', true);
-        return;
-    }
-    const containmentOptions = (currentProject.containments || []).map(c =>
-        `<option value="${c.id}">${escapeHtml(getContainmentDisplayName(c.name))}</option>`
-    ).join('');
-
-    const modal = createModal('Add Wipe Sample', `
-        <div class="space-y-4">
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample ID</label>
-                    <input type="text" id="wipe-sample-id" class="w-full p-3 border rounded-lg font-mono bg-gray-50" value="${escapeHtml(getNextWipeSampleId())}" readonly>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Date Sampled</label>
-                    <input type="date" id="wipe-sample-date" class="w-full p-3 border rounded-lg" value="${getTodayLocal()}">
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
-                    <select id="wipe-sample-type" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="Clearance">Clearance</option>
-                        <option value="Pre-Start Wipe Sample">Pre-Start Wipe Sample</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Containment</label>
-                    <select id="wipe-sample-containment" class="w-full p-3 border rounded-lg bg-white" required>
-                        <option value="">-- Select --</option>
-                        ${containmentOptions}
-                    </select>
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Substrate</label>
-                    <input type="text" id="wipe-sample-substrate" class="w-full p-3 border rounded-lg" placeholder="e.g., Concrete, Drywall">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Component</label>
-                    <input type="text" id="wipe-sample-component" class="w-full p-3 border rounded-lg" placeholder="e.g., Floor, Window sill">
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">ft²</label>
-                    <input type="text" id="wipe-sample-sqft" class="w-full p-3 border rounded-lg" placeholder="Square footage sampled">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Location / Comments</label>
-                    <input type="text" id="wipe-sample-location" class="w-full p-3 border rounded-lg" placeholder="Optional">
-                </div>
-            </div>
-        </div>
-    `, () => {
-        const containmentId = document.getElementById('wipe-sample-containment').value;
-        if (!containmentId) { showNotification('Select a containment.', true); return false; }
-        const containment = currentProject.containments?.find(c => c.id === containmentId);
-        const ctx = getWipeContextFromContainment(containment || {});
-        if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
-        currentProject.wipeSamples.push({
-            id: generateId(),
-            sampleId: document.getElementById('wipe-sample-id').value.trim() || getNextWipeSampleId(),
-            type: document.getElementById('wipe-sample-type').value,
-            containmentId,
-            containmentName: containment?.name || '',
-            buildingName: ctx.buildingName,
-            spaceName: ctx.spaceName,
-            substrate: document.getElementById('wipe-sample-substrate').value.trim(),
-            component: document.getElementById('wipe-sample-component').value.trim(),
-            squareFeet: document.getElementById('wipe-sample-sqft').value.trim(),
-            locationComment: document.getElementById('wipe-sample-location').value.trim(),
-            date: document.getElementById('wipe-sample-date').value || getTodayLocal(),
-            inspectorName: typeof getInspectorProfile === 'function' ? (getInspectorProfile().name || '') : '',
-            autoCreated: false,
-            createdAt: Date.now()
-        });
-        saveCurrentProject();
-        renderProject();
-        _shellRefresh();
-    });
-}
-
-function openEditWipeSampleModal(sampleId) {
-    const sample = (currentProject.wipeSamples || []).find(s => s.id === sampleId);
-    if (!sample) return;
-    const containmentOptions = (currentProject.containments || []).map(c =>
-        `<option value="${c.id}" ${c.id === sample.containmentId ? 'selected' : ''}>${escapeHtml(getContainmentDisplayName(c.name))}</option>`
-    ).join('');
-
-    const modal = createModal('Edit Wipe Sample', `
-        <div class="space-y-4">
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample ID</label>
-                    <input type="text" id="wipe-edit-sample-id" class="w-full p-3 border rounded-lg font-mono" value="${escapeHtml(sample.sampleId || '')}">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Date Sampled</label>
-                    <input type="date" id="wipe-edit-date" class="w-full p-3 border rounded-lg" value="${sample.date || getTodayLocal()}">
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
-                    <select id="wipe-edit-type" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="Clearance" ${sample.type === 'Clearance' ? 'selected' : ''}>Clearance</option>
-                        <option value="Pre-Start Wipe Sample" ${sample.type === 'Pre-Start Wipe Sample' || sample.type === 'Pre-Abatement' ? 'selected' : ''}>Pre-Start Wipe Sample</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Containment</label>
-                    <select id="wipe-edit-containment" class="w-full p-3 border rounded-lg bg-white">
-                        ${containmentOptions}
-                    </select>
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Substrate</label>
-                    <input type="text" id="wipe-edit-substrate" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.substrate || '')}">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Component</label>
-                    <input type="text" id="wipe-edit-component" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.component || '')}">
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">ft²</label>
-                    <input type="text" id="wipe-edit-sqft" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.squareFeet || '')}">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Location / Comments</label>
-                    <input type="text" id="wipe-edit-location" class="w-full p-3 border rounded-lg" value="${escapeHtml(sample.locationComment || '')}">
-                </div>
-            </div>
-        </div>
-    `, () => {
-        const containmentId = document.getElementById('wipe-edit-containment').value;
-        const containment = currentProject.containments?.find(c => c.id === containmentId);
-        const ctx = getWipeContextFromContainment(containment || sample);
-        Object.assign(sample, {
-            sampleId: document.getElementById('wipe-edit-sample-id').value.trim() || sample.sampleId,
-            type: document.getElementById('wipe-edit-type').value,
-            containmentId,
-            containmentName: containment?.name || sample.containmentName || '',
-            buildingName: ctx.buildingName || sample.buildingName || '',
-            spaceName: ctx.spaceName || sample.spaceName || '',
-            substrate: document.getElementById('wipe-edit-substrate').value.trim(),
-            component: document.getElementById('wipe-edit-component').value.trim(),
-            squareFeet: document.getElementById('wipe-edit-sqft').value.trim(),
-            locationComment: document.getElementById('wipe-edit-location').value.trim(),
-            date: document.getElementById('wipe-edit-date').value || sample.date
-        });
-        saveCurrentProject();
-        renderProject();
-        _shellRefresh();
-    });
-
-    const editFooter = modal.querySelector('.modal-footer');
-    if (editFooter) {
-        editFooter.classList.remove('justify-end');
-        editFooter.classList.add('justify-between');
-        const deleteBtn = document.createElement('button');
-        deleteBtn.type = 'button';
-        deleteBtn.className = 'btn btn-danger';
-        deleteBtn.textContent = 'Delete Sample';
-        deleteBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!confirm('Delete this wipe sample? This cannot be undone.')) return;
-            dismissModal(modal);
-            deleteWipeSample(sampleId);
-        });
-        editFooter.insertBefore(deleteBtn, editFooter.firstChild);
-    }
-}
-
-function deleteWipeSample(sampleId) {
-    currentProject.wipeSamples = (currentProject.wipeSamples || []).filter(s => s.id !== sampleId);
-    saveCurrentProject();
-    renderProject();
-    _shellRefresh();
-}
-
-function openPrintWipeSamplesModal() {
-    const wipeSamples = currentProject.wipeSamples || [];
-    if (wipeSamples.length === 0) {
-        showNotification('No wipe samples to print.', true);
-        return;
-    }
-
-    const primarySample = wipeSamples[0] || {};
-    const inspectorName = primarySample.inspectorName || (typeof getInspectorProfile === 'function' ? getInspectorProfile().name : '') || '';
-    const inspectorEmail = (typeof getInspectorProfile === 'function' ? getInspectorProfile().email : '') || '';
-
-    const sampleCheckboxesHtml = wipeSamples.map(sample => buildModalSelectionOption(
-        `print-wipe-sample-${sample.id}`,
-        'print-wipe-sample-checkbox',
-        sample.id,
-        true,
-        escapeHtml(sample.sampleId || sample.id || 'No ID'),
-        `${escapeHtml(sample.type || 'Wipe')} · ${escapeHtml(sample.containmentName || '')}`
-    )).join('');
-
-    const modal = createModal('Print Lead Wipe Chain of Custody', `
-        <p class="text-sm text-gray-600 mb-4">Select wipe samples and complete the form to generate the lab submission.</p>
-        <div class="space-y-4">
-            <div>
-                <div class="flex items-center justify-between mb-2">
-                    <label class="block text-sm font-medium text-gray-700">Select Samples to Print</label>
-                    <div class="flex gap-2">
-                        <button type="button" id="print-wipe-select-all" class="text-xs font-medium" style="color:#4f46e5;">Select All</button>
-                        <span class="text-gray-300">|</span>
-                        <button type="button" id="print-wipe-select-none" class="text-xs font-medium" style="color:#4f46e5;">Select None</button>
-                    </div>
-                </div>
-                <div id="print-wipe-samples-list" class="modal-selection-box max-h-48 overflow-y-auto">
-                    ${sampleCheckboxesHtml}
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Collected By</label>
-                    <input type="text" id="print-wipe-inspector" class="w-full p-2.5 border rounded-lg" value="${escapeHtml(inspectorName)}">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Bill 2 / Lab Account Number</label>
-                    <input type="text" id="print-wipe-lab-number" class="w-full p-2.5 border rounded-lg" placeholder="e.g., LAB-001">
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Send Results To (Email)</label>
-                    <input type="email" id="print-wipe-email" class="w-full p-2.5 border rounded-lg" value="${escapeHtml(inspectorEmail)}">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Laboratory</label>
-                    <input type="text" id="print-wipe-lab" class="w-full p-2.5 border rounded-lg" placeholder="e.g., FACS, EMSL">
-                </div>
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Type of Analysis</label>
-                    <select id="print-wipe-analysis" class="w-full p-2.5 border rounded-lg bg-white">
-                        ${buildLeadAnalysisOptionsHtml(LEAD_ANALYSIS_OPTIONS[0])}
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Turn Around Time</label>
-                    <input type="text" id="print-wipe-turnaround" class="w-full p-2.5 border rounded-lg" placeholder="e.g., 24-Hour, 5-Day">
-                </div>
-            </div>
-            <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Special Instructions</label>
-                <textarea id="print-wipe-instructions" rows="2" class="w-full p-2.5 border rounded-lg" placeholder="Optional special instructions for the lab..."></textarea>
-            </div>
-        </div>
-    `, async () => {
-        const selectedIds = Array.from(document.querySelectorAll('.print-wipe-sample-checkbox:checked')).map(cb => cb.value);
-        if (selectedIds.length === 0) {
-            showNotification('Please select at least one sample to print.', true);
-            return false;
-        }
-        const selectedSamples = wipeSamples.filter(s => selectedIds.includes(s.id));
-        const formData = {
-            inspectorName: document.getElementById('print-wipe-inspector').value.trim(),
-            inspectorEmail: document.getElementById('print-wipe-email').value.trim(),
-            labNumber: document.getElementById('print-wipe-lab-number').value.trim(),
-            lab: document.getElementById('print-wipe-lab').value.trim(),
-            analysisType: document.getElementById('print-wipe-analysis').value,
-            turnAroundTime: document.getElementById('print-wipe-turnaround').value.trim(),
-            specialInstructions: document.getElementById('print-wipe-instructions').value.trim()
-        };
-        await printWipeSampleForm(currentProject, selectedSamples, formData);
-    });
-
-    setTimeout(() => {
-        const cbs = document.querySelectorAll('.print-wipe-sample-checkbox');
-        const selectAllBtn = document.getElementById('print-wipe-select-all');
-        const selectNoneBtn = document.getElementById('print-wipe-select-none');
-        selectAllBtn?.addEventListener('click', () => { cbs.forEach(cb => cb.checked = true); });
-        selectNoneBtn?.addEventListener('click', () => { cbs.forEach(cb => cb.checked = false); });
-    }, 50);
-}
-
-async function printWipeSampleForm(project, wipeSamples, formData = {}) {
-    try {
-        const DocxtemplaterClass = window.Docxtemplater || (typeof Docxtemplater !== 'undefined' ? Docxtemplater : null);
-        const PizZipClass = window.PizZip || (typeof PizZip !== 'undefined' ? PizZip : null);
-        if (!DocxtemplaterClass || !PizZipClass) {
-            showNotification('Document generation library is not loaded. Please refresh the page.', true);
-            return;
-        }
-
-        const formatDate = (dateString) => {
-            if (!dateString) return '';
-            const date = new Date(dateString + (dateString.includes('T') ? '' : 'T00:00:00'));
-            if (isNaN(date.getTime())) return '';
-            return `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}/${date.getFullYear()}`;
-        };
-
-        const formInspectorName = formData.inspectorName || '';
-        const sampleDates = wipeSamples.map(s => s.date).filter(Boolean);
-        const uniqueDates = [...new Set(sampleDates)].sort();
-        const dateCollected = uniqueDates.length > 1
-            ? `${formatDate(uniqueDates[0])} - ${formatDate(uniqueDates[uniqueDates.length - 1])}`
-            : (uniqueDates.length === 1 ? formatDate(uniqueDates[0]) : '');
-
-        const samplesWipe = wipeSamples.map(sample => ({
-            sampleID: sample.sampleId || sample.id || '',
-            sampleType: formatWipeSampleTypeForCoc(sample.type),
-            containmentName: resolveWipeContainmentName(sample, project),
-            substrate: sample.substrate || '',
-            component: sample.component || '',
-            quantity: sample.squareFeet || '',
-            buildingName: sample.buildingName || '',
-            spaceName: sample.spaceName || '',
-            locationComment: sample.locationComment || ''
-        }));
-
-        const templateData = {
-            date: formatDate(getTodayLocal()),
-            projectNumber: project.projectNumber || '',
-            siteName: project.siteName || '',
-            clientName: project.clientName || '',
-            client: project.clientName || '',
-            inspectorName: formInspectorName,
-            dateCollected,
-            analysisType: formData.analysisType || LEAD_ANALYSIS_OPTIONS[0],
-            turnAroundTime: formData.turnAroundTime || '',
-            spectialInstructions: formData.specialInstructions || '',
-            inspectorEmail: formData.inspectorEmail || '',
-            laboratory: formData.lab || '',
-            samplesWipe,
-            ...buildChainOfCustodyTemplateData(formData)
-        };
-
-        showNotification('Loading Lead Wipe template...');
-        const templateName = 'Lead Wipe Template.docx';
-        let arrayBuffer;
-        if (window.electronAPI?.readTemplate) {
-            const result = await window.electronAPI.readTemplate(templateName);
-            if (!result.success) throw new Error(result.error || 'Failed to read template');
-            const buf = result.data;
-            arrayBuffer = buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-        } else {
-            const response = await fetch(`./templates/${templateName}?t=${Date.now()}`, { cache: 'no-store' });
-            if (!response.ok) throw new Error(`Failed to load template: ${response.statusText}`);
-            arrayBuffer = await response.arrayBuffer();
-        }
-
-        const zip = new PizZipClass(arrayBuffer);
-        repairDocxPlaceholderTags(zip);
-        const doc = new DocxtemplaterClass(zip, {
-            paragraphLoop: true,
-            linebreaks: true,
-            delimiters: { start: '{', end: '}' },
-            nullGetter: () => ''
-        });
-        doc.render(templateData);
-        const outZip = doc.getZip();
-
-        const blob = outZip.generate({
-            type: 'blob',
-            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        });
-
-        const fileName = `Lead_Wipe_COC_${project.projectNumber || 'Project'}_${formatDate(getTodayLocal()).replace(/\//g, '_')}.docx`;
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = fileName;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(url);
-        showNotification('Lead wipe COC document generated successfully.');
-    } catch (error) {
-        console.error('Error generating lead wipe document:', error);
-        const msg = String(error?.message || error || '');
-        if (/duplicate open tag|duplicate close tag|TemplateError/i.test(msg) || error?.properties?.id?.includes?.('duplicate')) {
-            showNotification('Lead wipe template has broken placeholders (often in the footer). Restart the app, then try again. If it persists, re-save templates/Lead Wipe Template.docx from the repo copy.', true);
-        } else {
-            showNotification('Failed to generate document. Check the console for details.', true);
-        }
-    }
-}
-
 function openAddMaterialToSpaceModal(buildingId, spaceId) {
     const building = currentProject.buildings?.find(b => b.id === buildingId);
     const space = building?.spaces?.find(s => s.id === spaceId);
@@ -2719,9 +1940,6 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Or Enter Custom Material Name</label>
                 <input type="text" id="space-material-name" class="w-full p-3 border rounded-lg" placeholder="e.g., 9x9 VAT">
-            </div>
-            <div id="space-custom-hazard-wrap">
-                ${buildMaterialHazardSelectorHtml('space-custom', 'asbestos')}
             </div>
             <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -2754,8 +1972,7 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
                 unit = siteMaterial.unit || unit;
             }
         } else if (name) {
-            const customHazard = readMaterialHazardFromForm('space-custom');
-            siteMaterial = findOrCreateSiteMaterial(name, unit, quantity, customHazard);
+            siteMaterial = findOrCreateSiteMaterial(name, unit, quantity);
             if (siteMaterial) {
                 name = siteMaterial.name;
                 unit = siteMaterial.unit || unit;
@@ -2811,7 +2028,6 @@ function openVisualInspectionModal(inspectionType, containmentName) {
         : 'Final Visual Inspection';
 
     return new Promise((resolve) => {
-        closeAllModals();
         const modal = document.createElement('div');
         modal.className = 'modal active';
 
@@ -2917,7 +2133,22 @@ function openVisualInspectionModal(inspectionType, containmentName) {
  * Only for non-regulated areas. Sets containmentId (dropdown) instead of location text.
  */
 function createClearanceAirSamples(containment, inspectionData) {
+    const projectNumber = currentProject.projectNumber || 'PJ00000';
     const existingSamples = currentProject.airSamples || [];
+
+    // Find the next sequence number for clearance samples
+    const prefix = `${projectNumber}-CA`;
+    let maxSeq = 0;
+    existingSamples.forEach(s => {
+        const sId = s.sampleId || s.id || '';
+        if (sId.startsWith(prefix)) {
+            const part = sId.replace(prefix, '');
+            if (/^\d+$/.test(part)) {
+                const num = parseInt(part, 10);
+                if (num > maxSeq) maxSeq = num;
+            }
+        }
+    });
 
     // Auto-generated samples: default date to day after creation (inspector can change in sample details)
     const defaultSampleDate = getTomorrowLocal();
@@ -2927,12 +2158,11 @@ function createClearanceAirSamples(containment, inspectionData) {
 
     // Create 5 clearance samples - use containment dropdown, not location text
     for (let i = 1; i <= 5; i++) {
-        const sampleId = getNextAirSampleId('Clearance', 'asbestos');
+        const sampleId = `${prefix}${String(maxSeq + i).padStart(3, '0')}`;
         const newSample = {
             id: generateId(),
             sampleId: sampleId,
             type: 'Clearance',
-            hazardType: 'asbestos',
             date: defaultSampleDate,
             startTime: '',
             stopTime: '',
@@ -2952,64 +2182,6 @@ function createClearanceAirSamples(containment, inspectionData) {
 
     currentProject.airSamples = existingSamples;
     console.log(`Created 5 clearance air samples for containment: ${containmentName}`);
-}
-
-/**
- * Create 1 clearance wipe sample when transitioning to Containment Clearance (lead projects).
- */
-function createClearanceWipeSample(containment, inspectionData) {
-    if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
-    const { buildingName, spaceName } = getWipeContextFromContainment(containment);
-    const containmentId = containment?.id || '';
-    const containmentName = (containment?.name && containment.name.trim()) ? containment.name.trim() : 'Unknown Containment';
-    const newSample = {
-        id: generateId(),
-        sampleId: getNextWipeSampleId(),
-        type: 'Clearance',
-        containmentId,
-        containmentName,
-        buildingName,
-        spaceName,
-        substrate: '',
-        component: '',
-        squareFeet: '',
-        locationComment: '',
-        date: getTomorrowLocal(),
-        inspectorName: inspectionData?.inspectorName || '',
-        autoCreated: true,
-        createdAt: Date.now()
-    };
-    currentProject.wipeSamples.push(newSample);
-    console.log(`Created clearance wipe sample for containment: ${containmentName}`);
-}
-
-/**
- * Create 1 pre-start wipe sample for Washoe CSD lead projects at containment creation.
- */
-function createPreAbatementWipeSample(containment, inspectorName) {
-    if (!currentProject.wipeSamples) currentProject.wipeSamples = [];
-    const { buildingName, spaceName } = getWipeContextFromContainment(containment);
-    const containmentId = containment?.id || '';
-    const containmentName = (containment?.name && containment.name.trim()) ? containment.name.trim() : 'Unknown Containment';
-    const newSample = {
-        id: generateId(),
-        sampleId: getNextWipeSampleId(),
-        type: 'Pre-Start Wipe Sample',
-        containmentId,
-        containmentName,
-        buildingName,
-        spaceName,
-        substrate: '',
-        component: '',
-        squareFeet: '',
-        locationComment: '',
-        date: getTodayLocal(),
-        inspectorName: inspectorName || '',
-        autoCreated: true,
-        createdAt: Date.now()
-    };
-    currentProject.wipeSamples.push(newSample);
-    console.log(`Created pre-start wipe sample for containment: ${containmentName}`);
 }
 
 function buildModalCheckboxRow(id, inputClass, extraAttrs, labelHtml, rowClass = '', labelClass = '') {
@@ -3036,128 +2208,12 @@ function buildModalSelectionOption(id, checkboxClass, valueAttr, checked, titleH
     return `<div class="modal-selection-option">${buildModalCheckboxRow(id, checkboxClass, attrs, label)}</div>`;
 }
 
-function getContainmentMaterialAllocations(buildingId, excludeContainmentId = null) {
-    const map = new Map();
-    (currentProject.containments || []).forEach(c => {
-        if (excludeContainmentId && c.id === excludeContainmentId) return;
-        if (buildingId && c.buildingId !== buildingId) return;
-        (c.spaces || []).forEach(cs => {
-            const spaceName = cs.spaceName || cs.name;
-            if (!spaceName) return;
-            (cs.materials || []).forEach(mat => {
-                if (!mat.name) return;
-                const key = `${spaceName}::${mat.name}`;
-                map.set(key, (map.get(key) || 0) + (parseFloat(mat.quantity) || 0));
-            });
-        });
-    });
-    return map;
-}
-
-function readContainmentSpacesFromPicker(listSelector, building, excludeContainmentId = null) {
-    const materialAllocations = getContainmentMaterialAllocations(building.id, excludeContainmentId);
-    const listEl = document.querySelector(listSelector);
-    if (!listEl) {
-        return { ok: false, error: 'Spaces list not found.' };
-    }
-
-    const selectedSpaces = [];
-    const selectedSpaceCheckboxes = listEl.querySelectorAll('.containment-space-cb:checked');
-    if (selectedSpaceCheckboxes.length === 0) {
-        return { ok: false, error: 'Please select at least one space for this containment.' };
-    }
-
-    for (const checkbox of selectedSpaceCheckboxes) {
-        const spaceId = checkbox.dataset.spaceId;
-        const spaceName = checkbox.dataset.spaceName || '';
-        const space = building.spaces?.find(s => s.id === spaceId);
-        if (!space) continue;
-
-        const matCbs = listEl.querySelectorAll(
-            `.containment-material-cb[data-space-id="${CSS.escape(spaceId)}"]:checked`
-        );
-        const selectedMaterials = [];
-
-        for (const mc of matCbs) {
-            const idx = parseInt(mc.dataset.materialIndex, 10);
-            const m = (space.materials || [])[idx];
-            if (!m) continue;
-
-            const row = mc.closest('.modal-check-row');
-            const qtyInput = row?.querySelector('.containment-material-qty');
-            const qty = parseFloat(qtyInput?.value);
-            const spaceQty = parseFloat(m.quantity) || 0;
-            const key = `${spaceName}::${m.name}`;
-            const allocatedElsewhere = materialAllocations.get(key) || 0;
-            const maxAllowed = Math.max(0, spaceQty - allocatedElsewhere);
-
-            if (!Number.isFinite(qty) || qty <= 0) {
-                return {
-                    ok: false,
-                    error: `Enter a quantity greater than 0 for ${m.name} in ${space.name}.`
-                };
-            }
-            if (qty > maxAllowed + 0.0001) {
-                return {
-                    ok: false,
-                    error: `${m.name} in ${space.name} cannot exceed ${maxAllowed} ${displayUnit(m.unit)} available for this containment.`
-                };
-            }
-
-            selectedMaterials.push({
-                materialId: m.materialId || null,
-                name: m.name,
-                quantity: qty,
-                unit: m.unit || ''
-            });
-        }
-
-        selectedSpaces.push({
-            id: space.id,
-            spaceName: space.name,
-            name: space.name,
-            materials: selectedMaterials
-        });
-    }
-
-    const materialsMap = new Map();
-    selectedSpaces.forEach(sp => {
-        (sp.materials || []).forEach(mat => {
-            const key = `${mat.name}_${mat.unit}`;
-            if (!materialsMap.has(key)) {
-                materialsMap.set(key, {
-                    materialId: mat.materialId || null,
-                    materialName: mat.name,
-                    name: mat.name,
-                    totalQuantity: 0,
-                    quantity: 0,
-                    unit: mat.unit
-                });
-            }
-            const existing = materialsMap.get(key);
-            existing.totalQuantity += parseFloat(mat.quantity) || 0;
-            existing.quantity += parseFloat(mat.quantity) || 0;
-            if (mat.materialId && !existing.materialId) {
-                existing.materialId = mat.materialId;
-            }
-        });
-    });
-
-    const aggregatedMaterials = Array.from(materialsMap.values());
-    if (aggregatedMaterials.length === 0) {
-        return { ok: false, error: 'Please assign at least one material to this containment.' };
-    }
-
-    return { ok: true, selectedSpaces, aggregatedMaterials };
-}
-
 function buildContainmentSpacePickerCard(space, options = {}) {
     const {
         isInOther = false,
         otherContainments = [],
         isSpaceChecked = false,
-        preselMatMap = null,
-        materialAllocations = null,
+        preselMatNames = null,
         defaultAllMaterialsChecked = true
     } = options;
 
@@ -3174,40 +2230,16 @@ function buildContainmentSpacePickerCard(space, options = {}) {
     } else {
         materialsHtml = `<div class="modal-check-sublist" data-space-id="${escapeHtml(space.id)}">${
             (space.materials || []).map((m, idx) => {
-                const spaceQty = parseFloat(m.quantity) || 0;
-                const allocKey = `${space.name}::${m.name}`;
-                const allocatedElsewhere = materialAllocations?.get(allocKey) || 0;
-                const remaining = Math.max(0, spaceQty - allocatedElsewhere);
-                const preselQty = preselMatMap?.get(m.name);
-                const isPreselected = isSpaceChecked && preselMatMap?.has(m.name);
-                const isFullyAllocated = remaining <= 0 && !isPreselected;
-                const isMatChecked = isPreselected
-                    || (!isSpaceChecked && defaultAllMaterialsChecked && remaining > 0)
-                    || false;
-                const defaultQty = preselQty != null
-                    ? preselQty
-                    : (remaining > 0 ? remaining : spaceQty);
+                const isMatChecked = isSpaceChecked && preselMatNames
+                    ? preselMatNames.has(m.name)
+                    : defaultAllMaterialsChecked;
                 const matCbId = `containment-mat-cb-${space.id}-${idx}`;
-                const qtyValue = isMatChecked ? defaultQty : (remaining > 0 ? remaining : '');
-                const pill = `<span class="modal-check-pill">
-                    <span class="modal-check-pill-name">${escapeHtml(m.name)}</span>
-                    <span class="modal-check-pill-sep" aria-hidden="true">\u00b7</span>
-                    <span class="modal-check-pill-qty-wrap">
-                        <input type="number" class="containment-material-qty" value="${qtyValue !== '' ? qtyValue : ''}"
-                            min="0" step="any" max="${remaining > 0 ? remaining : spaceQty}"
-                            data-space-qty="${spaceQty}" data-remaining="${remaining}"
-                            title="Quantity for this containment"
-                            ${isMatChecked ? '' : 'disabled'}>
-                        <span class="modal-check-pill-unit">${escapeHtml(displayUnit(m.unit))}</span>
-                    </span>
-                    <span class="modal-check-pill-avail">of ${spaceQty.toLocaleString()} ${escapeHtml(displayUnit(m.unit))}</span>
-                </span>`;
+                const pill = `<span class="modal-check-pill">${escapeHtml(m.name)} \u00b7 ${parseFloat(m.quantity || 0).toLocaleString()} ${escapeHtml(displayUnit(m.unit))}</span>`;
                 return buildModalCheckboxRow(
                     matCbId,
                     'containment-material-cb',
-                    `data-space-id="${escapeHtml(space.id)}" data-material-name="${escapeHtml(m.name)}" data-material-index="${idx}" data-max-quantity="${spaceQty}" ${isMatChecked ? 'checked' : ''} ${isFullyAllocated ? 'disabled' : ''}`,
-                    pill,
-                    isFullyAllocated ? 'modal-check-row--fully-assigned' : ''
+                    `data-space-id="${escapeHtml(space.id)}" data-material-name="${escapeHtml(m.name)}" data-material-index="${idx}" ${isMatChecked ? 'checked' : ''}`,
+                    pill
                 );
             }).join('')
         }</div>`;
@@ -3227,38 +2259,7 @@ function buildContainmentSpacePickerCard(space, options = {}) {
         </div>`;
 }
 
-function wireContainmentSpacePickerList(spacesList, materialAllocations) {
-    const syncMaterialRow = (mc) => {
-        const row = mc.closest('.modal-check-row');
-        const qtyInput = row?.querySelector('.containment-material-qty');
-        if (!qtyInput) return;
-
-        const sid = mc.dataset.spaceId;
-        const spaceCb = spacesList.querySelector(`.containment-space-cb[data-space-id="${sid}"]`);
-        const spaceName = spaceCb?.dataset.spaceName || '';
-        const matName = mc.dataset.materialName || '';
-        const spaceQty = parseFloat(mc.dataset.maxQuantity) || parseFloat(qtyInput.dataset.spaceQty) || 0;
-        const allocated = materialAllocations?.get(`${spaceName}::${matName}`) || 0;
-        const remaining = Math.max(0, spaceQty - allocated);
-
-        qtyInput.disabled = !mc.checked;
-        qtyInput.max = remaining > 0 ? remaining : spaceQty;
-        qtyInput.dataset.remaining = String(remaining);
-
-        if (mc.checked) {
-            const current = parseFloat(qtyInput.value);
-            if (!Number.isFinite(current) || current <= 0) {
-                qtyInput.value = remaining > 0 ? remaining : '';
-            } else if (current > remaining && remaining >= 0) {
-                qtyInput.value = remaining;
-            }
-        }
-    };
-
-    spacesList.querySelectorAll('.containment-material-cb').forEach(mc => {
-        mc.addEventListener('change', () => syncMaterialRow(mc));
-    });
-
+function wireContainmentSpacePickerList(spacesList, materialsInContainments) {
     spacesList.querySelectorAll('.containment-space-cb').forEach(cb => {
         cb.addEventListener('change', () => {
             const sid = cb.dataset.spaceId;
@@ -3266,34 +2267,14 @@ function wireContainmentSpacePickerList(spacesList, materialAllocations) {
             spacesList.querySelectorAll(`.containment-material-cb[data-space-id="${sid}"]`).forEach(mc => {
                 if (cb.checked) {
                     const matName = mc.dataset.materialName || '';
-                    const spaceQty = parseFloat(mc.dataset.maxQuantity) || 0;
-                    const allocated = materialAllocations?.get(`${spaceName}::${matName}`) || 0;
-                    const remaining = Math.max(0, spaceQty - allocated);
-                    if (!mc.disabled) {
-                        mc.checked = remaining > 0;
-                    }
+                    const key = `${spaceName}::${matName}`;
+                    mc.checked = !(materialsInContainments && materialsInContainments.has(key));
                 } else {
                     mc.checked = false;
                 }
-                syncMaterialRow(mc);
             });
         });
     });
-
-    spacesList.querySelectorAll('.containment-material-qty').forEach(input => {
-        ['click', 'mousedown'].forEach(evt => {
-            input.addEventListener(evt, e => e.stopPropagation());
-        });
-        input.addEventListener('focus', () => {
-            const mc = input.closest('.modal-check-row')?.querySelector('.containment-material-cb');
-            if (mc && !mc.disabled && !mc.checked) {
-                mc.checked = true;
-                syncMaterialRow(mc);
-            }
-        });
-    });
-
-    spacesList.querySelectorAll('.containment-material-cb').forEach(syncMaterialRow);
 }
 
 function openAddContainmentModal() {
@@ -3352,18 +2333,70 @@ function openAddContainmentModal() {
             return false;
         }
         setLastBuildingId(currentProject.id, buildingId);
-
-        const pickerResult = readContainmentSpacesFromPicker('#new-containment-spaces-list', building);
-        if (!pickerResult.ok) {
-            alert(pickerResult.error);
-            return false;
-        }
-        const { selectedSpaces, aggregatedMaterials } = pickerResult;
-
+        
+        // Get selected spaces and the inspector-selected materials within each
+        const selectedSpaceCheckboxes = document.querySelectorAll('#new-containment-spaces-list .containment-space-cb:checked');
+        const selectedSpaces = [];
+        
+        selectedSpaceCheckboxes.forEach(checkbox => {
+            const spaceId = checkbox.dataset.spaceId;
+            const space = building.spaces?.find(s => s.id === spaceId);
+            if (!space) return;
+            
+            // Only include materials whose checkbox is checked for this space
+            const matCbs = document.querySelectorAll(
+                `#new-containment-spaces-list .containment-material-cb[data-space-id="${CSS.escape(spaceId)}"]:checked`
+            );
+            const selectedMaterials = [];
+            matCbs.forEach(mc => {
+                const idx = parseInt(mc.dataset.materialIndex, 10);
+                const m = (space.materials || [])[idx];
+                if (m) {
+                    selectedMaterials.push({
+                        materialId: m.materialId || null,
+                        name: m.name,
+                        quantity: m.quantity || 0,
+                        unit: m.unit || ''
+                    });
+                }
+            });
+            
+            selectedSpaces.push({
+                id: space.id,
+                spaceName: space.name,
+                name: space.name,
+                materials: selectedMaterials
+            });
+        });
+        
+        // Aggregate materials from selected spaces (only the ones the inspector kept checked)
+        const materialsMap = new Map();
+        selectedSpaces.forEach(space => {
+            (space.materials || []).forEach(mat => {
+                const key = `${mat.name}_${mat.unit}`;
+                if (!materialsMap.has(key)) {
+                    materialsMap.set(key, {
+                        materialId: mat.materialId || null,
+                        materialName: mat.name,
+                        name: mat.name,
+                        totalQuantity: 0,
+                        quantity: 0,
+                        unit: mat.unit
+                    });
+                }
+                const existing = materialsMap.get(key);
+                existing.totalQuantity += parseFloat(mat.quantity) || 0;
+                existing.quantity += parseFloat(mat.quantity) || 0;
+                if (mat.materialId && !existing.materialId) {
+                    existing.materialId = mat.materialId;
+                }
+            });
+        });
+        
         const initialStage = document.getElementById('new-containment-stage').value;
         
         if (!currentProject.containments) currentProject.containments = [];
-        const newContainment = {
+        currentProject.containments.push({
             id: generateId(),
             name,
             buildingId,
@@ -3371,7 +2404,7 @@ function openAddContainmentModal() {
             stage: initialStage,
             regulatedArea: false,
             spaces: selectedSpaces,
-            materials: aggregatedMaterials,
+            materials: Array.from(materialsMap.values()),
             dailyLogs: [],
             visualInspections: [],
             workerRoster: [],
@@ -3381,16 +2414,7 @@ function openAddContainmentModal() {
                 previousStage: null
             }],
             createdAt: Date.now()
-        };
-        currentProject.containments.push(newContainment);
-
-        const containmentHazards = getContainmentMaterialHazards(newContainment);
-        if (containmentHazards.hasLead && isWashoeClient(currentProject.clientName)
-            && initialStage === STAGE_CONTAINMENT_PREPARATION) {
-            const inspectorName = typeof getInspectorProfile === 'function' ? (getInspectorProfile().name || '') : '';
-            createPreAbatementWipeSample(newContainment, inspectorName);
-        }
-
+        });
         saveCurrentProject();
         renderProject();
     });
@@ -3435,7 +2459,17 @@ function openAddContainmentModal() {
                     }
                 });
                 
-                const materialAllocations = getContainmentMaterialAllocations(buildingId);
+                // Determine which materials in each space are already in a containment
+                const materialsInContainments = new Map();
+                (currentProject.containments || []).forEach(containment => {
+                    (containment.spaces || []).forEach(cs => {
+                        const spaceName = cs.spaceName || cs.name;
+                        (cs.materials || []).forEach(mat => {
+                            const key = `${spaceName}::${mat.name}`;
+                            materialsInContainments.set(key, true);
+                        });
+                    });
+                });
 
                 spacesList.innerHTML = building.spaces.map(space => {
                     const isInOther = spacesInOtherContainments.has(space.name);
@@ -3444,12 +2478,11 @@ function openAddContainmentModal() {
                         isInOther,
                         otherContainments,
                         isSpaceChecked: false,
-                        materialAllocations,
                         defaultAllMaterialsChecked: false
                     });
                 }).join('');
 
-                wireContainmentSpacePickerList(spacesList, materialAllocations);
+                wireContainmentSpacePickerList(spacesList, materialsInContainments);
                 
                 spacesSection.classList.remove('hidden');
             });
@@ -3466,16 +2499,13 @@ function openEditContainmentModal(containmentId) {
     
     // Get preselected space names
     const preselectedSpaceNames = new Set((containment.spaces || []).map(s => s.spaceName || s.name || s.id));
-    // Map of space name -> Map of material name -> quantity for this containment
+    // Map of space name -> Set of currently-included material names for that space
     const preselectedMaterialsBySpace = new Map();
     (containment.spaces || []).forEach(s => {
         const key = s.spaceName || s.name || s.id;
         if (!key) return;
-        const matMap = new Map();
-        (s.materials || []).forEach(m => {
-            if (m.name) matMap.set(m.name, parseFloat(m.quantity) || 0);
-        });
-        preselectedMaterialsBySpace.set(key, matMap);
+        const matNames = new Set((s.materials || []).map(m => m.name).filter(Boolean));
+        preselectedMaterialsBySpace.set(key, matNames);
     });
     
     const buildingOptions = (currentProject.buildings || []).map(b => 
@@ -3570,17 +2600,66 @@ function openEditContainmentModal(containmentId) {
             return false;
         }
         setLastBuildingId(currentProject.id, buildingId);
-
-        const pickerResult = readContainmentSpacesFromPicker(
-            '#edit-containment-spaces-list',
-            building,
-            containmentId
-        );
-        if (!pickerResult.ok) {
-            showEditContainmentStatus(pickerResult.error, true);
-            return false;
-        }
-        const { selectedSpaces, aggregatedMaterials } = pickerResult;
+        
+        // Get selected spaces and the inspector-selected materials within each
+        const selectedSpaceCheckboxes = document.querySelectorAll('#edit-containment-spaces-list .containment-space-cb:checked');
+        const selectedSpaces = [];
+        
+        selectedSpaceCheckboxes.forEach(checkbox => {
+            const spaceId = checkbox.dataset.spaceId;
+            const space = building.spaces?.find(s => s.id === spaceId);
+            if (!space) return;
+            
+            // Only include materials whose checkbox is checked for this space
+            const matCbs = document.querySelectorAll(
+                `#edit-containment-spaces-list .containment-material-cb[data-space-id="${CSS.escape(spaceId)}"]:checked`
+            );
+            const selectedMaterials = [];
+            matCbs.forEach(mc => {
+                const idx = parseInt(mc.dataset.materialIndex, 10);
+                const m = (space.materials || [])[idx];
+                if (m) {
+                    selectedMaterials.push({
+                        materialId: m.materialId || null,
+                        name: m.name,
+                        quantity: m.quantity || 0,
+                        unit: m.unit || ''
+                    });
+                }
+            });
+            
+            selectedSpaces.push({
+                id: space.id,
+                spaceName: space.name,
+                name: space.name,
+                materials: selectedMaterials
+            });
+        });
+        
+        // Aggregate materials from selected spaces (only the ones the inspector kept checked)
+        const materialsMap = new Map();
+        selectedSpaces.forEach(space => {
+            (space.materials || []).forEach(mat => {
+                const key = `${mat.name}_${mat.unit}`;
+                if (!materialsMap.has(key)) {
+                    materialsMap.set(key, {
+                        materialId: mat.materialId || null,
+                        materialName: mat.name,
+                        name: mat.name,
+                        totalQuantity: 0,
+                        quantity: 0,
+                        unit: mat.unit
+                    });
+                }
+                const existing = materialsMap.get(key);
+                existing.totalQuantity += parseFloat(mat.quantity) || 0;
+                existing.quantity += parseFloat(mat.quantity) || 0;
+                if (mat.materialId && !existing.materialId) {
+                    existing.materialId = mat.materialId;
+                }
+            });
+        });
+        const aggregatedMaterials = Array.from(materialsMap.values());
         
         const newStage = document.getElementById('edit-containment-stage')?.value;
         const previousStage = currentStage; // normalized at modal open time
@@ -3701,35 +2780,22 @@ function openEditContainmentModal(containmentId) {
         containment.regulatedArea = regulatedArea;
         containment.updatedAt = Date.now();
         
-        const containmentHazards = getContainmentMaterialHazards({
-            ...containment,
-            materials: aggregatedMaterials,
-            spaces: selectedSpaces
-        });
-        const createdAir = [];
-        const createdWipes = [];
-
-        // Create clearance samples if transitioning to Containment Clearance (Final inspection passed)
+        // Create clearance air samples if transitioning to Containment Clearance
+        // and NOT a regulated area (Final inspection passed)
         if (inspectionType === 'Final' &&
             newStage === STAGE_CONTAINMENT_CLEARANCE &&
-            visualInspectionData?.passed) {
-            if (containmentHazards.hasAsbestos && !regulatedArea) {
-                createClearanceAirSamples(containment, visualInspectionData);
-                createdAir.push('5 clearance air samples');
-            }
-            if (containmentHazards.hasLead) {
-                createClearanceWipeSample(containment, visualInspectionData);
-                createdWipes.push('1 clearance wipe sample');
-            }
+            visualInspectionData?.passed &&
+            !containment.regulatedArea) {
+            createClearanceAirSamples(containment, visualInspectionData);
+            console.log('Auto-created 5 clearance air samples for:', containment.name);
         }
         
         saveCurrentProject();
         
         if (requiresInspection) {
             // Modal was already closed for inspection flow
-            const parts = [...createdAir, ...createdWipes];
-            const message = parts.length
-                ? `Containment saved. ${parts.join(' and ')} created.`
+            const message = (inspectionType === 'Final' && !containment.regulatedArea)
+                ? 'Containment saved. 5 clearance air samples created.'
                 : 'Containment saved and stage updated.';
             showNotification(message, false);
             renderProject();
@@ -3784,24 +2850,33 @@ function openEditContainmentModal(containmentId) {
             }
         });
         
-        const materialAllocations = getContainmentMaterialAllocations(buildingId, containmentId);
+        // Determine which materials in each space are already in another containment
+        const materialsInOtherContainments = new Map();
+        (currentProject.containments || []).forEach(c => {
+            if (c.id === containmentId) return;
+            (c.spaces || []).forEach(cs => {
+                const spaceName = cs.spaceName || cs.name;
+                (cs.materials || []).forEach(mat => {
+                    materialsInOtherContainments.set(`${spaceName}::${mat.name}`, true);
+                });
+            });
+        });
 
         spacesList.innerHTML = building.spaces.map(space => {
             const isInOther = spacesInOtherContainments.has(space.name);
             const otherContainments = isInOther ? spacesInOtherContainments.get(space.name) : [];
             const isPreselected = preselectedNames.has(space.name) || preselectedNames.has(space.id);
-            const preselMatMap = preselectedMatsMap?.get(space.name) || preselectedMatsMap?.get(space.id);
+            const preselMatNames = preselectedMatsMap?.get(space.name) || preselectedMatsMap?.get(space.id);
             return buildContainmentSpacePickerCard(space, {
                 isInOther,
                 otherContainments,
                 isSpaceChecked: isPreselected,
-                preselMatMap: isPreselected ? preselMatMap : null,
-                materialAllocations,
+                preselMatNames: isPreselected ? preselMatNames : null,
                 defaultAllMaterialsChecked: false
             });
         }).join('');
 
-        wireContainmentSpacePickerList(spacesList, materialAllocations);
+        wireContainmentSpacePickerList(spacesList, materialsInOtherContainments);
         
         spacesSection.classList.remove('hidden');
     };
@@ -3836,6 +2911,8 @@ function openAddAirSampleModal() {
         `<option value="${c.id}">${escapeHtml(getContainmentDisplayName(c.name))}</option>`
     ).join('');
     
+    const suggestedId = getNextAirSampleId('Area');
+    
     const modal = createModal('Add Air Sample', `
         <div class="space-y-4">
             <div>
@@ -3845,7 +2922,7 @@ function openAddAirSampleModal() {
             <div class="grid grid-cols-2 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample ID</label>
-                    <div id="new-sample-id-container"></div>
+                    ${buildAirSampleIdFieldHtml('new-sample-id', 'new-sample-id-suffix', 'Area', suggestedId, false)}
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
@@ -3856,7 +2933,6 @@ function openAddAirSampleModal() {
                     </select>
                 </div>
             </div>
-            ${buildAirSampleHazardSelectorHtml('new-sample', currentProject)}
             
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Location / Comments</label>
@@ -3913,12 +2989,7 @@ function openAddAirSampleModal() {
         </div>
     `, () => {
         const sampleType = document.getElementById('new-sample-type').value;
-        const hazardType = normalizeHazardType(document.getElementById('new-sample-hazard')?.value);
-        if (!hazardType || !document.getElementById('new-sample-hazard')?.value) {
-            alert('Please select a hazard type (Asb or Pb).');
-            return false;
-        }
-        const sampleId = resolveAirSampleIdFromForm(sampleType, hazardType, document.getElementById('new-sample-id-suffix')?.value.trim());
+        const sampleId = buildAirSampleIdFromSuffix(sampleType, document.getElementById('new-sample-id-suffix').value.trim());
         if (!sampleId) {
             alert('Please enter a sample ID');
             return false;
@@ -3937,7 +3008,6 @@ function openAddAirSampleModal() {
             id: generateId(),
             sampleId,
             type: sampleType,
-            hazardType,
             location: document.getElementById('new-sample-location').value.trim(),
             containmentId: containmentIdVal,
             containmentName: containment?.name || '',
@@ -3954,7 +3024,7 @@ function openAddAirSampleModal() {
         renderProject();
     });
 
-    wireAirSampleIdTypeChange(modal, 'new-sample-type', 'new-sample-hazard', 'new-sample-id-container', 'new-sample-id', 'new-sample-id-suffix');
+    wireAirSampleIdTypeChange(modal, 'new-sample-type', 'new-sample-id', 'new-sample-id-suffix');
 }
 
 function openEditAirSampleModal(sampleId) {
@@ -3994,28 +3064,23 @@ function openEditAirSampleModal(sampleId) {
         ? `${formColExpandedCss} min-width: 0; display: flex; flex-direction: column; gap: 0.35rem;`
         : 'flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.35rem;';
 
-    const sampleHazard = getAirSampleHazardType(sample);
-    const resolvedType = ['Personal', 'Clearance'].includes(sample.type) ? sample.type : 'Area';
-
     const modal = createModal('Edit Air Sample', `
         <div id="edit-air-sample-layout" style="display: flex; gap: 1rem; align-items: flex-start; min-width:0;">
             <div id="edit-air-sample-form-col" style="${formColStyle}">
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem 0.75rem;">
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample ID</label>
-                        <div id="edit-sample-id-container"></div>
+                        ${buildAirSampleIdFieldHtml('edit-sample-id', 'edit-sample-id-suffix', sample.type || 'Area', sample.sampleId || '', true)}
                     </div>
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample Type</label>
                         <select id="edit-sample-type" class="w-full border rounded bg-white" style="padding:0.3rem 0.5rem; font-size:0.875rem;">
-                            <option value="Area" ${resolvedType === 'Area' ? 'selected' : ''}>Area</option>
-                            <option value="Personal" ${resolvedType === 'Personal' ? 'selected' : ''}>Personal</option>
-                            <option value="Clearance" ${resolvedType === 'Clearance' ? 'selected' : ''}>Clearance</option>
+                            <option value="Area" ${sample.type !== 'Personal' && sample.type !== 'Clearance' ? 'selected' : ''}>Area</option>
+                            <option value="Personal" ${sample.type === 'Personal' ? 'selected' : ''}>Personal</option>
+                            <option value="Clearance" ${sample.type === 'Clearance' ? 'selected' : ''}>Clearance</option>
                         </select>
                     </div>
                 </div>
-
-                ${buildAirSampleHazardSelectorHtml('edit-sample', currentProject, sampleHazard)}
                 
                 <div>
                     <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Location / Comments</label>
@@ -4098,12 +3163,7 @@ function openEditAirSampleModal(sampleId) {
         </div>
     `, () => {
         const editSampleType = document.getElementById('edit-sample-type').value;
-        const editHazardType = normalizeHazardType(document.getElementById('edit-sample-hazard')?.value);
-        if (!document.getElementById('edit-sample-hazard')?.value) {
-            alert('Please select a hazard type (Asb or Pb).');
-            return false;
-        }
-        const sampleIdVal = resolveAirSampleIdFromForm(editSampleType, editHazardType, document.getElementById('edit-sample-id-suffix')?.value.trim());
+        const sampleIdVal = buildAirSampleIdFromSuffix(editSampleType, document.getElementById('edit-sample-id-suffix').value.trim());
         if (!sampleIdVal) {
             alert('Please enter a sample ID');
             return false;
@@ -4111,7 +3171,6 @@ function openEditAirSampleModal(sampleId) {
         
         sample.sampleId = sampleIdVal;
         sample.type = editSampleType;
-        sample.hazardType = editHazardType;
         sample.location = document.getElementById('edit-sample-location').value.trim();
         const containmentIdVal = document.getElementById('edit-sample-containment').value;
         sample.containmentId = containmentIdVal;
@@ -4177,7 +3236,7 @@ function openEditAirSampleModal(sampleId) {
     });
 
     modal.querySelector('.modal-content')?.classList.add('air-sample-edit-modal');
-    wireAirSampleIdTypeChange(modal, 'edit-sample-type', 'edit-sample-hazard', 'edit-sample-id-container', 'edit-sample-id', 'edit-sample-id-suffix', { currentSampleId: sample.sampleId || '', compact: true, autoSuggestOnTypeChange: false });
+    wireAirSampleIdTypeChange(modal, 'edit-sample-type', 'edit-sample-id', 'edit-sample-id-suffix', { currentSampleId: sample.sampleId || '' });
 
     const editFooter = modal.querySelector('.modal-footer');
     if (editFooter) {
@@ -4191,8 +3250,8 @@ function openEditAirSampleModal(sampleId) {
             e.preventDefault();
             e.stopPropagation();
             if (!confirm('Delete this air sample? This cannot be undone.')) return;
-            dismissModal(modal);
-            deleteAirSample(sampleId, true);
+            modal.remove();
+            deleteAirSample(sampleId);
         });
         editFooter.insertBefore(deleteBtn, editFooter.firstChild);
     }
@@ -4274,8 +3333,8 @@ function openEditAirSampleModal(sampleId) {
     }, 100);
 }
 
-function deleteAirSample(sampleId, skipConfirm = false) {
-    if (!skipConfirm && !confirm('Delete this air sample? This cannot be undone.')) return;
+function deleteAirSample(sampleId) {
+    if (!confirm('Delete this air sample? This cannot be undone.')) return;
     currentProject.airSamples = currentProject.airSamples.filter(s => s.id !== sampleId);
     saveCurrentProject();
     renderProject();
@@ -4658,7 +3717,6 @@ function renderWorkerRosterView(project) {
 }
 
 function openEditWorkerModal(worker) {
-    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
 
@@ -4835,7 +3893,6 @@ function openProjectDailyLogModal(logId) {
     const selectedIds = (existingLog?.workers || []).map(w => w.id);
     const defaultTotal = existingLog?.workersTotal ?? (selectedIds.length || workerRoster.length || 0);
 
-    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
 
@@ -4996,39 +4053,6 @@ function buildNegativePressureHtml(containments, readingsById) {
     `;
 }
 
-function bytesFromImportedPhotoData(photoData) {
-    if (!photoData) return null;
-    const raw = photoData.data;
-    if (raw instanceof Uint8Array) return raw;
-    if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
-    if (Array.isArray(raw)) return new Uint8Array(raw);
-    if (raw && raw.type === 'Buffer' && Array.isArray(raw.data)) return new Uint8Array(raw.data);
-    if (photoData.base64) {
-        const bin = atob(photoData.base64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        return bytes;
-    }
-    return null;
-}
-
-function convertedImageToFile(converted, originalName) {
-    const mime = converted.mimeType || 'image/jpeg';
-    const jpgName = (originalName || 'photo').replace(/\.hei[cf]$/i, '.jpg');
-    if (Array.isArray(converted.data) && converted.data.length > 0) {
-        const blob = new Blob([new Uint8Array(converted.data)], { type: mime });
-        return new File([blob], jpgName, { type: mime });
-    }
-    if (converted.base64) {
-        const bin = atob(converted.base64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const blob = new Blob([bytes], { type: mime });
-        return new File([blob], jpgName, { type: mime });
-    }
-    return null;
-}
-
 async function preparePhotoFilesForUpload(files) {
     const out = [];
     for (const file of files) {
@@ -5039,14 +4063,9 @@ async function preparePhotoFilesForUpload(files) {
             try {
                 const buf = await file.arrayBuffer();
                 const converted = await window.electronAPI.convertImageForUpload(Array.from(new Uint8Array(buf)), file.name);
-                if (converted?.success) {
-                    const convertedFile = convertedImageToFile(converted, file.name);
-                    if (convertedFile) {
-                        useFile = convertedFile;
-                    } else {
-                        showNotification('HEIC could not be converted; save as JPEG from Photos and retry.', true);
-                        continue;
-                    }
+                if (converted?.success && converted.base64) {
+                    const mime = converted.mimeType || 'image/jpeg';
+                    useFile = await fetch(`data:${mime};base64,${converted.base64}`).then(r => r.blob());
                 } else {
                     showNotification(converted?.error || 'HEIC could not be converted; save as JPEG from Photos and retry.', true);
                     continue;
@@ -5131,21 +4150,19 @@ function openPhoneImportModal(logDate, onImportComplete) {
     const importBtn = modal.querySelector('#phone-import-btn');
     const cancelBtn = modal.querySelector('#phone-import-cancel');
 
-    let loadingStartMs = 0;
+    let countdownDeadlineMs = 0;
     let countdownTimer = null;
     const previewBlobUrls = new Map();
     const loadedThumbnails = new Map();
     const tileByPath = new Map();
 
-    // The listing call returns everything in one blocking shot with no progress
-    // signal, so a fake "~Xs left" ETA was always wrong. Show a measured count-up
-    // elapsed time instead — it's accurate by definition.
-    function formatElapsed(ms) {
-        const totalSec = Math.max(0, Math.round((Number(ms) || 0) / 1000));
-        if (totalSec < 60) return `Loading photos… ${totalSec}s`;
-        const minutes = Math.floor(totalSec / 60);
-        const seconds = totalSec % 60;
-        return `Loading photos… ${minutes}m ${String(seconds).padStart(2, '0')}s`;
+    function formatCountdown(seconds) {
+        const sec = Math.max(0, Math.ceil(Number(seconds) || 0));
+        if (sec <= 0) return 'Finishing up…';
+        if (sec < 60) return `Loading photos… ~${sec}s left`;
+        const minutes = Math.floor(sec / 60);
+        const remainder = sec % 60;
+        return remainder > 0 ? `Loading photos… ~${minutes}m ${remainder}s left` : `Loading photos… ~${minutes}m left`;
     }
 
     function formatPreviewProgress(completed, total) {
@@ -5162,19 +4179,30 @@ function openPhoneImportModal(logDate, onImportComplete) {
             clearInterval(countdownTimer);
             countdownTimer = null;
         }
-        loadingStartMs = 0;
+        countdownDeadlineMs = 0;
         countdownEl.textContent = formatPreviewProgress(completed, total);
     }
 
-    function updateElapsedDisplay() {
-        if (!countdownEl || !loadingStartMs) return;
-        countdownEl.textContent = formatElapsed(Date.now() - loadingStartMs);
+    function countdownSecondsLeft() {
+        if (!countdownDeadlineMs) return 0;
+        return Math.max(0, Math.ceil((countdownDeadlineMs - Date.now()) / 1000));
     }
 
-    function startLoadingTimer() {
-        loadingStartMs = Date.now();
-        if (!countdownTimer) countdownTimer = setInterval(updateElapsedDisplay, 250);
-        updateElapsedDisplay();
+    function updateCountdownDisplay() {
+        if (!countdownEl) return;
+        countdownEl.textContent = formatCountdown(countdownSecondsLeft());
+    }
+
+    function ensureCountdownTimer() {
+        if (countdownTimer) return;
+        countdownTimer = setInterval(updateCountdownDisplay, 250);
+    }
+
+    function setCountdown(seconds) {
+        const sec = Math.max(0, Math.ceil(Number(seconds) || 0));
+        countdownDeadlineMs = Date.now() + sec * 1000;
+        ensureCountdownTimer();
+        updateCountdownDisplay();
     }
 
     function hideCountdown() {
@@ -5182,8 +4210,14 @@ function openPhoneImportModal(logDate, onImportComplete) {
             clearInterval(countdownTimer);
             countdownTimer = null;
         }
-        loadingStartMs = 0;
+        countdownDeadlineMs = 0;
         if (countdownEl) countdownEl.textContent = '';
+    }
+
+    function extendCountdownIfLow(minSeconds = 15, bumpSeconds = 20) {
+        if (countdownSecondsLeft() <= minSeconds) {
+            setCountdown(Math.max(bumpSeconds, countdownSecondsLeft() + bumpSeconds));
+        }
     }
 
     const unsubscribePreviewProgress = window.electronAPI.onPhoneImportPreviewProgress?.((payload) => {
@@ -5193,6 +4227,15 @@ function openPhoneImportModal(logDate, onImportComplete) {
         }
         if (payload.photo?.path) {
             showPhotoPreview(payload.photo, { allowReplace: true });
+            // #region agent log
+            agentPreviewLog('project.js:previewProgress', 'tile update', {
+                phase: payload.phase,
+                path: payload.photo.path,
+                hasThumb: !!payload.photo.thumbBase64,
+                completed: payload.completed,
+                total: payload.total,
+            }, 'D');
+            // #endregion
         }
         if (payload.phase === 'shell' && payload.completed >= payload.total) {
             hideCountdown();
@@ -5218,46 +4261,18 @@ function openPhoneImportModal(logDate, onImportComplete) {
     let selectedDeviceInfo = null;
     let photoList = [];
     let selectedPhotoPaths = new Set();
-    let driversInstalled = false;
-
-    function buildDeviceListForPick(quickDevices, detectDevices) {
-        const out = (quickDevices || []).map((d) => ({
-            name: d.name,
-            backend: 'mtp',
-            type: d.type || '',
-        }));
-        for (const d of detectDevices || []) {
-            if (d.backend !== 'libimobiledevice' || !d.udid) continue;
-            const duplicate = out.some((existing) => existing.backend === 'libimobiledevice' && existing.udid === d.udid);
-            if (!duplicate) out.push({ name: d.name, backend: 'libimobiledevice', udid: d.udid });
-        }
-        if (out.length > 0) return out;
-        return detectDevices || [];
-    }
 
     function pickPhoneDevice(devices) {
         if (!Array.isArray(devices) || devices.length === 0) return null;
         const mtp = devices.find((d) => d.backend === 'mtp');
         const imobile = devices.find((d) => d.backend === 'libimobiledevice');
-
         if (mtp) {
-            const useImobileImport = !!(imobile && driversInstalled && imobile.udid);
             return {
                 name: mtp.name,
                 backend: 'mtp',
                 udid: imobile?.udid || null,
                 listBackend: 'mtp',
-                importBackend: useImobileImport ? 'libimobiledevice' : 'mtp',
-            };
-        }
-
-        if (imobile && driversInstalled) {
-            return {
-                name: imobile.name,
-                backend: 'libimobiledevice',
-                udid: imobile.udid,
-                listBackend: 'libimobiledevice',
-                importBackend: 'libimobiledevice',
+                importBackend: imobile ? 'libimobiledevice' : 'mtp',
             };
         }
         return imobile || devices[0];
@@ -5265,10 +4280,8 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
     function phoneDeviceOptions(forImport = false) {
         if (!selectedDeviceInfo) return null;
-        const preferredBackend = forImport
-            ? (selectedDeviceInfo.importBackend || selectedDeviceInfo.backend)
-            : (selectedDeviceInfo.listBackend || selectedDeviceInfo.backend);
-        const useImobile = preferredBackend === 'libimobiledevice' && selectedDeviceInfo.udid;
+        const useImobile = forImport && selectedDeviceInfo.udid
+            && (selectedDeviceInfo.importBackend === 'libimobiledevice' || selectedDeviceInfo.backend === 'libimobiledevice');
         return {
             backend: useImobile ? 'libimobiledevice' : 'mtp',
             udid: selectedDeviceInfo.udid || null,
@@ -5305,7 +4318,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
                 <div class="text-sm text-gray-500 mb-4" style="max-width:360px;margin:0 auto;line-height:1.6;">
                     1. Connect your iPhone via USB<br>
                     2. Unlock the phone<br>
-                    3. Tap <strong>Trust</strong> for fast import, or <strong>Allow</strong> for photos-only access<br>
+                    3. Tap <strong>Trust</strong> for faster import, or <strong>Allow</strong> for photos-only access<br>
                     4. Wait a few seconds, then retry
                 </div>
                 <button type="button" class="btn btn-primary btn-sm" id="phone-retry-btn">Retry Detection</button>
@@ -5405,6 +4418,8 @@ function openPhoneImportModal(logDate, onImportComplete) {
         return false;
     }
 
+    function agentPreviewLog() {}
+
     async function loadPreviewFromPath(photoPath, previewPath, photoIndex, allowReplace = false) {
         const norm = normalizePhonePhotoPath(photoPath);
         if (!allowReplace && isPreviewDisplayed(photoPath, photoIndex)) return true;
@@ -5412,6 +4427,15 @@ function openPhoneImportModal(logDate, onImportComplete) {
         if (!reader) return false;
         try {
             const result = await reader(previewPath);
+            // #region agent log
+            agentPreviewLog('project.js:loadPreviewFromPath', 'read preview result', {
+                success: !!result?.success,
+                hasBase64: !!result?.base64,
+                hasData: Array.isArray(result?.data),
+                error: result?.error || null,
+                previewPath,
+            }, 'D');
+            // #endregion
             if (!result?.success) return false;
             let src;
             if (result.base64) {
@@ -5425,6 +4449,9 @@ function openPhoneImportModal(logDate, onImportComplete) {
                 return false;
             }
             if (!applyPreviewToTile(photoPath, src, photoIndex)) {
+                // #region agent log
+                agentPreviewLog('project.js:loadPreviewFromPath', 'tile apply failed', { photoPath, photoIndex }, 'D');
+                // #endregion
                 return false;
             }
             loadedThumbnails.set(norm, {
@@ -5436,6 +4463,9 @@ function openPhoneImportModal(logDate, onImportComplete) {
             });
             return true;
         } catch (err) {
+            // #region agent log
+            agentPreviewLog('project.js:loadPreviewFromPath', 'preview load exception', { error: String(err?.message || err) }, 'D');
+            // #endregion
             console.warn('Preview load failed:', err);
             return false;
         }
@@ -5460,20 +4490,32 @@ function openPhoneImportModal(logDate, onImportComplete) {
         if (missing.length === 0) {
             hideCountdown();
             applyThumbnailSources();
+            // #region agent log
+            agentPreviewLog('project.js:loadHighResPreviews', 'skipped fetch - embedded thumbs', {
+                photoCount: photos.length,
+                withEmbedded,
+            }, 'E');
+            // #endregion
             return;
         }
 
         setPreviewProgress(withEmbedded, photos.length);
+        // #region agent log
+        agentPreviewLog('project.js:loadHighResPreviews', 'start', {
+            photoCount: photos.length,
+            missing: missing.length,
+            withEmbedded,
+        }, 'E');
+        // #endregion
 
         let result = null;
         if (typeof window.electronAPI?.loadPhonePhotoPreviews === 'function') {
             try {
-                result = await window.electronAPI.loadPhonePhotoPreviews(
-                    selectedDevice,
-                    missing,
-                    phoneDeviceOptions()
-                );
+                result = await window.electronAPI.loadPhonePhotoPreviews(selectedDevice, photos);
             } catch (err) {
+                // #region agent log
+                agentPreviewLog('project.js:loadHighResPreviews', 'loadPhonePhotoPreviews exception', { error: String(err?.message || err) }, 'E');
+                // #endregion
                 console.warn('loadPhonePhotoPreviews failed:', err);
             }
         }
@@ -5511,6 +4553,12 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
         applyThumbnailSources();
         hideCountdown();
+        // #region agent log
+        agentPreviewLog('project.js:loadHighResPreviews', 'done', {
+            resultSuccess: !!result?.success,
+            loadedThumbnails: loadedThumbnails.size,
+        }, 'D,E');
+        // #endregion
     }
 
     function applyThumbnailSources() {
@@ -5560,9 +4608,6 @@ function openPhoneImportModal(logDate, onImportComplete) {
                     <img class="phone-import-thumb-img" alt="${escapeHtml(p.name || 'Photo')}">
                     <div class="phone-import-thumb-loading" aria-hidden="true"></div>
                     <span class="phone-import-check" aria-hidden="true">&#10003;</span>
-                </div>
-                <div class="phone-import-meta">
-                    <span class="phone-import-time">${escapeHtml(formatPhoneImportTimeLabel(p))}</span>
                 </div>
             </button>`;
         }).join('');
@@ -5619,7 +4664,8 @@ function openPhoneImportModal(logDate, onImportComplete) {
     }
 
     async function detectDevices() {
-        startLoadingTimer();
+        setCountdown(15);
+        const listCountdownTimer = setInterval(() => extendCountdownIfLow(3, 8), 3000);
         body.innerHTML = `
             <div class="flex items-center justify-center py-8">
                 <div class="text-center">
@@ -5629,6 +4675,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
         `;
         try {
             const quickResult = await loadPhonePhotosViaQuickList();
+            clearInterval(listCountdownTimer);
             if (quickResult) {
                 if (!quickResult.success) {
                     showError(quickResult.error || 'Failed to connect to phone', detectDevices);
@@ -5638,20 +4685,8 @@ function openPhoneImportModal(logDate, onImportComplete) {
                     showNoDevice();
                     return;
                 }
-                if (quickResult.phoneLocked) {
-                    showError(quickResult.error || 'iPhone storage is not accessible. Unlock your iPhone, tap "Allow" if asked, then retry.', detectDevices);
-                    return;
-                }
-                let detectForUdid = { devices: [] };
-                try {
-                    detectForUdid = await window.electronAPI.detectPhoneDevices();
-                } catch { /* ignore */ }
-                const mergedDevices = buildDeviceListForPick(
-                    quickResult.devices,
-                    detectForUdid.success ? detectForUdid.devices : []
-                );
-                selectedDeviceInfo = pickPhoneDevice(mergedDevices);
-                selectedDevice = quickResult.deviceName || selectedDeviceInfo?.name;
+                selectedDeviceInfo = pickPhoneDevice(quickResult.devices.map((d) => ({ ...d, backend: 'mtp' })));
+                selectedDevice = quickResult.deviceName || selectedDeviceInfo.name;
                 photoList = quickResult.photos || [];
                 selectedPhotoPaths.clear();
                 loadedThumbnails.clear();
@@ -5673,6 +4708,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
             selectedDevice = selectedDeviceInfo.name;
             await listPhotos(logDate);
         } catch (err) {
+            clearInterval(listCountdownTimer);
             showError(err.message || 'Failed to detect devices', detectDevices);
         }
     }
@@ -5686,17 +4722,14 @@ function openPhoneImportModal(logDate, onImportComplete) {
     }
 
     async function listPhotos(dateFilter) {
-        const listOpts = phoneDeviceOptions();
-        startLoadingTimer();
+        setCountdown(15);
+        const listCountdownTimer = setInterval(() => extendCountdownIfLow(3, 8), 3000);
         renderLoadingState();
         try {
-            const result = await window.electronAPI.listPhonePhotos(selectedDevice, dateFilter || '', listOpts);
+            const result = await window.electronAPI.listPhonePhotos(selectedDevice, dateFilter || '', phoneDeviceOptions());
+            clearInterval(listCountdownTimer);
             if (!result.success) {
                 showError(result.error || 'Failed to load photos', () => listPhotos(dateFilter));
-                return;
-            }
-            if (result.phoneLocked) {
-                showError(result.error || 'iPhone storage is not accessible. Unlock your iPhone, tap "Allow" if asked, then retry.', () => listPhotos(dateFilter));
                 return;
             }
             photoList = result.photos || [];
@@ -5714,6 +4747,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
                 hideCountdown();
             }
         } catch (err) {
+            clearInterval(listCountdownTimer);
             showError(err.message || 'Failed to load photos', () => listPhotos(dateFilter));
         }
     }
@@ -5738,33 +4772,9 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
         const progressBar = modal.querySelector('#phone-import-progress');
         const statusEl = modal.querySelector('#phone-import-status');
-        const setProgress = (pct, text) => {
-            if (progressBar) progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-            if (statusEl && text) statusEl.textContent = text;
-        };
-
-        // Live per-photo progress from the main process: copying 5-65%,
-        // converting 65-85%; the read-back loop below covers 85-100%.
-        const unsubscribeImportProgress = window.electronAPI.onPhoneImportProgress?.((p) => {
-            if (!p || !p.total) return;
-            if (p.phase === 'copying') {
-                const pct = 5 + (60 * (Number(p.completed) || 0) / p.total);
-                const attempt = Number(p.attempt) > 1 ? ` (retry ${p.attempt - 1})` : '';
-                const current = Math.min(p.total, (Number(p.completed) || 0) + 1);
-                setProgress(pct, `Copying photo ${current} of ${p.total} from phone${attempt}…`);
-            } else if (p.phase === 'processing') {
-                const pct = 65 + (20 * (Number(p.completed) || 0) / p.total);
-                setProgress(pct, `Converting photo ${p.completed} of ${p.total}…`);
-            }
-        }) || (() => {});
 
         try {
-            let result;
-            try {
-                result = await window.electronAPI.importPhonePhotos(selectedDevice, paths, phoneDeviceOptions(true));
-            } finally {
-                unsubscribeImportProgress();
-            }
+            const result = await window.electronAPI.importPhonePhotos(selectedDevice, paths, phoneDeviceOptions(true));
             if (!result.success) {
                 showError(result.error || 'Import failed');
                 cancelBtn.disabled = false;
@@ -5778,17 +4788,18 @@ function openPhoneImportModal(logDate, onImportComplete) {
                 return;
             }
 
-            setProgress(85, 'Reading imported files...');
+            if (progressBar) progressBar.style.width = '50%';
+            if (statusEl) statusEl.textContent = 'Reading imported files...';
 
             const files = [];
             for (let i = 0; i < imported.length; i++) {
                 try {
                     const photoData = await window.electronAPI.readImportedPhoto(imported[i].localPath);
-                    const arr = bytesFromImportedPhotoData(photoData);
-                    if (photoData.success && arr && arr.length > 0) {
+                    if (photoData.success && photoData.data) {
+                        const arr = new Uint8Array(photoData.data);
                         const ext = (photoData.name || '').split('.').pop()?.toLowerCase() || 'jpg';
                         const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', gif: 'image/gif' };
-                        const mime = mimeMap[ext] || photoData.mimeType || 'image/jpeg';
+                        const mime = mimeMap[ext] || 'image/jpeg';
                         const blob = new Blob([arr], { type: mime });
                         const file = new File([blob], photoData.name || `photo_${i}.jpg`, { type: mime });
                         files.push(file);
@@ -5796,7 +4807,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
                 } catch (readErr) {
                     console.error('Failed to read imported photo:', readErr);
                 }
-                if (progressBar) progressBar.style.width = (85 + (15 * (i + 1) / imported.length)) + '%';
+                if (progressBar) progressBar.style.width = (50 + (50 * (i + 1) / imported.length)) + '%';
             }
 
             if (files.length === 0) {
@@ -5810,15 +4821,9 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
             const errMsg = (result.errors || []).length > 0 ? ` (${result.errors.length} failed)` : '';
 
-            setTimeout(async () => {
+            setTimeout(() => {
                 closeModal();
-                if (onImportComplete) {
-                    try {
-                        await onImportComplete(files);
-                    } catch (handoffErr) {
-                        showNotification(handoffErr?.message || 'Failed to attach imported photos.', true);
-                    }
-                }
+                if (onImportComplete) onImportComplete(files);
                 showNotification(`${files.length} photo${files.length !== 1 ? 's' : ''} imported from phone${errMsg}.`);
             }, 600);
         } catch (err) {
@@ -5829,19 +4834,7 @@ function openPhoneImportModal(logDate, onImportComplete) {
 
     importBtn.addEventListener('click', doImport);
 
-    async function initPhoneImport() {
-        try {
-            if (typeof window.electronAPI?.checkAppleDrivers === 'function') {
-                const driverCheck = await window.electronAPI.checkAppleDrivers();
-                driversInstalled = driverCheck?.status === 'installed';
-            }
-        } catch (err) {
-            console.warn('Apple driver check failed:', err);
-        }
-        await detectDevices();
-    }
-
-    initPhoneImport();
+    detectDevices();
 }
 
 function openProjectDailyLogEntryModal(logId) {
@@ -5857,7 +4850,6 @@ function openProjectDailyLogEntryModal(logId) {
 
     const negativePressureHtml = buildNegativePressureHtml(containmentsRequiringPressure);
 
-    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.innerHTML = `
@@ -6017,7 +5009,6 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
     });
     const negativePressureHtml = buildNegativePressureHtml(containmentsRequiringPressure, readingsById);
 
-    closeAllModals();
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.innerHTML = `
@@ -6463,7 +5454,10 @@ function openPrintAirSamplesModal() {
             <div class="grid grid-cols-2 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Type of Analysis</label>
-                    <select id="print-air-analysis" class="w-full p-2.5 border rounded-lg bg-white"></select>
+                    <select id="print-air-analysis" class="w-full p-2.5 border rounded-lg bg-white">
+                        <option value="PCM: NIOSH 7400">PCM: NIOSH 7400</option>
+                        <option value="TEM: NIOSH 7402">TEM: NIOSH 7402</option>
+                    </select>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Turn Around Time</label>
@@ -6485,12 +5479,6 @@ function openPrintAirSamplesModal() {
         }
 
         const selectedSamples = airSamples.filter(s => selectedSampleIds.includes(s.id));
-        const hasLead = selectedSamples.some(s => getAirSampleHazardType(s) === 'lead');
-        const hasNonLead = selectedSamples.some(s => getAirSampleHazardType(s) !== 'lead');
-        if (hasLead && hasNonLead) {
-            showNotification('Print Pb air samples separately from Asb air samples.', true);
-            return false;
-        }
 
         const formData = {
             inspectorName: document.getElementById('print-air-inspector').value.trim(),
@@ -6505,22 +5493,6 @@ function openPrintAirSamplesModal() {
         await printAirSampleForm(currentProject, selectedSamples, formData);
     });
 
-    const updateAirAnalysisOptions = () => {
-        const analysisEl = document.getElementById('print-air-analysis');
-        if (!analysisEl) return;
-        const selectedIds = Array.from(document.querySelectorAll('.print-sample-checkbox:checked')).map(cb => cb.value);
-        const selected = airSamples.filter(s => selectedIds.includes(s.id));
-        const useLead = selected.length > 0 && selected.every(s => getAirSampleHazardType(s) === 'lead');
-        const prev = analysisEl.value;
-        if (useLead) {
-            analysisEl.innerHTML = buildLeadAnalysisOptionsHtml(prev && LEAD_ANALYSIS_OPTIONS.includes(prev) ? prev : LEAD_ANALYSIS_OPTIONS[0]);
-        } else {
-            analysisEl.innerHTML = `
-                <option value="PCM: NIOSH 7400"${prev === 'PCM: NIOSH 7400' ? ' selected' : ''}>PCM: NIOSH 7400</option>
-                <option value="TEM: NIOSH 7402"${prev === 'TEM: NIOSH 7402' ? ' selected' : ''}>TEM: NIOSH 7402</option>`;
-        }
-    };
-
     // Wire up select all/none
     setTimeout(() => {
         const sampleCheckboxes = document.querySelectorAll('.print-sample-checkbox');
@@ -6531,13 +5503,11 @@ function openPrintAirSamplesModal() {
         const updateSampleCount = () => {
             const checkedCount = document.querySelectorAll('.print-sample-checkbox:checked').length;
             if (sampleCountEl) sampleCountEl.innerHTML = `<strong>${checkedCount}</strong> sample${checkedCount !== 1 ? 's' : ''} selected`;
-            updateAirAnalysisOptions();
         };
 
         sampleCheckboxes.forEach(cb => cb.addEventListener('change', updateSampleCount));
         selectAllBtn?.addEventListener('click', () => { sampleCheckboxes.forEach(cb => cb.checked = true); updateSampleCount(); });
         selectNoneBtn?.addEventListener('click', () => { sampleCheckboxes.forEach(cb => cb.checked = false); updateSampleCount(); });
-        updateAirAnalysisOptions();
     }, 50);
 }
 
@@ -6642,7 +5612,6 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
 
         const arrayBuffer = await response.arrayBuffer();
         const zip = new PizZipClass(arrayBuffer);
-        repairDocxPlaceholderTags(zip);
         const docOptions = {
             paragraphLoop: true,
             linebreaks: true,
@@ -6658,7 +5627,6 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
             if (docOptions.modules && docOptions.modules.length > 0) {
                 docOptions.modules = [];
                 const zip2 = new PizZipClass(arrayBuffer);
-                repairDocxPlaceholderTags(zip2);
                 doc = new DocxtemplaterClass(zip2, docOptions);
                 doc.render({ ...templateData, image: '', signature: '' });
             } else {
@@ -6691,6 +5659,47 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
 // ============================================
 // DAILY LOG DOCUMENT GENERATION
 // ============================================
+
+function removeEmptyPhotoLogCells(zip) {
+    const docFile = zip?.file?.('word/document.xml');
+    if (!docFile) return;
+
+    const getCellText = (cellXml) => (cellXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [])
+        .map(t => t.replace(/<[^>]+>/g, ''))
+        .join('')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .trim();
+    const hasImage = (cellXml) => /<w:(?:drawing|pict|object)\b|<a:blip\b/.test(cellXml);
+    const isEmptyCell = (cellXml) => !hasImage(cellXml) && getCellText(cellXml) === '';
+
+    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+    let removeNextPhotoImageCell = false;
+    const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
+        const cells = rowXml.match(cellPattern);
+        if (!cells || cells.length !== 2 || !isEmptyCell(cells[1])) {
+            removeNextPhotoImageCell = false;
+            return rowXml;
+        }
+
+        const firstText = getCellText(cells[0]);
+        if (/Photo\s*#/.test(firstText)) {
+            removeNextPhotoImageCell = true;
+            return rowXml.replace(cells[1], '');
+        }
+
+        if (removeNextPhotoImageCell && hasImage(cells[0])) {
+            removeNextPhotoImageCell = false;
+            return rowXml.replace(cells[1], '');
+        }
+
+        removeNextPhotoImageCell = false;
+        return rowXml;
+    });
+
+    zip.file('word/document.xml', updatedXml);
+}
 
 function printDailyLog(project, dailyLog) {
     try {
@@ -6732,12 +5741,12 @@ function printDailyLog(project, dailyLog) {
         const clientName = project.clientName || '';
         const clientContact = project.clientContactName || '';
         const clientPhone = project.clientPhone || '';
-        const clientFax = '';
+        const clientFax = project.clientFax || '';
         const siteName = project.siteName || '';
         const contractor = project.contractor || '';
         const personnelCount = dailyLog.workersTotal || dailyLog.workers?.length || 0;
         const contractorPhone = project.contractorPhone || '';
-        const contractorFax = '';
+        const contractorFax = project.contractorFax || '';
         const projectNumber = project.projectNumber || '';
         const inspectorName = dailyLog.inspectorName || '';
         const inspectorInitials = getInitials(inspectorName);
@@ -6866,7 +5875,6 @@ function printDailyLog(project, dailyLog) {
             })
             .then(arrayBuffer => {
                 const zip = new PizZipClass(arrayBuffer);
-                repairDocxPlaceholderTags(zip);
                 const docOptions = {
                     paragraphLoop: true,
                     linebreaks: true,
@@ -6878,7 +5886,7 @@ function printDailyLog(project, dailyLog) {
 
                 try {
                     doc.render(templateData);
-                    processPhotoLogInDocx(doc.getZip());
+                    removeEmptyPhotoLogCells(doc.getZip());
                 } catch (error) {
                     console.error('Docxtemplater render error:', error);
                     if (error.properties && error.properties.errors) {
@@ -7025,8 +6033,11 @@ function applyPhoneFormatting(input) {
 }
 
 function createModal(title, content, onSave) {
-    // Only one modal at a time — stacked overlays block text input on the visible form.
-    closeAllModals();
+    // Defensive: clean up any orphaned modals first. This is a redundancy
+    // against a recurring bug where a stuck modal (one that lost its `active`
+    // state but stayed in the DOM, or one that was double-spawned) intercepts
+    // pointer events on the new modal's text inputs.
+    cleanupOrphanedModals();
 
     const modal = document.createElement('div');
     modal.className = 'modal active';
@@ -7056,7 +6067,7 @@ function createModal(title, content, onSave) {
     modal.addEventListener('click', (e) => {
         // Only close if the click started AND ended on the backdrop
         if (e.target === modal && mouseDownOnBackdrop) {
-            dismissModal(modal);
+            modal.remove();
         }
         // Reset the flag
         mouseDownOnBackdrop = false;
@@ -7068,7 +6079,7 @@ function createModal(title, content, onSave) {
         cancelBtn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            dismissModal(modal);
+            modal.remove();
         });
     }
     
@@ -7084,10 +6095,10 @@ function createModal(title, content, onSave) {
                 const asyncResult = await result;
                 if (asyncResult !== false) {
                     // Only remove if modal is still in DOM (async flow may have removed it)
-                    if (modal.parentNode) dismissModal(modal);
+                    if (modal.parentNode) modal.remove();
                 }
             } else if (result !== false) {
-                dismissModal(modal);
+                modal.remove();
             }
         });
     }
@@ -7196,14 +6207,6 @@ function escapeHtml(text) {
 }
 
 /**
- * Remove all modal overlays from the DOM. Prevents stacked modals from
- * leaving an invisible full-screen layer that blocks text input.
- */
-function closeAllModals() {
-    document.querySelectorAll('.modal').forEach(m => m.remove());
-}
-
-/**
  * Remove stuck/orphaned modal elements from the DOM.
  * Redundancy against a recurring bug where text inputs in modals become
  * un-editable because a previous modal failed to clean up, leaving an
@@ -7215,15 +6218,13 @@ function cleanupOrphanedModals() {
     document.querySelectorAll('.modal').forEach(m => {
         const hasContent = !!m.querySelector('.modal-content');
         const isActive = m.classList.contains('active');
+        // Remove anything that is either inactive (stale) or has no content
+        // (broken state). Active, well-formed modals are left alone so async
+        // multi-modal flows continue to work.
         if (!isActive || !hasContent) {
             m.remove();
         }
     });
-}
-
-function dismissModal(modal) {
-    if (modal && modal.parentNode) modal.remove();
-    cleanupOrphanedModals();
 }
 
 // Safe-image-src helper. Photos stored in projects round-trip through Excel and
@@ -7463,7 +6464,6 @@ async function exportWorkerRosterDoc(project) {
         }
         const arrayBuffer = await response.arrayBuffer();
         const zip = new PizZipClass(arrayBuffer);
-        repairDocxPlaceholderTags(zip);
         const docOptions = {
             paragraphLoop: true,
             linebreaks: true,
@@ -7473,7 +6473,6 @@ async function exportWorkerRosterDoc(project) {
         if (signatureImageModule) docOptions.modules = [signatureImageModule];
         const doc = new DocxtemplaterClass(zip, docOptions);
         doc.render(templateData);
-        applyWorkerRosterExpiredRed(doc.getZip(), templateData.roster);
         const blob = doc.getZip().generate({
             type: 'blob',
             mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -7520,13 +6519,6 @@ window.openEditMaterialModal = openEditMaterialModal;
 window.deleteMaterial = deleteMaterial;
 window.openBulkSampleModal = openBulkSampleModal;
 window.openPrintBulkSamplesModal = openPrintBulkSamplesModal;
-window.openAddWipeSampleModal = openAddWipeSampleModal;
-window.openEditWipeSampleModal = openEditWipeSampleModal;
-window.deleteWipeSample = deleteWipeSample;
-window.openPrintWipeSamplesModal = openPrintWipeSamplesModal;
-window.getProjectHazardSummary = getProjectHazardSummary;
-window.getAirSampleHazardType = getAirSampleHazardType;
-window.hazardTypeLabel = hazardTypeLabel;
 window.openEditContainmentModal = openEditContainmentModal;
 window.deleteContainment = deleteContainment;
 window.openEditAirSampleModal = openEditAirSampleModal;
