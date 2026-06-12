@@ -1285,7 +1285,13 @@
       };
       samples = samples.filter(s => s._kind === 'air' && isPbAir(s));
     } else if (samplesFilterType !== 'all') {
-      samples = samples.filter(s => s._kind === 'air' && (s.type || '').toLowerCase().includes(samplesFilterType));
+      samples = samples.filter(s => {
+        if (s._kind !== 'air') return false;
+        const t = (s.type || '').toLowerCase();
+        // Legacy data may still say "Area" until the project is migrated.
+        if (samplesFilterType === 'ambient') return t.includes('ambient') || t.includes('area');
+        return t.includes(samplesFilterType);
+      });
     }
     if (samplesFilterCont !== 'all') {
       samples = samples.filter(s => (s._kind === 'air' || s._kind === 'wipe')
@@ -1310,7 +1316,7 @@
           <button class="seg-btn" data-value="all" data-active="${samplesFilterType === 'all'}">All</button>
           <button class="seg-btn" data-value="bulk" data-active="${samplesFilterType === 'bulk'}">Bulk</button>
           ${hasLeadMaterials ? `<button class="seg-btn" data-value="wipe" data-active="${samplesFilterType === 'wipe'}">Wipe</button>` : ''}
-          <button class="seg-btn" data-value="area" data-active="${samplesFilterType === 'area'}">Area</button>
+          <button class="seg-btn" data-value="ambient" data-active="${samplesFilterType === 'ambient'}">Ambient</button>
           <button class="seg-btn" data-value="personal" data-active="${samplesFilterType === 'personal'}">Personal</button>
           <button class="seg-btn" data-value="clearance" data-active="${samplesFilterType === 'clearance'}">Clearance</button>
           ${hasLeadMaterials ? `<button class="seg-btn" data-value="pb" data-active="${samplesFilterType === 'pb' || samplesFilterType === 'lead'}">Pb</button>` : ''}

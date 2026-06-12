@@ -628,7 +628,7 @@ function renderAirSamples() {
                             <h4 class="font-bold text-gray-900">${escapeHtml(sample.sampleId || 'No ID')}</h4>
                             ${setBadge}
                         </div>
-                        <p class="text-xs text-gray-500 font-medium uppercase tracking-wide mt-0.5">${sample.type || 'Area'}</p>
+                        <p class="text-xs text-gray-500 font-medium uppercase tracking-wide mt-0.5">${sample.type || 'Ambient'}</p>
                     </div>
                     <div class="flex flex-col items-end gap-2">
                         <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border ${statusClass}">
@@ -888,8 +888,8 @@ function syncAirSampleIdsForProjectNumber(oldProjectNumber, newProjectNumber) {
         m = id.match(patterns[2]);
         if (m) {
             sample.hazardType = 'lead';
-            if (sample.type === 'Lead') sample.type = 'Area';
-            sample.sampleId = getNextAirSampleId(sample.type || 'Area', 'lead');
+            if (sample.type === 'Lead' || sample.type === 'Area') sample.type = 'Ambient';
+            sample.sampleId = getNextAirSampleId(sample.type || 'Ambient', 'lead');
         }
     });
 }
@@ -926,7 +926,7 @@ function wireAirSampleIdTypeChange(modal, typeSelectId, hazardSelectId, containe
     const container = modal.querySelector(`#${containerId}`);
     const getHazardType = () => normalizeHazardType(hazardSelect?.value || 'asbestos');
     const refreshIdField = () => {
-        const sampleType = typeSelect?.value || 'Area';
+        const sampleType = typeSelect?.value || 'Ambient';
         const hazardType = getHazardType();
         let suggestedId = currentSampleId;
         if (autoSuggestOnTypeChange || !suggestedId) {
@@ -937,7 +937,7 @@ function wireAirSampleIdTypeChange(modal, typeSelectId, hazardSelectId, containe
     typeSelect?.addEventListener('change', refreshIdField);
     hazardSelect?.addEventListener('change', () => {
         if (autoSuggestOnTypeChange) refreshIdField();
-        else renderAirSampleIdField(container, typeSelect?.value || 'Area', getHazardType(), currentSampleId, compact, prefixSpanId, suffixInputId);
+        else renderAirSampleIdField(container, typeSelect?.value || 'Ambient', getHazardType(), currentSampleId, compact, prefixSpanId, suffixInputId);
     });
     refreshIdField();
 }
@@ -1107,11 +1107,13 @@ function migrateProjectHazardData(project) {
     (project.airSamples || []).forEach(s => {
         if (String(s.type || '').toLowerCase() === 'lead') {
             s.hazardType = 'lead';
-            s.type = 'Area';
+            s.type = 'Ambient';
         } else if (!s.hazardType) {
             const id = s.sampleId || '';
             s.hazardType = /-Pb-(AS|PS|CA)\d+$/i.test(id) ? 'lead' : 'asbestos';
         }
+        // "Area" samples were renamed to "Ambient" — migrate stored data.
+        if (String(s.type || '').toLowerCase() === 'area') s.type = 'Ambient';
     });
     (project.wipeSamples || []).forEach(s => {
         if (s.type === 'Pre-Abatement') s.type = 'Pre-Start Wipe Sample';
@@ -3850,7 +3852,7 @@ function openAddAirSampleModal() {
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sample Type</label>
                     <select id="new-sample-type" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="Area" selected>Area</option>
+                        <option value="Ambient" selected>Ambient</option>
                         <option value="Personal">Personal</option>
                         <option value="Clearance">Clearance</option>
                     </select>
@@ -3980,7 +3982,7 @@ function openEditAirSampleModal(sampleId) {
                 cbId,
                 'sample-set-cb',
                 `value="${escapeHtml(s.id)}" ${inSet ? 'checked' : ''}`,
-                `<span class="modal-check-title">${escapeHtml(s.sampleId || s.id)}</span><span class="modal-check-subtitle">${escapeHtml(s.type || 'Area')}</span>`
+                `<span class="modal-check-title">${escapeHtml(s.sampleId || s.id)}</span><span class="modal-check-subtitle">${escapeHtml(s.type || 'Ambient')}</span>`
             )}
             <input type="text" class="sample-set-location border rounded ${inSet ? '' : 'hidden'}" data-sample-id="${s.id}" value="${escapeHtml(s.location || '')}" placeholder="Location / Comments" style="padding:0.3rem 0.5rem; font-size:0.875rem;">
         </div>`;
@@ -3995,7 +3997,7 @@ function openEditAirSampleModal(sampleId) {
         : 'flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.35rem;';
 
     const sampleHazard = getAirSampleHazardType(sample);
-    const resolvedType = ['Personal', 'Clearance'].includes(sample.type) ? sample.type : 'Area';
+    const resolvedType = ['Personal', 'Clearance'].includes(sample.type) ? sample.type : 'Ambient';
 
     const modal = createModal('Edit Air Sample', `
         <div id="edit-air-sample-layout" style="display: flex; gap: 1rem; align-items: flex-start; min-width:0;">
@@ -4008,7 +4010,7 @@ function openEditAirSampleModal(sampleId) {
                     <div>
                         <label class="block text-xs font-medium text-gray-700" style="margin-bottom:2px;">Sample Type</label>
                         <select id="edit-sample-type" class="w-full border rounded bg-white" style="padding:0.3rem 0.5rem; font-size:0.875rem;">
-                            <option value="Area" ${resolvedType === 'Area' ? 'selected' : ''}>Area</option>
+                            <option value="Ambient" ${resolvedType === 'Ambient' ? 'selected' : ''}>Ambient</option>
                             <option value="Personal" ${resolvedType === 'Personal' ? 'selected' : ''}>Personal</option>
                             <option value="Clearance" ${resolvedType === 'Clearance' ? 'selected' : ''}>Clearance</option>
                         </select>
@@ -4405,7 +4407,7 @@ function renderOverviewCard() {
                     <div class="flex items-start justify-between gap-2">
                         <div class="flex-1 min-w-0">
                             <div class="overview-item-name">${escapeHtml(s.sampleId || s.id)}</div>
-                            <div class="overview-item-detail">${escapeHtml(s.type || 'Area')} · Started ${s.startTime || '--:--'}</div>
+                            <div class="overview-item-detail">${escapeHtml(s.type || 'Ambient')} · Started ${s.startTime || '--:--'}</div>
                         </div>
                         <button class="btn btn-secondary btn-sm text-xs flex-shrink-0" style="padding: 0.25rem 0.5rem; min-height: auto; font-size: 0.6875rem;" onclick="openEditAirSampleModal('${s.id}')">Edit Sample</button>
                     </div>
