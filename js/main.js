@@ -164,11 +164,13 @@ function migrateProject(project) {
     (project.airSamples || []).forEach(s => {
         if (String(s.type || '').toLowerCase() === 'lead') {
             s.hazardType = 'lead';
-            s.type = 'Area';
+            s.type = 'Ambient';
         } else if (!s.hazardType) {
             const id = s.sampleId || '';
             s.hazardType = /-Pb-(AS|PS|CA)\d+$/i.test(id) ? 'lead' : 'asbestos';
         }
+        // "Area" samples were renamed to "Ambient" — migrate stored data.
+        if (String(s.type || '').toLowerCase() === 'area') s.type = 'Ambient';
     });
     return project;
 }
@@ -658,7 +660,7 @@ function openNewProjectModal(existingProject = null) {
                 const match = id.match(legacyLeadRe);
                 if (match) {
                     sample.hazardType = 'lead';
-                    if (sample.type === 'Lead') sample.type = 'Area';
+                    if (sample.type === 'Lead' || sample.type === 'Area') sample.type = 'Ambient';
                     sample.sampleId = `${projectNumber}-Pb-AS${match[1]}`;
                 }
             });
@@ -1477,7 +1479,7 @@ async function downloadArchivedProject(projectId, projectName) {
                     ? airSamplesForDay.map(s => ({
                         sampleNumber: s.sampleId || s.id || '',
                         sampleDescription: getSampleLocationDisplay(s),
-                        sampleType: s.type || 'Area',
+                        sampleType: s.type || 'Ambient',
                         start: s.startTime ? formatTime(s.startTime) : '-',
                         stop: s.stopTime ? formatTime(s.stopTime) : '-'
                     }))
