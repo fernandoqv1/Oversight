@@ -168,6 +168,15 @@
   function sampleDisplayId(sample) {
     return sample.sampleId || sample.sampleID || sample.sampleNumber || sample.id || '—';
   }
+  // A wipe sample is done once its lab-submission fields are all entered.
+  function isWipeSampleComplete(s) {
+    return !!(
+      String(s.substrate || '').trim()
+      && String(s.component || '').trim()
+      && String(s.squareFeet || '').trim()
+      && String(s.locationComment || '').trim()
+    );
+  }
   function projectSamplesList(p) {
     const air = (p.airSamples || []).map(s => ({ ...s, _kind: 'air' }));
     const bulk = (p.bulkSamples || []).map(s => ({
@@ -1181,10 +1190,14 @@
   }
 
   function renderContainmentDetail(p, c) {
-    const samples = (p.airSamples || []).filter(s => s.containmentId === c.id || s.containmentName === c.name);
+    const matchesContainment = (s) => s.containmentId === c.id || s.containmentName === c.name;
+    const airSamples = (p.airSamples || []).filter(matchesContainment).map(s => ({ ...s, _kind: 'air' }));
+    const wipeSamples = (p.wipeSamples || []).filter(matchesContainment).map(s => ({ ...s, _kind: 'wipe' }));
+    const samples = [...airSamples, ...wipeSamples];
     const logs = (p.dailyLogs || []).flatMap(l => (l.entries || []).filter(e => e.containmentId === c.id || e.containmentName === c.name).map(e => ({ entry:e, date:l.date })));
     const mats = c.materials || [];
-    const completed = samples.filter(s => s.stopTime).length;
+    const completed = airSamples.filter(s => s.stopTime).length
+      + wipeSamples.filter(isWipeSampleComplete).length;
     const pendingSamples = samples.length - completed;
     const historyItems = [
       ...(c.stageHistory || []).map(h => ({ kind:'stage', when:h.changedAt || h.date, label:h.stage || 'Stage updated', meta:h.inspectorName || '' })),
@@ -1230,7 +1243,12 @@
         <section class="panel">
           <div class="panel-head"><h2 class="panel-title">Samples</h2></div>
           ${samples.length === 0 ? '<div class="empty-row" style="padding:18px;">No samples.</div>'
-            : `<div class="samp-mini">${samples.slice(0, 6).map(s => `<div class="samp-row-mini"><div class="samp-l"><span class="mono">${esc(sampleDisplayId(s))}</span></div><div class="muted small">${esc(s.type || '')}</div><div class="samp-r"><span class="samp-status ${s.stopTime ? 'status-complete' : s.startTime ? 'status-running' : 'status-collected'}">${s.stopTime ? 'Done' : s.startTime ? 'Running' : 'Queued'}</span></div></div>`).join('')}</div>`}
+            : `<div class="samp-mini">${samples.slice(0, 6).map(s => {
+                const statusHtml = s._kind === 'wipe'
+                  ? (isWipeSampleComplete(s) ? '<span class="samp-status status-complete">Done</span>' : '<span class="samp-status status-collected">Recorded</span>')
+                  : `<span class="samp-status ${s.stopTime ? 'status-complete' : s.startTime ? 'status-running' : 'status-collected'}">${s.stopTime ? 'Done' : s.startTime ? 'Running' : 'Queued'}</span>`;
+                return `<div class="samp-row-mini"><div class="samp-l"><span class="mono">${esc(sampleDisplayId(s))}</span></div><div class="muted small">${esc(s.type || (s._kind === 'wipe' ? 'Wipe' : ''))}</div><div class="samp-r">${statusHtml}</div></div>`;
+              }).join('')}</div>`}
         </section>
         <section class="panel">
           <div class="panel-head"><h2 class="panel-title">Materials in this containment</h2></div>
@@ -1300,7 +1318,9 @@
     samples.sort((a, b) => sampleSortValue(b) - sampleSortValue(a));
     const airInView = samples.filter(s => s._kind === 'air');
     const running = airInView.filter(s => s.startTime && !s.stopTime).length;
-    const complete = airInView.filter(s => s.stopTime).length + samples.filter(s => s._kind === 'bulk').length;
+    const complete = airInView.filter(s => s.stopTime).length
+      + samples.filter(s => s._kind === 'bulk').length
+      + samples.filter(s => s._kind === 'wipe' && isWipeSampleComplete(s)).length;
     const hasBulk = (p.bulkSamples || []).length > 0;
     const hasWipe = (p.wipeSamples || []).length > 0;
     const hazardSummary = typeof window.getProjectHazardSummary === 'function' ? window.getProjectHazardSummary(p) : { hasLead: false };
@@ -1350,6 +1370,7 @@
                 </div>`;
               }
               if (s._kind === 'wipe') {
+                const wipeDone = isWipeSampleComplete(s);
                 return `<div class="samp-tr" data-id="${esc(s.id)}" data-kind="wipe">
                   <span class="mono">${esc(sampleDisplayId(s))}</span>
                   <span>${esc(s.type || 'Wipe')}</span>
@@ -1359,7 +1380,7 @@
                   <span class="mono small">${fmtDateFull(s.date)}</span>
                   <span class="mono small">—</span>
                   <span class="r mono">${esc(s.squareFeet || '—')}</span>
-                  <span><span class="samp-status status-complete">Recorded</span></span>
+                  <span>${wipeDone ? '<span class="samp-status status-complete">Done</span>' : '<span class="samp-status status-collected">Recorded</span>'}</span>
                 </div>`;
               }
               const runningRow = s.startTime && !s.stopTime;
