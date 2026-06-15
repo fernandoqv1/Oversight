@@ -415,6 +415,7 @@ ipcMain.on('native-confirm', (event, message) => {
 
 function scheduleAppleDriverSetup() {
   if (process.platform !== 'win32') return;
+  if (!app.isPackaged) return;
   setTimeout(async () => {
     try {
       if (appleDrivers.checkDriverStatus() === 'installed') return;
