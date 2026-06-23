@@ -34,7 +34,7 @@ function importUnit(u) {
   return s;
 }
 
-function exportProjectToExcel(projectData) {
+async function exportProjectToExcel(projectData) {
   try {
     if (!window.XLSX) {
       alert('Excel library not loaded. Please refresh the page.');
@@ -222,10 +222,22 @@ function exportProjectToExcel(projectData) {
 
     // Daily Log Photos sheet - backup for photo transfer (Excel cell limit forces chunking)
     const photosData = [['Log ID', 'Entry Hour', 'Photo Index', 'Chunk Index', 'Base64']];
-    (projectData.dailyLogs || []).forEach(log => {
-      (log.entries || []).sort((a, b) => (a.hour || '').localeCompare(b.hour || '')).forEach(entry => {
-        (entry.photos || []).forEach((p, photoIdx) => {
-          const b64 = p.base64 || '';
+    for (const log of (projectData.dailyLogs || [])) {
+      const entries = (log.entries || []).slice().sort((a, b) => (a.hour || '').localeCompare(b.hour || ''));
+      for (const entry of entries) {
+        for (let photoIdx = 0; photoIdx < (entry.photos || []).length; photoIdx++) {
+          const p = entry.photos[photoIdx];
+          let b64 = p.base64 || '';
+          // Load from disk if stored as a file reference
+          if (!b64 && p.fileId && window.electronAPI?.readProjectFile) {
+            try {
+              const result = await window.electronAPI.readProjectFile(projectData.id, 'photos', p.fileId);
+              if (result?.success && result.data) {
+                b64 = btoa(Array.from(new Uint8Array(result.data), byte => String.fromCharCode(byte)).join(''));
+              }
+            } catch (e) { /* skip */ }
+          }
+          if (!b64) continue;
           if (b64.length <= EXCEL_CELL_LIMIT) {
             photosData.push([log.id || '', entry.hour || '', photoIdx, 0, b64]);
           } else {
@@ -234,9 +246,9 @@ function exportProjectToExcel(projectData) {
               photosData.push([log.id || '', entry.hour || '', photoIdx, chunkIdx++, b64.slice(i, i + EXCEL_CELL_LIMIT - 100)]);
             }
           }
-        });
-      });
-    });
+        }
+      }
+    }
     if (photosData.length > 1) {
       const photosSheet = XLSX.utils.aoa_to_sheet(photosData);
       XLSX.utils.book_append_sheet(workbook, photosSheet, '_DailyLogPhotos');
@@ -329,6 +341,17 @@ function exportProjectToExcel(projectData) {
     XLSX.utils.book_append_sheet(workbook, fullDataSheet, '_FullData');
     protectSheet(fullDataSheet);
 
+    // Documents manifest sheet
+    if (Array.isArray(projectData.documents) && projectData.documents.length > 0) {
+      const docsData = [['Document ID', 'Name', 'File ID', 'MIME Type', 'Added At', 'Size (bytes)']];
+      projectData.documents.forEach(doc => {
+        docsData.push([doc.id || '', doc.name || '', doc.fileId || '', doc.mimeType || '', doc.addedAt || '', doc.sizeBytes || 0]);
+      });
+      const docsSheet = XLSX.utils.aoa_to_sheet(docsData);
+      XLSX.utils.book_append_sheet(workbook, docsSheet, 'Documents');
+      protectSheet(docsSheet);
+    }
+
     // Generate and download
     const fileName = `${projectData.projectNumber || 'project'}_${projectData.siteName || 'export'}.xlsx`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
     XLSX.writeFile(workbook, fileName);
@@ -395,6 +418,9 @@ function importProjectFromExcel(fileBuffer) {
         if (jsonStr) {
           try {
             const projectData = JSON.parse(jsonStr);
+            // #region agent log
+            fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/excel.js:importProjectFromExcel',message:'import path',data:{path:'_FullData',hasDailyLogPhotosSheet:workbook.SheetNames.includes('_DailyLogPhotos')},timestamp:Date.now(),hypothesisId:'H-B'})}).catch(()=>{});
+            // #endregion
             // Preserve stable Oversight Project ID so re-import updates instead of duplicating
             if (!projectData.id) {
               projectData.id = _genId('prj');
@@ -573,33 +599,7 @@ function importProjectFromExcel(fileBuffer) {
     }
 
     // Merge photos from _DailyLogPhotos into dailyLogs
-    if (workbook.SheetNames.includes('_DailyLogPhotos') && projectData.dailyLogs) {
-      const photosSheet = XLSX.utils.sheet_to_json(workbook.Sheets['_DailyLogPhotos'], { header: 1 });
-      const photoChunks = new Map(); // key: "logId|hour|photoIdx"
-      photosSheet.slice(1).forEach(row => {
-        if (row.length < 5) return;
-        const key = `${row[0]}|${row[1]}|${row[2]}`;
-        const chunkIdx = row[3];
-        const chunk = row[4] || '';
-        if (!photoChunks.has(key)) photoChunks.set(key, []);
-        photoChunks.get(key).push({ idx: chunkIdx, data: String(chunk) });
-      });
-      photoChunks.forEach((chunks, key) => {
-        const [logId, hour, photoIdx] = key.split('|');
-        chunks.sort((a, b) => a.idx - b.idx);
-        const base64 = chunks.map(c => c.data).join('');
-        const log = projectData.dailyLogs.find(l => l.id === logId);
-        if (log) {
-          const entry = (log.entries || []).find(e => (e.hour || '') === hour);
-          if (entry) {
-            if (!entry.photos) entry.photos = [];
-            while (entry.photos.length <= parseInt(photoIdx, 10)) entry.photos.push({ id: _genId('ph'), base64: '' });
-            const idx = parseInt(photoIdx, 10);
-            entry.photos[idx] = { id: (entry.photos[idx] && entry.photos[idx].id) || _genId('ph'), base64 };
-          }
-        }
-      });
-    }
+    _mergeDailyLogPhotosFromWorkbook(projectData, workbook);
 
     // Air Samples
     if (workbook.SheetNames.includes('Air Samples')) {
@@ -696,6 +696,50 @@ function importProjectFromExcel(fileBuffer) {
   }
 }
 
+/** Merge base64 photo data from the _DailyLogPhotos sheet into project daily logs. */
+function _mergeDailyLogPhotosFromWorkbook(projectData, workbook) {
+  if (!workbook.SheetNames.includes('_DailyLogPhotos') || !projectData.dailyLogs) return 0;
+
+  const photosSheet = XLSX.utils.sheet_to_json(workbook.Sheets['_DailyLogPhotos'], { header: 1 });
+  const photoChunks = new Map(); // key: "logId|hour|photoIdx"
+  photosSheet.slice(1).forEach(row => {
+    if (row.length < 5) return;
+    const key = `${row[0]}|${row[1]}|${row[2]}`;
+    const chunkIdx = row[3];
+    const chunk = row[4] || '';
+    if (!photoChunks.has(key)) photoChunks.set(key, []);
+    photoChunks.get(key).push({ idx: chunkIdx, data: String(chunk) });
+  });
+
+  let merged = 0;
+  photoChunks.forEach((chunks, key) => {
+    const [logId, hour, photoIdx] = key.split('|');
+    chunks.sort((a, b) => a.idx - b.idx);
+    const base64 = chunks.map(c => c.data).join('');
+    if (!base64) return;
+
+    const log = projectData.dailyLogs.find(l => String(l.id) === String(logId));
+    if (!log) return;
+    const entry = (log.entries || []).find(e => String(e.hour || '') === String(hour));
+    if (!entry) return;
+
+    if (!entry.photos) entry.photos = [];
+    const idx = parseInt(photoIdx, 10);
+    while (entry.photos.length <= idx) entry.photos.push({ id: _genId('ph'), base64: '' });
+
+    const existing = entry.photos[idx] || {};
+    const photo = { ...existing, id: existing.id || _genId('ph'), base64 };
+    delete photo.fileId; // base64 is now authoritative; old disk ref is invalid on a new machine
+    entry.photos[idx] = photo;
+    merged++;
+  });
+
+  // #region agent log
+  fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/excel.js:_mergeDailyLogPhotosFromWorkbook',message:'photos merged from excel sheet',data:{merged,chunkKeys:photoChunks.size,projectId:projectData.id},timestamp:Date.now(),hypothesisId:'H-B',runId:'post-fix'})}).catch(()=>{});
+  // #endregion
+  return merged;
+}
+
 /** Read Oversight Project ID from Overview when missing; ensure id is always set. */
 function _finalizeImportedProject(projectData, workbook) {
   if ((!projectData.id || projectData.id === '') && workbook.SheetNames.includes('Overview')) {
@@ -705,6 +749,22 @@ function _finalizeImportedProject(projectData, workbook) {
   }
   if (!projectData.id) projectData.id = _genId('prj');
   if (projectData.siteName && !projectData.name) projectData.name = projectData.siteName;
+
+  // _FullData import skips the fallback sheet reconstruction; always merge photos here.
+  _mergeDailyLogPhotosFromWorkbook(projectData, workbook);
+
+  // #region agent log
+  let photoTotal = 0, withBase64 = 0, withFileId = 0, withNeither = 0;
+  (projectData.dailyLogs || []).forEach(log => (log.entries || []).forEach(e => (e.photos || []).forEach(p => {
+    photoTotal++;
+    const hasB64 = !!(p.base64 && String(p.base64).trim());
+    const hasFid = !!p.fileId;
+    if (hasB64) withBase64++;
+    if (hasFid) withFileId++;
+    if (!hasB64 && !hasFid) withNeither++;
+  })));
+  fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/excel.js:_finalizeImportedProject',message:'import photo stats after merge',data:{projectId:projectData.id,photoTotal,withBase64,withFileId,withNeither,hasDailyLogPhotosSheet:workbook.SheetNames.includes('_DailyLogPhotos')},timestamp:Date.now(),hypothesisId:'H-B',runId:'post-fix'})}).catch(()=>{});
+  // #endregion
   return projectData;
 }
 

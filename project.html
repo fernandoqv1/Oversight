@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:7450; media-src 'self' data: blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="AsbTrack">
@@ -905,6 +905,7 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
           <button class="proj-tab" data-tab="materials" role="tab"><span>Materials &amp; spaces</span> <span class="tab-count mono" id="tabcount-materials">0</span></button>
           <button class="proj-tab" data-tab="team" role="tab"><span>Workers</span> <span class="tab-count mono" id="tabcount-workers">0</span></button>
           <button class="proj-tab" data-tab="docs" role="tab"><span>Chain of custody</span></button>
+          <button class="proj-tab" data-tab="project-documents" role="tab"><span>Documents</span> <span class="tab-count mono" id="tabcount-documents">0</span></button>
         </nav>
 
         <div class="proj-content">
@@ -915,6 +916,7 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
           <div class="tab-pane" data-tab="materials" id="tab-materials" hidden></div>
           <div class="tab-pane" data-tab="team" id="tab-team" hidden></div>
           <div class="tab-pane" data-tab="docs" id="tab-docs" hidden></div>
+          <div class="tab-pane" data-tab="project-documents" id="tab-project-documents" hidden></div>
         </div>
       </div>
       <div id="oversight-project-error" hidden style="padding:48px 32px;"><div class="empty-state"><div class="title">Unable to load project</div><div class="sub"><a href="index.html" class="btn-link">Return to dashboard</a></div></div></div>

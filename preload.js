@@ -51,4 +51,41 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-status', listener);
     return () => ipcRenderer.removeListener('update-status', listener);
   },
+  startWirelessImport: () => ipcRenderer.invoke('start-wireless-import'),
+  stopWirelessImport: () => ipcRenderer.invoke('stop-wireless-import'),
+  onWirelessPhotoReceived: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('wireless-photo-received', listener);
+    return () => ipcRenderer.removeListener('wireless-photo-received', listener);
+  },
+  // Project file storage (photos, documents)
+  saveProjectFile: (projectId, category, fileId, buffer) =>
+    ipcRenderer.invoke('save-project-file', projectId, category, fileId, buffer),
+  readProjectFile: (projectId, category, fileId) =>
+    ipcRenderer.invoke('read-project-file', projectId, category, fileId),
+  deleteProjectFile: (projectId, category, fileId) =>
+    ipcRenderer.invoke('delete-project-file', projectId, category, fileId),
+  listProjectFiles: (projectId, category) =>
+    ipcRenderer.invoke('list-project-files', projectId, category),
+  deleteProjectFolder: (projectId) =>
+    ipcRenderer.invoke('delete-project-folder', projectId),
+  copyFileToProject: (projectId, category, fileId, srcPath) =>
+    ipcRenderer.invoke('copy-file-to-project', projectId, category, fileId, srcPath),
+  openFileDialog: (options) =>
+    ipcRenderer.invoke('open-file-dialog', options),
+  // Disk-backed project JSON storage (resilient against localStorage wipes)
+  saveProjectJson: (projectId, jsonString) => ipcRenderer.invoke('save-project-json', projectId, jsonString),
+  loadProjectJson: (projectId) => ipcRenderer.invoke('load-project-json', projectId),
+  listAllProjectIds: () => ipcRenderer.invoke('list-all-project-ids'),
+  deleteProjectJson: (projectId) => ipcRenderer.invoke('delete-project-json', projectId),
+  // Wireless document upload
+  startWirelessDocumentImport: () => ipcRenderer.invoke('start-wireless-document-import'),
+  stopWirelessDocumentImport: () => ipcRenderer.invoke('stop-wireless-document-import'),
+  onWirelessDocumentReceived: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('wireless-document-received', listener);
+    return () => ipcRenderer.removeListener('wireless-document-received', listener);
+  },
 });

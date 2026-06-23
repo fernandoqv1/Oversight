@@ -2834,6 +2834,10 @@ function openVisualInspectionModal(inspectionType, containmentName) {
                         <input type="text" id="visual-inspection-inspector" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspector name" value="${escapeHtml((typeof getInspectorProfile === 'function' ? getInspectorProfile() : {}).name || '')}" required>
                     </div>
                     <div>
+                        <label for="visual-inspection-date" class="block text-sm font-medium text-gray-700 mb-1">Inspection Date</label>
+                        <input type="date" id="visual-inspection-date" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" value="${typeof getTodayLocal === 'function' ? getTodayLocal() : ''}">
+                    </div>
+                    <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Findings</label>
                         <div class="space-y-2 mt-2">
                             ${buildModalRadioRow('visual-inspection-pass', 'visual-inspection-finding', 'pass', '<span class="text-sm font-medium text-green-700">Pass</span>')}
@@ -2894,6 +2898,7 @@ function openVisualInspectionModal(inspectionType, containmentName) {
             const finding = form.querySelector('input[name="visual-inspection-finding"]:checked')?.value;
             const comments = form.querySelector('#visual-inspection-comments').value.trim();
             const inspectorName = form.querySelector('#visual-inspection-inspector').value.trim();
+            const inspectionDate = form.querySelector('#visual-inspection-date').value;
             const regulatedAreaCheckbox = form.querySelector('#visual-inspection-regulated-area');
             const isRegulatedArea = regulatedAreaCheckbox ? regulatedAreaCheckbox.checked : false;
 
@@ -2910,6 +2915,7 @@ function openVisualInspectionModal(inspectionType, containmentName) {
                 passed: finding === 'pass',
                 comments: comments || '',
                 inspectorName: inspectorName,
+                date: inspectionDate || (typeof getTodayLocal === 'function' ? getTodayLocal() : ''),
                 regulatedArea: isRegulatedArea
             });
             closeModal();
@@ -3503,19 +3509,21 @@ function openEditContainmentModal(containmentId) {
             )}
         </div>`;
     
-    // Show visual inspection history
+    // Show visual inspection history with editable dates
     const inspectionsHtml = (containment.visualInspections || []).length > 0
         ? `<div class="containment-vi-history" style="margin-top:0.5rem;">
             <label class="block font-medium text-gray-500 uppercase tracking-wide" style="font-size:10px;margin-bottom:0.25rem;">Visual Inspections</label>
             <div style="display:flex;flex-direction:column;gap:0.25rem;">
-            ${(containment.visualInspections || []).map(vi => {
+            ${(containment.visualInspections || []).map((vi, idx) => {
                 const passClass = vi.passed ? 'text-green-700 bg-green-50 border-green-200' : 'text-red-700 bg-red-50 border-red-200';
+                const borderColor = vi.passed ? '#bbf7d0' : '#fecaca';
                 const passText = vi.passed ? 'Pass' : 'Fail';
                 return `<div class="border rounded ${passClass}" style="font-size:0.6875rem;line-height:1.35;padding:0.3rem 0.45rem;">
-                    <span class="font-medium">${escapeHtml(vi.type || '')} Visual:</span> ${passText}
-                    ${vi.inspectorName ? ` — ${escapeHtml(vi.inspectorName)}` : ''}
-                    ${vi.date ? ` (${formatDateText(vi.date)})` : ''}
-                    ${vi.comments ? `<br><span class="italic" style="font-size:0.625rem;line-height:1.3;">${escapeHtml(vi.comments)}</span>` : ''}
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;flex-wrap:wrap;">
+                        <span><span class="font-medium">${escapeHtml(vi.type || '')} Visual:</span> ${passText}${vi.inspectorName ? ` — ${escapeHtml(vi.inspectorName)}` : ''}</span>
+                        <input type="date" id="vi-date-${idx}" value="${escapeHtml(vi.date || '')}" style="font-size:0.6875rem;padding:0.1rem 0.3rem;border:1px solid ${borderColor};border-radius:4px;background:transparent;" title="Edit inspection date">
+                    </div>
+                    ${vi.comments ? `<span class="italic" style="font-size:0.625rem;line-height:1.3;">${escapeHtml(vi.comments)}</span>` : ''}
                 </div>`;
             }).join('')}
             </div>
@@ -3641,7 +3649,7 @@ function openEditContainmentModal(containmentId) {
                     passed: false,
                     comments: inspectionResult.comments || '',
                     inspectorName: inspectionResult.inspectorName || '',
-                    date: getTodayLocal(),
+                    date: inspectionResult.date || getTodayLocal(),
                     createdAt: Date.now()
                 });
                 
@@ -3680,15 +3688,21 @@ function openEditContainmentModal(containmentId) {
             });
         }
         
-        // Save visual inspection if inspection was required and passed
+        // Apply any date edits made inline in the history rows
         let visualInspections = containment.visualInspections ? [...containment.visualInspections] : [];
+        visualInspections = visualInspections.map((vi, idx) => {
+            const dateInput = document.getElementById(`vi-date-${idx}`);
+            return dateInput && dateInput.value ? { ...vi, date: dateInput.value } : vi;
+        });
+
+        // Save visual inspection if inspection was required and passed
         if (requiresInspection && visualInspectionData && visualInspectionData.passed) {
             visualInspections.push({
                 type: inspectionType,
                 passed: true,
                 comments: visualInspectionData.comments || '',
                 inspectorName: visualInspectionData.inspectorName || '',
-                date: getTodayLocal(),
+                date: visualInspectionData.date || getTodayLocal(),
                 createdAt: Date.now()
             });
         }
@@ -5900,6 +5914,215 @@ function openPhoneImportModal(logDate, onImportComplete) {
     initPhoneImport();
 }
 
+async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
+    if (!window.electronAPI?.startWirelessImport) {
+        showNotification('Wireless import is not available in this version.', true);
+        return;
+    }
+
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.style.zIndex = '10001';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width:700px;">
+            <h3>Import Photos</h3>
+            <div id="wireless-body" style="min-height:200px;">
+                <div class="flex items-center justify-center py-10">
+                    <div class="text-center">
+                        <div style="width:40px;height:40px;border:3px solid #e5e7eb;border-top-color:#6366f1;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto;"></div>
+                        <p class="text-sm text-gray-500 mt-3">Starting wireless connection&#8230;</p>
+                        <p class="text-xs mt-3" style="color:#d97706;max-width:260px;margin-left:auto;margin-right:auto;">&#128246; Make sure Wi-Fi is turned <strong>ON</strong> on your phone before scanning the QR code.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="wireless-cancel">Cancel</button>
+                <button type="button" id="wireless-switch-wired" style="margin:0 0.5rem;padding:6px 14px;font-size:0.8rem;color:#6b7280;background:#fff;border:1px solid #d1d5db;border-radius:6px;cursor:pointer;white-space:nowrap;">&#128241; USB Cable Instead</button>
+                <button type="button" class="btn btn-primary" id="wireless-done" disabled>Done (0 photos received)</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const body        = modal.querySelector('#wireless-body');
+    const cancelBtn   = modal.querySelector('#wireless-cancel');
+    const doneBtn     = modal.querySelector('#wireless-done');
+
+    let receivedPhotos = [];
+    let unsubscribeReceived = () => {};
+    let stopped = false;
+
+    const stopImport = async () => {
+        if (stopped) return;
+        stopped = true;
+        unsubscribeReceived();
+        try { await window.electronAPI.stopWirelessImport?.(); } catch { /* ignore */ }
+    };
+
+    const closeModal = async () => {
+        await stopImport();
+        modal.remove();
+    };
+
+    cancelBtn.addEventListener('click', closeModal);
+
+    modal.querySelector('#wireless-switch-wired')?.addEventListener('click', async () => {
+        await closeModal();
+        openPhoneImportModal(logDate || getTodayLocal(), onImportComplete);
+    });
+
+    let mouseDownOnBackdrop = false;
+    modal.addEventListener('mousedown', (e) => { mouseDownOnBackdrop = (e.target === modal); });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal && mouseDownOnBackdrop) closeModal();
+        mouseDownOnBackdrop = false;
+    });
+
+    function updateDoneBtn() {
+        const count = receivedPhotos.length;
+        doneBtn.disabled = count === 0;
+        doneBtn.textContent = count === 0
+            ? 'Done (0 photos received)'
+            : `Done \u2014 Import ${count} photo${count !== 1 ? 's' : ''}`;
+    }
+
+    function addReceivedThumbnail(photo) {
+        const grid  = modal.querySelector('#wireless-received-grid');
+        const badge = modal.querySelector('#wireless-received-badge');
+        if (!grid) return;
+        const count = receivedPhotos.length;
+        if (badge) badge.textContent = `${count} photo${count !== 1 ? 's' : ''} received \u2014 select Done when finished`;
+
+        const tile = document.createElement('div');
+        tile.title = photo.name;
+        tile.style.cssText = 'width:72px;height:72px;border-radius:0.4rem;overflow:hidden;background:#f3f4f6;flex-shrink:0;display:flex;align-items:center;justify-content:center;border:1px solid #e5e7eb;';
+        tile.innerHTML = '<div style="width:20px;height:20px;border:2px solid #e5e7eb;border-top-color:#6366f1;border-radius:50%;animation:spin 0.8s linear infinite;"></div>';
+        grid.appendChild(tile);
+
+        window.electronAPI.readImportedPhoto(photo.localPath).then((photoData) => {
+            if (photoData?.success) {
+                const arr = bytesFromImportedPhotoData(photoData);
+                if (arr && arr.length > 0) {
+                    const blob = new Blob([arr], { type: photoData.mimeType || 'image/jpeg' });
+                    const url  = URL.createObjectURL(blob);
+                    tile.innerHTML = `<img src="${url}" style="width:100%;height:100%;object-fit:cover;" alt="${escapeHtml(photo.name)}">`;
+                    const revoke = () => URL.revokeObjectURL(url);
+                    cancelBtn.addEventListener('click', revoke, { once: true });
+                    doneBtn.addEventListener('click', revoke, { once: true });
+                }
+            }
+        }).catch(() => {
+            tile.textContent = '\uD83D\uDCF7';
+            tile.style.fontSize = '1.5rem';
+        });
+    }
+
+    // Subscribe to incoming photo events from main process
+    unsubscribeReceived = window.electronAPI.onWirelessPhotoReceived?.((photo) => {
+        receivedPhotos.push(photo);
+        updateDoneBtn();
+        addReceivedThumbnail(photo);
+    }) || (() => {});
+
+    // Kick off the AP + HTTP server
+    let startResult;
+    try {
+        startResult = await window.electronAPI.startWirelessImport();
+    } catch (err) {
+        startResult = { success: false, error: err.message };
+    }
+
+    if (!startResult?.success) {
+        body.innerHTML = `
+            <div class="text-center py-6">
+                <p class="text-sm font-semibold text-red-600 mb-2">Could not start wireless connection</p>
+                <p class="text-sm text-gray-600 mb-4">${escapeHtml(startResult?.error || 'Unknown error')}</p>
+                <div class="text-left text-sm text-gray-600 bg-gray-50 rounded-lg p-3" style="max-width:400px;margin:0 auto;">
+                    <p class="font-medium text-gray-700 mb-1">Try one of these instead:</p>
+                    <ul style="list-style:disc;padding-left:1.25rem;line-height:2;">
+                        <li>Use a USB cable and tap <strong>Import from Phone</strong></li>
+                        <li>Enable hotspot on your phone, connect this PC to it, then retry</li>
+                        <li>If Windows Mobile Hotspot is on, turn it off and retry</li>
+                    </ul>
+                </div>
+            </div>
+        `;
+        doneBtn.style.display = 'none';
+        return;
+    }
+
+    const { ssid, password, uploadUrl, wifiQr, urlQr } = startResult;
+
+    body.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.25rem;">
+            <div class="text-center">
+                <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Step 1 &mdash; Join Wi-Fi</p>
+                <img src="${wifiQr}" alt="Wi-Fi QR code" style="width:190px;height:190px;border-radius:0.5rem;border:1px solid #e5e7eb;">
+                <p class="text-xs text-gray-700 mt-2"><strong>Network:</strong> ${escapeHtml(ssid)}</p>
+                <div style="display:flex;align-items:center;justify-content:center;gap:0.4rem;margin-top:0.25rem;">
+                    <span class="text-xs text-gray-700"><strong>Password:</strong> ${escapeHtml(password)}</span>
+                    <button type="button" id="wireless-copy-pw" style="font-size:0.7rem;padding:2px 7px;border:1px solid #d1d5db;border-radius:4px;background:white;cursor:pointer;color:#6b7280;">Copy</button>
+                </div>
+            </div>
+            <div class="text-center">
+                <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Step 2 &mdash; Open Upload Page</p>
+                <img src="${urlQr}" alt="Upload page QR code" style="width:190px;height:190px;border-radius:0.5rem;border:1px solid #e5e7eb;">
+                <p class="text-xs text-gray-400 mt-2" style="word-break:break-all;line-height:1.4;">${escapeHtml(uploadUrl)}</p>
+            </div>
+        </div>
+        <div style="border-top:1px solid #f3f4f6;padding-top:0.75rem;">
+            <p id="wireless-received-badge" class="text-sm text-gray-500 mb-2">Waiting for photos&hellip;</p>
+            <div id="wireless-received-grid" class="flex flex-wrap gap-2"></div>
+        </div>
+    `;
+
+    modal.querySelector('#wireless-copy-pw')?.addEventListener('click', () => {
+        navigator.clipboard?.writeText(password).then(() => {
+            const btn = modal.querySelector('#wireless-copy-pw');
+            if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { if (btn) btn.textContent = 'Copy'; }, 2000); }
+        }).catch(() => {});
+    });
+
+    doneBtn.addEventListener('click', async () => {
+        if (receivedPhotos.length === 0) return;
+        doneBtn.disabled = true;
+        cancelBtn.disabled = true;
+        doneBtn.textContent = 'Processing\u2026';
+
+        await stopImport();
+
+        const files = [];
+        for (let i = 0; i < receivedPhotos.length; i++) {
+            try {
+                const photoData = await window.electronAPI.readImportedPhoto(receivedPhotos[i].localPath);
+                const arr = bytesFromImportedPhotoData(photoData);
+                if (photoData?.success && arr && arr.length > 0) {
+                    const ext  = (photoData.name || '').split('.').pop()?.toLowerCase() || 'jpg';
+                    const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', gif: 'image/gif' };
+                    const mime = mimeMap[ext] || photoData.mimeType || 'image/jpeg';
+                    files.push(new File([new Blob([arr], { type: mime })], photoData.name || `wireless_${i}.jpg`, { type: mime }));
+                }
+            } catch (err) {
+                console.error('[wireless-modal] readImportedPhoto error:', err);
+            }
+        }
+
+        setTimeout(async () => {
+            modal.remove();
+            if (files.length > 0 && onImportComplete) {
+                try {
+                    await onImportComplete(files);
+                } catch (err) {
+                    showNotification(err?.message || 'Failed to attach imported photos.', true);
+                }
+                showNotification(`${files.length} photo${files.length !== 1 ? 's' : ''} imported wirelessly.`);
+            } else {
+                showNotification('No photos were received.', true);
+            }
+        }, 200);
+    });
+}
+
 function openProjectDailyLogEntryModal(logId) {
     if (!currentProject) { showNotification('Project data unavailable.', true); return; }
 
@@ -5934,7 +6157,7 @@ function openProjectDailyLogEntryModal(logId) {
                     <label class="block text-sm font-medium text-gray-700 mb-1">Photos (max 5)</label>
                     <div class="flex gap-2 items-center flex-wrap">
                         <input type="file" id="daily-log-entry-photos" accept="image/*,.heic,.heif" multiple class="text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" style="flex:1;min-width:0;">
-                        <button type="button" id="daily-log-entry-phone-import" class="btn btn-secondary" style="white-space:nowrap;padding:6px 12px;font-size:0.82rem;">&#128241; Import from Phone</button>
+                        <button type="button" id="daily-log-entry-import-photos" class="btn btn-secondary" style="white-space:nowrap;padding:6px 12px;font-size:0.82rem;">&#128247; Import Photos</button>
                     </div>
                     <div id="daily-log-entry-photo-previews" class="mt-2 flex flex-wrap gap-2"></div>
                 </div>
@@ -5987,12 +6210,12 @@ function openProjectDailyLogEntryModal(logId) {
 
     const logForEntry = (currentProject.dailyLogs || []).find(l => l.id === logId);
     const logDateForImport = logForEntry?.date || getTodayLocal();
-    modal.querySelector('#daily-log-entry-phone-import')?.addEventListener('click', () => {
-        openPhoneImportModal(logDateForImport, async (importedFiles) => {
+    modal.querySelector('#daily-log-entry-import-photos')?.addEventListener('click', () => {
+        openWirelessPhotoImportModal(async (importedFiles) => {
             const prepared = await preparePhotoFilesForUpload(importedFiles);
             selectedPhotoFiles = [...selectedPhotoFiles, ...prepared].slice(0, MAX_PHOTOS);
             renderPhotoPreviews();
-        });
+        }, logDateForImport);
     });
 
     modal.querySelector('#daily-log-entry-form')?.addEventListener('submit', async (event) => {
@@ -6022,8 +6245,14 @@ function openProjectDailyLogEntryModal(logId) {
         const photos = [];
         for (const file of selectedPhotoFiles) {
             try {
-                const base64 = await compressImageToBase64(file);
-                photos.push({ id: generateId(), base64 });
+                const photoId = generateId();
+                const fileId = await savePhotoToProject(currentProject.id, photoId, file);
+                if (fileId) {
+                    photos.push({ id: photoId, fileId });
+                } else {
+                    const base64 = await compressImageToBase64(file);
+                    photos.push({ id: photoId, base64 });
+                }
             } catch (err) {
                 showNotification(`Failed to process image: ${file.name}`, true);
                 return;
@@ -6094,7 +6323,7 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
                     <label class="block text-sm font-medium text-gray-700 mb-1">Photos (max 5)</label>
                     <div class="flex gap-2 items-center flex-wrap">
                         <input type="file" id="daily-log-entry-edit-photos" accept="image/*,.heic,.heif" multiple class="text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" style="flex:1;min-width:0;">
-                        <button type="button" id="daily-log-entry-edit-phone-import" class="btn btn-secondary" style="white-space:nowrap;padding:6px 12px;font-size:0.82rem;">&#128241; Import from Phone</button>
+                        <button type="button" id="daily-log-entry-edit-import-photos" class="btn btn-secondary" style="white-space:nowrap;padding:6px 12px;font-size:0.82rem;">&#128247; Import Photos</button>
                     </div>
                     <div id="daily-log-entry-edit-photo-previews" class="mt-2 flex flex-wrap gap-2"></div>
                 </div>
@@ -6123,14 +6352,16 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
 
     const previewsEl = modal.querySelector('#daily-log-entry-edit-photo-previews');
 
-    const renderEditPhotoPreviews = () => {
+    const renderEditPhotoPreviews = async () => {
         const items = [];
-        existingPhotos.forEach((p, i) => {
+        for (let i = 0; i < existingPhotos.length; i++) {
+            const p = existingPhotos[i];
+            const src = await readPhotoAsObjectUrl(p, currentProject.id);
             items.push(`<div class="relative inline-block">
-                <img src="${safeImageSrc(p.base64)}" class="log-photo-preview" alt="Photo">
+                <img src="${src || SAFE_IMAGE_FALLBACK}" class="log-photo-preview" alt="Photo">
                 <button type="button" class="remove-existing-photo absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white rounded-full text-xs leading-none hover:bg-red-600" data-index="${i}">&times;</button>
             </div>`);
-        });
+        }
         newPhotoFiles.forEach((f, i) => {
             items.push(`<div class="relative inline-block">
                 <img src="${URL.createObjectURL(f)}" class="log-photo-preview" alt="Preview">
@@ -6164,13 +6395,13 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
     });
 
     const editLogDateForImport = log?.date || getTodayLocal();
-    modal.querySelector('#daily-log-entry-edit-phone-import')?.addEventListener('click', () => {
-        openPhoneImportModal(editLogDateForImport, async (importedFiles) => {
+    modal.querySelector('#daily-log-entry-edit-import-photos')?.addEventListener('click', () => {
+        openWirelessPhotoImportModal(async (importedFiles) => {
             const remaining = Math.max(0, MAX_PHOTOS - existingPhotos.length - newPhotoFiles.length);
             const prepared = await preparePhotoFilesForUpload(importedFiles.slice(0, remaining));
             newPhotoFiles = [...newPhotoFiles, ...prepared].slice(0, MAX_PHOTOS - existingPhotos.length);
             renderEditPhotoPreviews();
-        });
+        }, editLogDateForImport);
     });
 
     renderEditPhotoPreviews();
@@ -6201,8 +6432,14 @@ function openProjectDailyLogEntryEditModal(logId, entryId) {
         const photos = [...existingPhotos];
         for (const file of newPhotoFiles) {
             try {
-                const base64 = await compressImageToBase64(file);
-                photos.push({ id: generateId(), base64 });
+                const photoId = generateId();
+                const fileId = await savePhotoToProject(currentProject.id, photoId, file);
+                if (fileId) {
+                    photos.push({ id: photoId, fileId });
+                } else {
+                    const base64 = await compressImageToBase64(file);
+                    photos.push({ id: photoId, base64 });
+                }
             } catch (err) {
                 showNotification(`Failed to process image: ${file.name}`, true);
                 return;
@@ -6269,7 +6506,10 @@ function renderDailyLogView(project) {
                             <div class="mt-2">
                                 <button type="button" class="toggle-photos-btn text-xs text-indigo-600 hover:text-indigo-800">Show Photos</button>
                                 <div class="entry-photos-container hidden mt-2 flex gap-2 flex-wrap">
-                                    ${entry.photos.map(p => `<img src="${safeImageSrc(p.base64)}" alt="Photo" class="rounded border border-gray-200" style="max-width:3.5in;max-height:3.5in;width:auto;height:auto;object-fit:contain">`).join('')}
+                                    ${entry.photos.map(p => p.fileId
+                                        ? `<img data-project-id="${escapeHtml(currentProject.id)}" data-file-id="${escapeHtml(p.fileId)}" src="${SAFE_IMAGE_FALLBACK}" alt="Photo" class="rounded border border-gray-200 disk-photo" style="max-width:3.5in;max-height:3.5in;width:auto;height:auto;object-fit:contain">`
+                                        : `<img src="${safeImageSrc(p.base64)}" alt="Photo" class="rounded border border-gray-200" style="max-width:3.5in;max-height:3.5in;width:auto;height:auto;object-fit:contain">`
+                                    ).join('')}
                                 </div>
                             </div>
                         ` : ''}
@@ -6383,6 +6623,7 @@ function renderDailyLogView(project) {
                 const isHidden = container.classList.contains('hidden');
                 container.classList.toggle('hidden', !isHidden);
                 togglePhotosBtn.textContent = isHidden ? 'Hide Photos' : 'Show Photos';
+                if (isHidden) loadDiskPhotosInContainer(container);
             }
         }
     };
@@ -6749,7 +6990,7 @@ async function printAirSampleForm(project, airSamples, formData = {}) {
 // DAILY LOG DOCUMENT GENERATION
 // ============================================
 
-function printDailyLog(project, dailyLog) {
+async function printDailyLog(project, dailyLog) {
     try {
         let DocxtemplaterClass = window.Docxtemplater || (typeof Docxtemplater !== 'undefined' ? Docxtemplater : null);
         let PizZipClass = window.PizZip || (typeof PizZip !== 'undefined' ? PizZip : null);
@@ -6812,21 +7053,31 @@ function printDailyLog(project, dailyLog) {
         let photoCounter = 1;
         if (dailyLog.entries && dailyLog.entries.length > 0) {
             const sortedEntries = [...dailyLog.entries].sort((a, b) => (a.hour || '').localeCompare(b.hour || ''));
-            sortedEntries.forEach(entry => {
+            for (const entry of sortedEntries) {
                 const entryPhotoNums = [];
-                (entry.photos || []).forEach(p => {
-                    const base64 = (p.base64 || '').trim();
-                    if (!base64) return; // Skip empty photos - don't create empty cells
+                for (const p of (entry.photos || [])) {
+                    let base64 = (p.base64 || '').trim();
+                    // Load from disk if stored as a file reference
+                    if (!base64 && p.fileId && window.electronAPI?.readProjectFile) {
+                        try {
+                            const result = await window.electronAPI.readProjectFile(project.id, 'photos', p.fileId);
+                            if (result?.success && result.data) {
+                                base64 = Buffer.from ? Buffer.from(result.data).toString('base64')
+                                    : btoa(Array.from(new Uint8Array(result.data), b => String.fromCharCode(b)).join(''));
+                            }
+                        } catch (e) { /* skip this photo */ }
+                    }
+                    if (!base64) continue; // Skip empty photos
                     entryPhotoNums.push(photoCounter);
                     photoLogFlat.push({ number: photoCounter, photo: base64 });
                     photoCounter++;
-                });
+                }
                 logEntries.push({
                     time: formatTime(entry.hour),
                     description: entry.description || entry.notes || '',
                     photoNumber: entryPhotoNums.length === 0 ? '' : entryPhotoNums.length <= 2 ? entryPhotoNums.join(', ') : `${entryPhotoNums[0]}-${entryPhotoNums[entryPhotoNums.length - 1]}`
                 });
-            });
+            }
         }
         const photoLogRows = [];
         for (let i = 0; i < photoLogFlat.length; i += 2) {
@@ -7348,6 +7599,107 @@ function compressImageToBase64(file) {
     });
 }
 
+/**
+ * Compress image to a Uint8Array of JPEG bytes (disk-storage path).
+ * @param {File|Blob} file
+ * @returns {Promise<Uint8Array>}
+ */
+function compressImageToBuffer(file) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+            URL.revokeObjectURL(url);
+            const MAX_DIM = 1200;
+            let w = img.width, h = img.height;
+            if (w > MAX_DIM || h > MAX_DIM) {
+                if (w > h) { h = Math.round(h * MAX_DIM / w); w = MAX_DIM; }
+                else { w = Math.round(w * MAX_DIM / h); h = MAX_DIM; }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = w; canvas.height = h;
+            canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+            canvas.toBlob(blob => {
+                if (!blob) { reject(new Error('Canvas toBlob failed')); return; }
+                blob.arrayBuffer().then(buf => resolve(new Uint8Array(buf))).catch(reject);
+            }, 'image/jpeg', 0.8);
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to load image')); };
+        img.src = url;
+    });
+}
+
+/**
+ * Save a photo file to the project's photos folder on disk.
+ * @param {string} projectId
+ * @param {string} photoId  - unique ID used as the file stem
+ * @param {File|Blob} file
+ * @returns {Promise<string|null>} fileId (e.g. "ph_abc.jpg") on success, null on failure
+ */
+async function savePhotoToProject(projectId, photoId, file) {
+    if (!window.electronAPI?.saveProjectFile) return null;
+    try {
+        const buffer = await compressImageToBuffer(file);
+        const fileId = photoId + '.jpg';
+        const result = await window.electronAPI.saveProjectFile(projectId, 'photos', fileId, buffer);
+        if (!result?.success) throw new Error(result?.error || 'Save failed');
+        return fileId;
+    } catch (err) {
+        console.error('[savePhotoToProject] error:', err);
+        return null;
+    }
+}
+
+/**
+ * Read a photo object and return a URL suitable for an <img src>.
+ * For disk-based photos (fileId), returns a blob: URL (caller should revoke).
+ * For legacy base64 photos, returns the data URL directly.
+ * @param {object} photo  - photo object with optional fileId and/or base64
+ * @param {string} projectId
+ * @returns {Promise<string|null>}
+ */
+async function readPhotoAsObjectUrl(photo, projectId) {
+    if (!photo) return null;
+    if (photo.fileId && window.electronAPI?.readProjectFile) {
+        try {
+            const result = await window.electronAPI.readProjectFile(projectId, 'photos', photo.fileId);
+            if (result?.success && result.data) {
+                return URL.createObjectURL(new Blob([result.data], { type: 'image/jpeg' }));
+            }
+        } catch (err) {
+            console.error('[readPhotoAsObjectUrl] error:', err);
+        }
+    }
+    // Legacy base64 fallback
+    return photo.base64 ? safeImageSrc(photo.base64) : null;
+}
+
+/**
+ * Load all `.disk-photo` images inside a container element.
+ * Images with `data-project-id` and `data-file-id` attrs are loaded from disk.
+ * @param {Element} container
+ */
+async function loadDiskPhotosInContainer(container) {
+    if (!container || !window.electronAPI?.readProjectFile) return;
+    const imgs = container.querySelectorAll('img.disk-photo[data-file-id]');
+    await Promise.all(Array.from(imgs).map(async (img) => {
+        if (img.dataset.loaded) return;
+        const projectId = img.dataset.projectId;
+        const fileId = img.dataset.fileId;
+        if (!projectId || !fileId) return;
+        try {
+            const result = await window.electronAPI.readProjectFile(projectId, 'photos', fileId);
+            if (result?.success && result.data) {
+                const objectUrl = URL.createObjectURL(new Blob([result.data], { type: 'image/jpeg' }));
+                img.src = objectUrl;
+                img.dataset.loaded = '1';
+            }
+        } catch (err) {
+            console.error('[loadDiskPhotosInContainer] error:', err);
+        }
+    }));
+}
+
 // ============================================
 // WORKER ROSTER DOCUMENT EXPORT
 // ============================================
@@ -7593,3 +7945,236 @@ window.openPrintAirSamplesModal = openPrintAirSamplesModal;
 window.openEditWorkerModal = openEditWorkerModal;
 window.exportWorkerRosterDoc = exportWorkerRosterDoc;
 window.getContainmentDisplayName = getContainmentDisplayName;
+
+// ============================================================
+// DOCUMENT MANAGEMENT
+// ============================================================
+
+/**
+ * Add a document to the current project from the desktop file system.
+ * Opens a native file picker, asks for a document name, then saves to disk.
+ */
+async function openAddDocumentModal() {
+    if (!currentProject) { showNotification('No project loaded.', true); return; }
+    if (!window.electronAPI?.openFileDialog) { showNotification('File picker not available.', true); return; }
+
+    const result = await window.electronAPI.openFileDialog({
+        title: 'Select Document',
+        filters: [
+            { name: 'Documents', extensions: ['pdf', 'docx', 'doc', 'png', 'jpg', 'jpeg', 'gif', 'webp'] },
+            { name: 'PDF Files', extensions: ['pdf'] },
+            { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
+            { name: 'All Files', extensions: ['*'] },
+        ],
+    });
+
+    if (!result?.success || result.canceled) return;
+    if (!result.data) { showNotification('Could not read file.', true); return; }
+
+    // Ask for a name
+    const defaultName = (result.fileName || '').replace(/\.[^.]+$/, '') || 'Document';
+    const docName = prompt('Name this document:', defaultName);
+    if (docName === null) return;
+    const trimmedName = (docName || '').trim() || defaultName;
+
+    // Generate fileId from extension
+    const ext = result.ext || 'pdf';
+    const docId = generateId();
+    const fileId = `doc_${docId}.${ext}`;
+    const mimeType = getMimeTypeFromExt(ext, result.fileName || '');
+
+    const saveResult = await window.electronAPI.saveProjectFile(currentProject.id, 'documents', fileId, result.data);
+    if (!saveResult?.success) {
+        showNotification('Failed to save document: ' + (saveResult?.error || ''), true);
+        return;
+    }
+
+    if (!Array.isArray(currentProject.documents)) currentProject.documents = [];
+    currentProject.documents.push({
+        id: docId,
+        name: trimmedName,
+        fileId,
+        mimeType,
+        addedAt: new Date().toISOString(),
+        sizeBytes: result.sizeBytes || (result.data ? result.data.byteLength || result.data.length : 0),
+    });
+
+    saveCurrentProject();
+    showNotification(`"${trimmedName}" added to Documents.`);
+    if (window.OverShell?.renderAll) window.OverShell.renderAll();
+}
+
+/**
+ * Return MIME type from file extension.
+ */
+function getMimeTypeFromExt(ext, fileName) {
+    const e = (ext || '').toLowerCase();
+    const map = {
+        pdf: 'application/pdf',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        doc: 'application/msword',
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+    };
+    return map[e] || 'application/octet-stream';
+}
+
+/**
+ * Open the wireless document import modal (Wi-Fi Direct + phone browser scanner).
+ */
+async function openWirelessDocumentImportModal() {
+    if (!currentProject) { showNotification('No project loaded.', true); return; }
+    if (!window.electronAPI?.startWirelessDocumentImport) {
+        showNotification('Wireless document upload is not available in this version.', true);
+        return;
+    }
+
+    closeAllModals();
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width:560px;">
+            <h3>Add Document from Phone</h3>
+            <p class="text-sm text-gray-600" style="margin-top:0;">
+                Your phone will connect to this PC wirelessly and open a document scanner in its browser.
+            </p>
+            <div id="wdoc-status" style="margin-top:12px;color:#6b7280;font-size:.85rem;">
+                Starting Wi-Fi Direct connection&hellip;
+            </div>
+            <div id="wdoc-qr-section" style="display:none;margin-top:16px;">
+                <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
+                    <div style="text-align:center;">
+                        <div class="text-xs text-gray-500 mb-1">1&nbsp;&nbsp;Join Wi-Fi</div>
+                        <img id="wdoc-wifi-qr" src="" alt="Wi-Fi QR" style="width:140px;height:140px;border:1px solid #e5e7eb;border-radius:6px;">
+                        <div id="wdoc-ssid" class="text-xs text-gray-500 mt-1"></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div class="text-xs text-gray-500 mb-1">2&nbsp;&nbsp;Open Scanner</div>
+                        <img id="wdoc-url-qr" src="" alt="URL QR" style="width:140px;height:140px;border:1px solid #e5e7eb;border-radius:6px;">
+                        <div class="text-xs text-gray-400 mt-1">Scan on phone</div>
+                    </div>
+                </div>
+                <div class="mt-3 p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
+                    &#9888; Make sure Wi-Fi is <strong>turned on</strong> on your phone before scanning the Wi-Fi QR code.
+                </div>
+                <div id="wdoc-received-list" style="margin-top:12px;display:flex;flex-direction:column;gap:6px;"></div>
+            </div>
+            <div id="wdoc-error" style="display:none;color:#dc2626;font-size:.85rem;margin-top:12px;"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="wdoc-cancel-btn">Cancel</button>
+                <button type="button" class="btn btn-primary" id="wdoc-done-btn" style="display:none;">Done</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const statusEl = modal.querySelector('#wdoc-status');
+    const qrSection = modal.querySelector('#wdoc-qr-section');
+    const wifiQrImg = modal.querySelector('#wdoc-wifi-qr');
+    const urlQrImg = modal.querySelector('#wdoc-url-qr');
+    const ssidEl = modal.querySelector('#wdoc-ssid');
+    const receivedList = modal.querySelector('#wdoc-received-list');
+    const errorEl = modal.querySelector('#wdoc-error');
+    const cancelBtn = modal.querySelector('#wdoc-cancel-btn');
+    const doneBtn = modal.querySelector('#wdoc-done-btn');
+
+    const receivedDocs = [];
+    let stopListener = null;
+
+    const stopImport = async () => {
+        if (stopListener) { stopListener(); stopListener = null; }
+        await window.electronAPI.stopWirelessDocumentImport().catch(() => {});
+    };
+
+    const closeModal = async () => {
+        await stopImport();
+        modal.remove();
+    };
+
+    cancelBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+
+    // Start the Wi-Fi Direct server
+    let startResult;
+    try {
+        startResult = await window.electronAPI.startWirelessDocumentImport();
+    } catch (err) {
+        errorEl.textContent = 'Failed to start wireless import: ' + (err.message || '');
+        errorEl.style.display = '';
+        statusEl.style.display = 'none';
+        return;
+    }
+
+    if (!startResult?.success) {
+        errorEl.textContent = startResult?.error || 'Could not start Wi-Fi Direct connection.';
+        errorEl.style.display = '';
+        statusEl.style.display = 'none';
+        return;
+    }
+
+    statusEl.style.display = 'none';
+    wifiQrImg.src = startResult.wifiQr;
+    urlQrImg.src = startResult.urlQr;
+    ssidEl.textContent = `${startResult.ssid} · ${startResult.password}`;
+    qrSection.style.display = '';
+    doneBtn.style.display = '';
+
+    // Listen for received documents
+    stopListener = window.electronAPI.onWirelessDocumentReceived(async (payload) => {
+        receivedDocs.push(payload);
+        const item = document.createElement('div');
+        item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;font-size:.82rem;';
+        item.innerHTML = `<span style="color:#16a34a;">&#10003;</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(payload.name || 'document')}</span><span style="color:#9ca3af;">${payload.sizeBytes ? (payload.sizeBytes / 1024).toFixed(0) + ' KB' : ''}</span>`;
+        receivedList.appendChild(item);
+    });
+
+    doneBtn.addEventListener('click', async () => {
+        doneBtn.disabled = true;
+        cancelBtn.disabled = true;
+        doneBtn.textContent = 'Saving\u2026';
+
+        await stopImport();
+
+        if (receivedDocs.length === 0) {
+            modal.remove();
+            showNotification('No documents were received.', true);
+            return;
+        }
+
+        // Save each received document to the project
+        for (const doc of receivedDocs) {
+            try {
+                const docNameRaw = prompt(`Name this document:\n(${doc.name || 'document'})`, (doc.name || 'document').replace(/\.[^.]+$/, ''));
+                if (docNameRaw === null) continue;
+                const docName = docNameRaw.trim() || 'Document';
+                const ext = (doc.name || 'document.pdf').split('.').pop().toLowerCase() || 'pdf';
+                const docId = generateId();
+                const fileId = `doc_${docId}.${ext}`;
+                const copyResult = await window.electronAPI.copyFileToProject(currentProject.id, 'documents', fileId, doc.localPath);
+                if (!copyResult?.success) { showNotification(`Failed to save "${docName}".`, true); continue; }
+                if (!Array.isArray(currentProject.documents)) currentProject.documents = [];
+                currentProject.documents.push({
+                    id: docId,
+                    name: docName,
+                    fileId,
+                    mimeType: doc.mimeType || 'application/pdf',
+                    addedAt: new Date().toISOString(),
+                    sizeBytes: copyResult.sizeBytes || doc.sizeBytes || 0,
+                });
+            } catch (e) {
+                console.error('[wdoc-modal] save error:', e);
+            }
+        }
+
+        saveCurrentProject();
+        modal.remove();
+        showNotification(`${receivedDocs.length} document${receivedDocs.length !== 1 ? 's' : ''} saved.`);
+        if (window.OverShell?.renderAll) window.OverShell.renderAll();
+    });
+}
+
+window.openAddDocumentModal = openAddDocumentModal;
+window.openWirelessDocumentImportModal = openWirelessDocumentImportModal;
