@@ -109,6 +109,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // out the record. Runs once per app start; fast no-op when nothing to do.
     migrateAllProjects();
 
+    // Migrate base64 photos to disk in the background; does not block UI.
+    migratePhotosToFilesystem().catch(err => console.warn('[photo-migration] failed:', err));
+
+    // If localStorage was wiped (e.g. by an older app version), attempt to
+    // restore project JSON from disk backups. Triggers a re-render if any
+    // projects are recovered; safe no-op otherwise.
+    recoverProjectsFromDisk().catch(err => console.warn('[disk-recovery] failed:', err));
+
     loadProjects();
     setupEventListeners();
 });
@@ -158,6 +166,7 @@ function migrateProject(project) {
     if (!Array.isArray(project.wipeSamples)) project.wipeSamples = [];
     if (!Array.isArray(project.dailyLogs)) project.dailyLogs = [];
     if (!Array.isArray(project.workerRoster)) project.workerRoster = [];
+    if (!Array.isArray(project.documents)) project.documents = [];
     (project.materials || []).forEach(m => {
         if (!m.hazardType) m.hazardType = 'asbestos';
     });
@@ -203,6 +212,69 @@ function migrateAllProjects() {
     }
 }
 
+/**
+ * One-time background migration: extract base64 photos from all projects and
+ * save them as files on disk. Replaces `base64` with `fileId` in the stored
+ * project JSON. Runs silently in the background after page load.
+ */
+async function migratePhotosToFilesystem() {
+    if (!window.electronAPI?.saveProjectFile) return;
+    const MIGRATED_KEY = 'oversight_photos_migrated_v1';
+    if (localStorage.getItem(MIGRATED_KEY) === '1') return;
+
+    const index = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
+    let totalMigrated = 0;
+
+    for (const projectId of index) {
+        const key = STORAGE_KEY_PREFIX + projectId;
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        let project;
+        try { project = JSON.parse(raw); } catch (e) { continue; }
+
+        let dirty = false;
+        for (const log of (project.dailyLogs || [])) {
+            for (const entry of (log.entries || [])) {
+                for (const photo of (entry.photos || [])) {
+                    if (!photo.base64 || photo.fileId) continue;
+                    try {
+                        // Extract raw bytes from data URL
+                        const dataUrl = photo.base64;
+                        const commaIdx = dataUrl.indexOf(',');
+                        const b64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+                        const binary = atob(b64.replace(/\s/g, ''));
+                        const bytes = new Uint8Array(binary.length);
+                        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                        const fileId = photo.id + '.jpg';
+                        const result = await window.electronAPI.saveProjectFile(projectId, 'photos', fileId, bytes);
+                        if (result?.success) {
+                            photo.fileId = fileId;
+                            delete photo.base64;
+                            dirty = true;
+                            totalMigrated++;
+                        }
+                    } catch (e) {
+                        console.warn('[photo-migration] failed for photo', photo.id, e);
+                    }
+                }
+            }
+        }
+
+        if (dirty) {
+            try {
+                localStorage.setItem(key, JSON.stringify(project));
+            } catch (e) {
+                console.warn('[photo-migration] could not save project', projectId, e);
+            }
+        }
+    }
+
+    localStorage.setItem(MIGRATED_KEY, '1');
+    if (totalMigrated > 0) {
+        console.log(`[photo-migration] Migrated ${totalMigrated} photo(s) to disk storage.`);
+    }
+}
+
 function setupEventListeners() {
     const newProjectBtn = document.getElementById('new-oversight-project-btn');
     if (newProjectBtn) {
@@ -245,6 +317,43 @@ function loadProjects() {
     }
 }
 
+/**
+ * If localStorage has no projects (e.g. after a wipe by another app version),
+ * scan the on-disk project.json backups and restore them into localStorage so
+ * the app functions normally again.  Fires once per startup; resolves quickly
+ * when there is nothing to recover.
+ */
+async function recoverProjectsFromDisk() {
+    if (!window.electronAPI?.listAllProjectIds) return;
+    const index = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
+    if (index.length > 0) return;
+
+    let result;
+    try { result = await window.electronAPI.listAllProjectIds(); } catch { return; }
+    if (!result.success || !result.ids.length) return;
+
+    const recovered = [];
+    for (const id of result.ids) {
+        let fileResult;
+        try { fileResult = await window.electronAPI.loadProjectJson(id); } catch { continue; }
+        if (!fileResult.success || !fileResult.data) continue;
+        try {
+            const project = JSON.parse(fileResult.data);
+            if (!project.id) project.id = id;
+            localStorage.setItem(STORAGE_KEY_PREFIX + id, JSON.stringify(project));
+            recovered.push(id);
+        } catch (e) {
+            console.warn('[disk-recovery] failed to parse project', id, e);
+        }
+    }
+
+    if (recovered.length > 0) {
+        localStorage.setItem(INDEX_KEY, JSON.stringify(recovered));
+        console.log(`[disk-recovery] Restored ${recovered.length} project(s) from disk.`);
+        loadProjects();
+    }
+}
+
 function getAllProjects() {
     const projects = [];
     
@@ -252,7 +361,6 @@ function getAllProjects() {
     try {
         const index = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
         if (Array.isArray(index) && index.length > 0) {
-            // We have an index, load these specific projects
             index.forEach(id => {
                 const data = localStorage.getItem(STORAGE_KEY_PREFIX + id);
                 if (data) {
@@ -260,9 +368,9 @@ function getAllProjects() {
                         projects.push(JSON.parse(data));
                     } catch (e) {
                         console.error('Error parsing project', id, e);
-      }
-    }
-  });
+                    }
+                }
+            });
             return projects;
         }
     } catch (e) {
@@ -782,14 +890,18 @@ function createModal(title, content, onSave) {
 }
 
 function saveProject(project) {
-    // Save individual project
-    localStorage.setItem(STORAGE_KEY_PREFIX + project.id, JSON.stringify(project));
-    
-    // Update index
+    const json = JSON.stringify(project);
+    localStorage.setItem(STORAGE_KEY_PREFIX + project.id, json);
+
     const index = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
     if (!index.includes(project.id)) {
         index.push(project.id);
         localStorage.setItem(INDEX_KEY, JSON.stringify(index));
+    }
+
+    // Persist a disk backup so localStorage wipes don't destroy data.
+    if (window.electronAPI?.saveProjectJson) {
+        window.electronAPI.saveProjectJson(project.id, json).catch(() => {});
     }
 }
 
@@ -801,11 +913,18 @@ async function deleteProject(id) {
     const index = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
     const newIndex = index.filter(i => i !== id);
     localStorage.setItem(INDEX_KEY, JSON.stringify(newIndex));
+
+    if (window.electronAPI?.deleteProjectFolder) {
+        window.electronAPI.deleteProjectFolder(id).catch(() => {});
+    }
+    if (window.electronAPI?.deleteProjectJson) {
+        window.electronAPI.deleteProjectJson(id).catch(() => {});
+    }
     
     loadProjects();
 }
 
-function handleExportProject(projectId) {
+async function handleExportProject(projectId) {
     try {
         const raw = localStorage.getItem(STORAGE_KEY_PREFIX + projectId);
         if (!raw) {
@@ -813,7 +932,7 @@ function handleExportProject(projectId) {
             return;
         }
         const projectData = JSON.parse(raw);
-        exportProjectToExcel(projectData);
+        await exportProjectToExcel(projectData);
     } catch (e) {
         console.error('Export failed', e);
         alert('Failed to export project: ' + e.message);
@@ -892,7 +1011,15 @@ function handleImportFile(event) {
             
             saveProject(projectData);
             loadProjects();
-            
+
+            // Async: persist imported base64 photos to disk so they survive localStorage limits
+            // and so document generation can read them via fileId.
+            if (window.electronAPI?.saveProjectFile) {
+                _saveImportedPhotosToDisk(projectData).catch(err =>
+                    console.warn('[import] photo disk save failed:', err)
+                );
+            }
+
             showNotification(
                 isUpdate ? 'Project updated from import.' : 'Project imported successfully!',
                 'success'
@@ -905,6 +1032,33 @@ function handleImportFile(event) {
         }
     };
     reader.readAsArrayBuffer(file);
+}
+
+async function _saveImportedPhotosToDisk(projectData) {
+    let dirty = false;
+    for (const log of (projectData.dailyLogs || [])) {
+        for (const entry of (log.entries || [])) {
+            for (const photo of (entry.photos || [])) {
+                if (!photo.base64 || photo.fileId) continue;
+                try {
+                    const b64 = photo.base64.replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
+                    const binary = atob(b64);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                    const fileId = photo.id + '.jpg';
+                    const result = await window.electronAPI.saveProjectFile(projectData.id, 'photos', fileId, bytes);
+                    if (result?.success) {
+                        photo.fileId = fileId;
+                        delete photo.base64;
+                        dirty = true;
+                    }
+                } catch (err) {
+                    console.warn('[import] failed to save photo to disk:', err);
+                }
+            }
+        }
+    }
+    if (dirty) saveProject(projectData);
 }
 
 function showNotification(message, type = 'info') {
@@ -1440,21 +1594,32 @@ async function downloadArchivedProject(projectId, projectName) {
                 let photoCounter = 1;
                 if (dailyLog.entries && dailyLog.entries.length > 0) {
                     const sortedEntries = [...dailyLog.entries].sort((a, b) => (a.hour || '').localeCompare(b.hour || ''));
-                    sortedEntries.forEach(entry => {
+                    for (const entry of sortedEntries) {
                         const entryPhotoNums = [];
-                        (entry.photos || []).forEach(p => {
-                            const base64 = (p.base64 || '').trim();
-                            if (!base64) return; // Skip empty photos - don't create empty cells
+                        for (const p of (entry.photos || [])) {
+                            let base64 = (p.base64 || '').trim();
+                            if (!base64 && p.fileId && window.electronAPI?.readProjectFile) {
+                                try {
+                                    const result = await window.electronAPI.readProjectFile(project.id, 'photos', p.fileId);
+                                    if (result?.success && result.data) {
+                                        const u8 = new Uint8Array(result.data);
+                                        const isPng = u8[0] === 0x89 && u8[1] === 0x50;
+                                        const mime = isPng ? 'image/png' : 'image/jpeg';
+                                        base64 = `data:${mime};base64,` + btoa(Array.from(u8, b => String.fromCharCode(b)).join(''));
+                                    }
+                                } catch (e) { /* skip this photo */ }
+                            }
+                            if (!base64) continue;
                             entryPhotoNums.push(photoCounter);
                             photoLogFlat.push({ number: photoCounter, photo: base64 });
                             photoCounter++;
-                        });
+                        }
                         logEntries.push({
                             time: formatTime(entry.hour),
                             description: entry.description || entry.notes || '',
                             photoNumber: entryPhotoNums.length === 0 ? '' : entryPhotoNums.length <= 2 ? entryPhotoNums.join(', ') : `${entryPhotoNums[0]}-${entryPhotoNums[entryPhotoNums.length - 1]}`
                         });
-                    });
+                    }
                 }
                 const photoLogRows = [];
                 for (let i = 0; i < photoLogFlat.length; i += 2) {
@@ -1851,6 +2016,33 @@ async function downloadArchivedProject(projectId, projectName) {
             }
         }
         
+        // Add project documents (PDFs, images, etc.) to a "Documents" subfolder in the ZIP
+        const projectDocs = project.documents || [];
+        if (projectDocs.length > 0 && window.electronAPI?.readProjectFile) {
+            const docsFolder = zip.folder('Documents');
+            if (docsFolder) {
+                let docIndex = [];
+                for (const doc of projectDocs) {
+                    if (!doc.fileId) continue;
+                    try {
+                        const result = await window.electronAPI.readProjectFile(project.id, 'documents', doc.fileId);
+                        if (result?.success && result.data) {
+                            const ext = doc.fileId.split('.').pop() || 'pdf';
+                            const safeDocName = (doc.name || 'document').replace(/[^a-zA-Z0-9 _-]/g, '_') + '.' + ext;
+                            docsFolder.file(safeDocName, result.data);
+                            filesAdded++;
+                            docIndex.push({ name: doc.name, file: safeDocName, mimeType: doc.mimeType, addedAt: doc.addedAt, sizeBytes: doc.sizeBytes });
+                        }
+                    } catch (e) {
+                        console.warn('[zip] Failed to add document', doc.name, e);
+                    }
+                }
+                if (docIndex.length > 0) {
+                    docsFolder.file('index.json', JSON.stringify(docIndex, null, 2));
+                }
+            }
+        }
+
         if (filesAdded === 0) {
             const dailyLogsCount = (project.dailyLogs || []).length;
             const containmentsCount = (project.containments || []).length;

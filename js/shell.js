@@ -51,8 +51,10 @@
     if (Number.isNaN(v)) return '0';
     return Number.isInteger(v) ? String(v) : v.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
+  const DISK_PHOTO_PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   function photoSrc(photo) {
     if (!photo) return '';
+    if (photo.fileId) return DISK_PHOTO_PLACEHOLDER; // disk-based; loaded async via loadDiskPhotosInElement
     const raw = typeof photo === 'string' ? photo : photo.base64;
     if (!raw || typeof raw !== 'string') return '';
     const trimmed = raw.trim();
@@ -63,6 +65,26 @@
       return `data:image/jpeg;base64,${trimmed.replace(/\s/g, '')}`;
     }
     return '';
+  }
+  async function loadDiskPhotosInElement(container, projectId) {
+    if (!container || !window.electronAPI?.readProjectFile) return;
+    const imgs = container.querySelectorAll('img.disk-photo[data-file-id]');
+    for (const img of imgs) {
+      if (img.dataset.loaded) continue;
+      const fid = img.dataset.fileId || img.dataset.fileid;
+      const pid = img.dataset.projectId || img.dataset.projectid || projectId;
+      if (!fid || !pid) continue;
+      try {
+        const result = await window.electronAPI.readProjectFile(pid, 'photos', fid);
+        // #region agent log
+        fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/shell.js:loadDiskPhotosInElement',message:'disk photo read',data:{projectId:pid,fileId:fid,success:!!result?.success,notFound:!!result?.notFound,hasData:!!result?.data},timestamp:Date.now(),hypothesisId:'H-A'})}).catch(()=>{});
+        // #endregion
+        if (result?.success && result.data) {
+          img.src = URL.createObjectURL(new Blob([result.data], { type: 'image/jpeg' }));
+          img.dataset.loaded = '1';
+        }
+      } catch (e) { /* ignore */ }
+    }
   }
   function entryDescription(entry) {
     return String(entry.description || entry.notes || '').trim();
@@ -84,20 +106,23 @@
     if (entry.timestamp) return fmtTime(entry.timestamp);
     return '';
   }
-  function renderLogEntryCard(entry, logId) {
+  function renderLogEntryCard(entry, logId, projectId) {
     const desc = entryDescription(entry);
     const hourLabel = formatEntryHour(entry);
-    const photos = (entry.photos || []).map(photoSrc).filter(Boolean);
+    const allPhotos = (entry.photos || []).filter(p => p.fileId || photoSrc(p));
     const npBlock = (entry.negativePressure && entry.negativePressure.length)
       ? `<div class="tl-pressure">${entry.negativePressure.map(np =>
           `<span class="muted small">${esc(np.containmentName || 'Containment')}: <b>${esc(np.pressure)}</b> inWC</span>`
         ).join(' ')}</div>`
       : '';
-    const photosBlock = photos.length
+    const photosBlock = allPhotos.length
       ? `<div class="tl-photos-wrap">
-          <button type="button" class="btn-link small toggle-photos-btn">Show photos (${photos.length})</button>
+          <button type="button" class="btn-link small toggle-photos-btn">Show photos (${allPhotos.length})</button>
           <div class="tl-photos hidden">
-            ${(entry.photos || []).map((p, i) => {
+            ${allPhotos.map((p, i) => {
+              if (p.fileId) {
+                return `<img class="tl-photo disk-photo" data-project-id="${esc(projectId || '')}" data-file-id="${esc(p.fileId)}" src="${DISK_PHOTO_PLACEHOLDER}" alt="Log photo ${i + 1}">`;
+              }
               const src = photoSrc(p);
               return src ? `<img class="tl-photo" src="${src}" alt="Log photo ${i + 1}">` : '';
             }).join('')}
@@ -164,6 +189,11 @@
   function activitySortValue(value) {
     const d = value instanceof Date ? value : new Date(value || 0);
     return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+  function visualInspectionWhen(inspection) {
+    if (inspection?.date) return toActivityDate(inspection.date, null);
+    if (inspection?.createdAt) return inspection.createdAt;
+    return null;
   }
   function sampleDisplayId(sample) {
     return sample.sampleId || sample.sampleID || sample.sampleNumber || sample.id || '—';
@@ -291,6 +321,16 @@
     if (s.includes('clearance')) return 2;
     if (s.includes('active')) return 1;
     return 0;
+  }
+  // Sort order for list views: Active → Preparation → Clearance → Teardown → Completed
+  function containmentSortOrder(stage) {
+    const s = String(stage || '').toLowerCase();
+    if (s.includes('active')) return 0;
+    if (s.includes('preparation')) return 1;
+    if (s.includes('clearance')) return 2;
+    if (s.includes('teardown')) return 3;
+    if (isContainmentComplete(stage)) return 4;
+    return 5;
   }
   function stageClass(stage) {
     if (!stage) return 'stage-prep';
@@ -687,7 +727,7 @@
         });
         (c.visualInspections || []).forEach(v => {
           acts.push({
-            when: v.createdAt || v.date,
+            when: visualInspectionWhen(v),
             who: 'VIS',
             type: 'inspection',
             status: v.passed ? 'pass' : 'fail',
@@ -781,10 +821,6 @@
         <div class="proj-th"><span>Project / Site</span><span>Project #</span><span>Address</span><span>Cont.</span><span>Samples</span><span>Progress</span><span></span></div>
         ${filtered.map(p => {
           const prog = projectProgress(p);
-          const dl = projectArchiveGate(p);
-          const dlTitle = dl.canArchive
-            ? 'Download project files (Word documents ZIP)'
-            : dl.reason;
           return `<div class="proj-tr" data-href="project.html?id=${esc(p.id)}">
             <div class="proj-cell-main"><span class="proj-dot" data-status="${projectStatus(p)}"></span><div><div class="proj-cell-site">${esc(siteName(p))}</div><div class="proj-cell-addr muted small">${esc(p.siteAddress || '—')}</div></div></div>
             <div class="proj-cell mono">${esc(p.projectNumber || '—')}</div>
@@ -795,7 +831,7 @@
             <div class="proj-cell" style="justify-content:flex-end;gap:4px;">
               <button class="icon-btn small" title="Edit" data-action="edit" data-id="${esc(p.id)}">${ICONS.pencil}</button>
               <button class="icon-btn small" title="Export to Excel" data-action="export" data-id="${esc(p.id)}">${ICONS.excel}</button>
-              <button class="icon-btn small" title="${esc(dlTitle)}" data-action="download-project" data-id="${esc(p.id)}" data-name="${esc(siteName(p))}" ${dl.canArchive ? '' : 'disabled'}>${ICONS.folder}</button>
+              <button class="icon-btn small" title="Download project files (Word documents ZIP)" data-action="download-project" data-id="${esc(p.id)}" data-name="${esc(siteName(p))}">${ICONS.folder}</button>
               <button class="icon-btn small" title="Delete" data-action="delete" data-id="${esc(p.id)}">${ICONS.trash}</button>
             </div>
           </div>`;
@@ -818,12 +854,6 @@
     }));
     view.querySelectorAll('[data-action="download-project"]').forEach(b => b.addEventListener('click', (e) => {
       e.stopPropagation();
-      const p = getProjects().find(project => project.id === b.dataset.id);
-      const gate = p ? projectArchiveGate(p) : { canArchive: false, reason: 'Project not found.' };
-      if (!gate.canArchive) {
-        showShellNote(gate.reason);
-        return;
-      }
       if (typeof window.downloadArchivedProject === 'function') {
         window.downloadArchivedProject(b.dataset.id, b.dataset.name);
       } else {
@@ -1038,6 +1068,7 @@
     setCount('tabcount-logs', (p.dailyLogs || []).length);
     setCount('tabcount-materials', (p.materials || []).length);
     setCount('tabcount-workers', (p.workerRoster || []).length);
+    setCount('tabcount-documents', (p.documents || []).length);
   }
   function setCount(id, n) {
     const el = document.getElementById(id);
@@ -1045,7 +1076,7 @@
   }
 
   function switchTab(name) {
-    if (!['overview','containments','samples','logs','materials','team','docs'].includes(name)) name = 'overview';
+    if (!['overview','containments','samples','logs','materials','team','docs','project-documents'].includes(name)) name = 'overview';
     currentTab = name;
     document.querySelectorAll('.proj-tab[data-tab]').forEach(b => b.setAttribute('data-active', b.dataset.tab === name ? 'true' : 'false'));
     document.querySelectorAll('.tab-pane[data-tab]').forEach(el => { el.hidden = (el.dataset.tab !== name); });
@@ -1058,13 +1089,14 @@
     else if (name === 'materials') renderTabMaterials(p);
     else if (name === 'team') renderTabTeam(p);
     else if (name === 'docs') renderTabDocs(p);
+    else if (name === 'project-documents') renderTabDocuments(p);
   }
 
   // ---------- OVERVIEW TAB ----------
   function renderTabOverview(p) {
     const wrap = document.getElementById('tab-overview');
     if (!wrap) return;
-    const conts = p.containments || [];
+    const conts = (p.containments || []).slice().sort((a, b) => containmentSortOrder(a.stage) - containmentSortOrder(b.stage));
     const airSamples = p.airSamples || [];
     const samples = projectSamplesList(p);
     const logs = p.dailyLogs || [];
@@ -1131,7 +1163,7 @@
     (p.containments || []).forEach(c => {
       (c.stageHistory || []).forEach(h => out.push({ when:h.changedAt || toActivityDate(h.date, null), who:'STG', type:'stage', text:`${containmentLabel(c.name || '')} → ${h.stage}` }));
       (c.visualInspections || []).forEach(v => out.push({
-        when: v.createdAt || v.date,
+        when: visualInspectionWhen(v),
         who: 'VIS',
         type: 'inspection',
         status: v.passed ? 'pass' : 'fail',
@@ -1147,7 +1179,7 @@
   function renderTabContainments(p) {
     const wrap = document.getElementById('tab-containments');
     if (!wrap) return;
-    const conts = (p.containments || []).slice();
+    const conts = (p.containments || []).slice().sort((a, b) => containmentSortOrder(a.stage) - containmentSortOrder(b.stage));
     if (conts.length > 0 && !conts.find(c => c.id === containSelectedId)) {
       containSelectedId = conts[0].id;
     }
@@ -1203,7 +1235,7 @@
       ...(c.stageHistory || []).map(h => ({ kind:'stage', when:h.changedAt || h.date, label:h.stage || 'Stage updated', meta:h.inspectorName || '' })),
       ...(c.visualInspections || []).map(v => ({
         kind:'inspection',
-        when:v.createdAt || v.date,
+        when: visualInspectionWhen(v),
         label:`${v.type || 'Visual'} Visual: ${v.passed ? 'Pass' : 'Fail'}`,
         meta:v.inspectorName || v.comments || '',
         passed: !!v.passed
@@ -1462,7 +1494,7 @@
             return `<div class="tl-day"><div class="tl-day-head"><div class="tl-date"><div class="tl-d mono">${d.getDate()}</div><div class="tl-m">${d.toLocaleString(undefined, { month:'short' })}</div></div><div class="tl-rule"></div>${workersGap ? `<span class="tag" style="background:var(--warn-bg);color:var(--warn);" title="Assign workers via Header">${workersListed} of ${workersTotal} workers identified</span>` : ''}<button class="btn-ghost small" data-action="add-entry" data-log-id="${esc(L.id)}">+ Entry</button><button class="btn-ghost small" data-action="edit-log" data-log-id="${esc(L.id)}">${ICONS.pencil} Edit Header</button></div>
               <div class="tl-day-body">
                 ${entries.length === 0 ? '<div class="muted small" style="padding:8px 0;">No entries.</div>'
-                  : entries.map(e => renderLogEntryCard(e, L.id)).join('')}
+                  : entries.map(e => renderLogEntryCard(e, L.id, p.id)).join('')}
               </div></div>`;
           }).join('')}</div>`}
     `;
@@ -1488,6 +1520,7 @@
         const willShow = container.classList.contains('hidden');
         container.classList.toggle('hidden', !willShow);
         btn.textContent = willShow ? 'Hide photos' : `Show photos (${count})`;
+        if (willShow) loadDiskPhotosInElement(container, p && p.id);
       });
     });
   }
@@ -1772,6 +1805,159 @@
       if (typeof window.openPrintWipeSamplesModal === 'function') window.openPrintWipeSamplesModal();
       else showShellNote('Lead wipe chain of custody print is not available.');
     }));
+  }
+
+  // ---------- DOCUMENTS TAB ----------
+  function renderTabDocuments(p) {
+    const wrap = document.getElementById('tab-project-documents');
+    if (!wrap) return;
+    const docs = p.documents || [];
+
+    const mimeIcon = (mimeType, name) => {
+      const ext = (name || '').split('.').pop().toLowerCase();
+      if (mimeType === 'application/pdf' || ext === 'pdf') return ICONS.doc || '&#128196;';
+      if (mimeType && mimeType.startsWith('image/')) return '&#128444;';
+      if (ext === 'docx' || ext === 'doc') return ICONS.doc || '&#128196;';
+      return '&#128196;';
+    };
+    const typeBadge = (mimeType, name) => {
+      const ext = (name || '').split('.').pop().toUpperCase();
+      if (mimeType === 'application/pdf') return '<span class="tag" style="background:#fee2e2;color:#b91c1c;">PDF</span>';
+      if (mimeType && mimeType.startsWith('image/')) return `<span class="tag" style="background:#dbeafe;color:#1d4ed8;">${ext}</span>`;
+      if (mimeType && mimeType.includes('wordprocessingml')) return '<span class="tag" style="background:#dbeafe;color:#1d4ed8;">DOCX</span>';
+      return `<span class="tag">${ext}</span>`;
+    };
+    const fmtSize = (n) => {
+      if (!n) return '';
+      if (n < 1024) return n + ' B';
+      if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1048576).toFixed(1) + ' MB';
+    };
+    const fmtDate = (iso) => {
+      if (!iso) return '';
+      try { return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }); } catch (e) { return ''; }
+    };
+
+    wrap.innerHTML = `
+      <div class="page-head">
+        <div>
+          <h2 class="panel-title" style="font-size:14px;">Project Documents</h2>
+          <p class="page-sub">Store PDFs, images, and other files with this project. Documents are saved locally and included in ZIP downloads.</p>
+        </div>
+        <div class="page-head-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" id="doc-add-btn">+ Add from Files</button>
+          <button class="btn btn-secondary btn-sm" id="doc-add-phone-btn">&#128247; Add from Phone</button>
+        </div>
+      </div>
+      ${docs.length === 0
+        ? `<div class="empty-state" style="margin-top:40px;">
+             <div class="icon" style="font-size:2.5rem;">&#128196;</div>
+             <div class="title">No documents yet</div>
+             <div class="sub">Add PDFs, scanned documents, or images to keep everything in one place.</div>
+           </div>`
+        : `<div class="doc-list" style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">
+             ${docs.map((doc, idx) => `
+               <div class="doc-row list-item-card" style="display:flex;align-items:center;gap:12px;padding:12px 16px;" data-doc-index="${idx}">
+                 <span style="font-size:1.6rem;">${mimeIcon(doc.mimeType, doc.fileId)}</span>
+                 <div style="flex:1;min-width:0;">
+                   <div style="font-weight:600;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(doc.name || 'Untitled')}</div>
+                   <div style="font-size:.75rem;color:#6b7280;display:flex;gap:8px;flex-wrap:wrap;">
+                     ${typeBadge(doc.mimeType, doc.fileId)}
+                     ${doc.sizeBytes ? `<span>${fmtSize(doc.sizeBytes)}</span>` : ''}
+                     <span>${fmtDate(doc.addedAt)}</span>
+                   </div>
+                 </div>
+                 <div style="display:flex;gap:6px;flex-shrink:0;">
+                   <button class="btn btn-secondary btn-sm doc-preview-btn" data-idx="${idx}" title="Preview">&#128065;</button>
+                   <button class="btn btn-secondary btn-sm doc-rename-btn" data-idx="${idx}" title="Rename">&#9998;</button>
+                   <button class="btn btn-secondary btn-sm doc-delete-btn" data-idx="${idx}" title="Delete" style="color:#dc2626;">&#128465;</button>
+                 </div>
+               </div>
+             `).join('')}
+           </div>`
+      }
+    `;
+
+    // Add from Files (desktop)
+    wrap.querySelector('#doc-add-btn')?.addEventListener('click', () => {
+      if (typeof window.openAddDocumentModal === 'function') window.openAddDocumentModal();
+      else showShellNote('Document upload is not available.');
+    });
+
+    // Add from Phone (wireless)
+    wrap.querySelector('#doc-add-phone-btn')?.addEventListener('click', () => {
+      if (typeof window.openWirelessDocumentImportModal === 'function') window.openWirelessDocumentImportModal();
+      else showShellNote('Wireless document upload is not available.');
+    });
+
+    // Preview
+    wrap.querySelectorAll('.doc-preview-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        const doc = (p.documents || [])[idx];
+        if (!doc || !doc.fileId) return;
+        if (!window.electronAPI?.readProjectFile) { showShellNote('File preview not available.'); return; }
+        try {
+          const result = await window.electronAPI.readProjectFile(p.id, 'documents', doc.fileId);
+          if (!result?.success || !result.data) { showShellNote('Could not read document.'); return; }
+          const blob = new Blob([result.data], { type: doc.mimeType || 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          const dlg = document.createElement('div');
+          dlg.className = 'modal active';
+          dlg.style.cssText = 'z-index:2000;';
+          dlg.innerHTML = `
+            <div class="modal-content" style="max-width:900px;width:95vw;height:90vh;display:flex;flex-direction:column;">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;border-bottom:1px solid #e5e7eb;margin-bottom:10px;">
+                <h3 style="margin:0;font-size:1rem;">${esc(doc.name || 'Document')}</h3>
+                <button class="btn btn-secondary btn-sm" id="doc-preview-close">Close</button>
+              </div>
+              <div style="flex:1;overflow:auto;">
+                ${doc.mimeType && doc.mimeType.startsWith('image/')
+                  ? `<img src="${url}" style="max-width:100%;height:auto;display:block;margin:0 auto;">`
+                  : `<embed src="${url}" type="${doc.mimeType || 'application/pdf'}" style="width:100%;height:100%;min-height:600px;">`
+                }
+              </div>
+            </div>
+          `;
+          document.body.appendChild(dlg);
+          dlg.querySelector('#doc-preview-close').addEventListener('click', () => { URL.revokeObjectURL(url); dlg.remove(); });
+          dlg.addEventListener('click', e => { if (e.target === dlg) { URL.revokeObjectURL(url); dlg.remove(); } });
+        } catch (e) { showShellNote('Failed to preview document: ' + (e.message || '')); }
+      });
+    });
+
+    // Rename
+    wrap.querySelectorAll('.doc-rename-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        const doc = (p.documents || [])[idx];
+        if (!doc) return;
+        const newName = prompt('Enter new document name:', doc.name || '');
+        if (newName === null) return;
+        const trimmed = newName.trim();
+        if (!trimmed) return;
+        p.documents[idx].name = trimmed;
+        saveAndRefresh(p);
+        renderTabDocuments(p);
+      });
+    });
+
+    // Delete
+    wrap.querySelectorAll('.doc-delete-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        const doc = (p.documents || [])[idx];
+        if (!doc) return;
+        if (!confirm(`Delete "${doc.name || 'this document'}"? This cannot be undone.`)) return;
+        if (doc.fileId && window.electronAPI?.deleteProjectFile) {
+          await window.electronAPI.deleteProjectFile(p.id, 'documents', doc.fileId).catch(() => {});
+        }
+        p.documents.splice(idx, 1);
+        saveAndRefresh(p);
+        renderTabDocuments(p);
+        setCount('tabcount-documents', (p.documents || []).length);
+      });
+    });
   }
 
   function saveAndRefresh(p) {

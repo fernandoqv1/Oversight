@@ -10,6 +10,17 @@ let mainWindow;
 let updateCheckInProgress = false;
 let autoUpdater = null;
 
+// Wireless photo import session state
+let wirelessImportServer = null;
+let wirelessImportBridgeProc = null;
+let wirelessImportBridgeInfo = null;  // { ssid, password, gatewayIp } for the active session
+let wirelessImportTempDir = null;
+let wirelessImportSender = null;
+let wirelessImportPhotoCount = 0;
+// Pre-started Wi-Fi Direct bridge so the QR modal appears immediately
+let wifiDirectPrestart = null;        // { proc, ssid, password, gatewayIp } — set when ready
+let wifiDirectPrestartPromise = null; // in-flight Promise while startup is running
+
 function getAutoUpdater() {
   if (!app.isPackaged) return null;
   if (autoUpdater) return autoUpdater;
@@ -158,6 +169,22 @@ function createWindow() {
   });
 }
 
+app.on('will-quit', () => {
+  if (wifiDirectPrestart) {
+    try { wifiDirectPrestart.proc.kill(); } catch { /* ignore */ }
+    wifiDirectPrestart = null;
+  }
+  if (wirelessImportBridgeProc) {
+    try { wirelessImportBridgeProc.kill(); } catch { /* ignore */ }
+    wirelessImportBridgeProc = null;
+  }
+  wirelessImportBridgeInfo = null;
+  if (wirelessImportServer) {
+    try { wirelessImportServer.close(); } catch { /* ignore */ }
+    wirelessImportServer = null;
+  }
+});
+
 app.whenReady().then(() => {
   createWindow();
   setupAutoUpdater();
@@ -178,6 +205,17 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+
+  // Kill orphaned bridge processes from a previous crash, then pre-start
+  // Wi-Fi Direct so the AP is ready before the inspector presses the button.
+  require('child_process').exec(
+    'powershell -NoProfile -NonInteractive -Command "' +
+    'Get-WmiObject Win32_Process | ' +
+    'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
+    'ForEach-Object { $_.Terminate() }"',
+    { windowsHide: true, timeout: 8000 },
+    () => preStartWifiDirect()
+  );
 });
 
 ipcMain.handle('check-for-updates', async () => {
@@ -381,6 +419,7 @@ function showNativeMessageBox(event, options) {
   return result;
 }
 
+
 ipcMain.on('native-alert', (event, message) => {
   try {
     showNativeMessageBox(event, {
@@ -450,6 +489,493 @@ function getPhotoBridgeScript() {
     return path.join(process.resourcesPath, 'scripts', 'photo-bridge.ps1');
   }
   return path.join(__dirname, 'scripts', 'photo-bridge.ps1');
+}
+
+function getWifiDirectBridgeScript() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'scripts', 'wifi-direct-bridge.ps1');
+  }
+  return path.join(__dirname, 'scripts', 'wifi-direct-bridge.ps1');
+}
+
+// Spawns wifi-direct-bridge.ps1 -Action start, resolves with { result, proc }
+// once the script emits its first JSON line.  The process is kept alive so the
+// AP stays up; the caller stores proc and kills it when the session ends.
+function startWifiDirectBridge(ssid, password) {
+  return new Promise((resolve, reject) => {
+    const scriptPath = getWifiDirectBridgeScript();
+    const psArgs = [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', scriptPath,
+      '-Action', 'start',
+    ];
+    if (ssid) psArgs.push('-Ssid', ssid);
+    if (password) psArgs.push('-Password', password);
+
+    const proc = spawn('powershell.exe', psArgs, { windowsHide: true });
+    let buffer = '';
+    let stderr = '';
+    let settled = false;
+
+    const settle = (fn) => { if (!settled) { settled = true; fn(); } };
+
+    const timeout = setTimeout(() => {
+      settle(() => {
+        proc.kill();
+        reject(new Error('wifi-direct-bridge timed out waiting for startup (35 s)'));
+      });
+    }, 35000);
+
+    proc.stdout.on('data', (d) => {
+      buffer += d.toString();
+      const nl = buffer.indexOf('\n');
+      if (nl !== -1) {
+        clearTimeout(timeout);
+        const line = buffer.slice(0, nl).trim();
+        settle(() => {
+          try {
+            const parsed = JSON.parse(line);
+            resolve({ result: parsed, proc });
+          } catch {
+            proc.kill();
+            reject(new Error(`wifi-direct-bridge produced invalid JSON: ${line}`));
+          }
+        });
+      }
+    });
+
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    proc.on('close', (code) => {
+      clearTimeout(timeout);
+      const detail = stderr.trim() || `exit code ${code}`;
+      settle(() => reject(new Error(`wifi-direct-bridge failed before producing output (${detail})`))); 
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timeout);
+      settle(() => reject(err));
+    });
+  });
+}
+
+// Pre-starts the Wi-Fi Direct AP in the background so the first button press
+// shows QR codes immediately instead of waiting 5-15 s for the AP to come up.
+// Stores an in-flight Promise so a concurrent start-wireless-import call can
+// await it rather than spawning a second conflicting bridge process.
+function preStartWifiDirect(attempt = 0) {
+  if (wifiDirectPrestart || wifiDirectPrestartPromise) return;
+  wifiDirectPrestartPromise = (async () => {
+    try {
+      const { createHash } = require('crypto');
+      const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
+      const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
+      const stablePass = machineKey.slice(6, 18);
+      const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
+      if (result.success) {
+        wifiDirectPrestart = { proc, ssid: result.ssid, password: result.password, gatewayIp: result.gatewayIp };
+        console.log('[wifi-direct-prestart] AP ready:', result.ssid);
+      } else {
+        console.warn('[wifi-direct-prestart] bridge reported failure:', result.error);
+        if (attempt < 2) setTimeout(() => preStartWifiDirect(attempt + 1), 20000);
+      }
+    } catch (err) {
+      console.warn(`[wifi-direct-prestart] attempt ${attempt + 1} failed: ${err.message}`);
+      if (attempt < 2) setTimeout(() => preStartWifiDirect(attempt + 1), 20000);
+    } finally {
+      wifiDirectPrestartPromise = null;
+    }
+  })();
+}
+
+// Returns a free TCP port by binding to port 0 then releasing it.
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const net = require('net');
+    const srv = net.createServer();
+    srv.unref();
+    srv.listen(0, '0.0.0.0', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
+}
+
+// Returns the inline HTML served to the phone's browser at GET /upload.
+function getMobileUploadHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Oversight Photo Upload</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#1a1a2e}
+.hdr{background:#4f46e5;color:#fff;padding:16px 20px;display:flex;align-items:center;gap:10px}
+.hdr-logo{width:32px;height:32px;background:#fff;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.hdr-text h1{font-size:17px;font-weight:700;line-height:1.2}
+.hdr-text p{font-size:13px;opacity:.8;margin-top:2px}
+.body{padding:16px;max-width:480px;margin:0 auto}
+.card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.08);margin-bottom:16px}
+.step-label{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#6366f1;margin-bottom:10px}
+.pick-btn{display:block;width:100%;padding:18px 20px;background:#eef2ff;border:2px dashed #a5b4fc;border-radius:12px;color:#4f46e5;font-size:16px;font-weight:700;text-align:center;cursor:pointer;-webkit-tap-highlight-color:rgba(0,0,0,0);transition:background .15s}
+.pick-btn:active{background:#e0e7ff}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.preview-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}
+.thumb-wrap{position:relative;aspect-ratio:1;border-radius:8px;overflow:hidden;background:#f3f4f6}
+.thumb-wrap img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);font-size:22px;opacity:0;transition:opacity .2s}
+.thumb-wrap.uploading .thumb-overlay{opacity:1}
+.thumb-wrap.done .thumb-overlay{opacity:1;background:rgba(16,185,129,.55)}
+.thumb-wrap.err .thumb-overlay{opacity:1;background:rgba(220,38,38,.55)}
+.upload-btn{display:block;width:100%;padding:18px;background:#4f46e5;color:#fff;border:none;border-radius:12px;font-size:17px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:rgba(0,0,0,0);transition:background .15s;margin-top:4px}
+.upload-btn:active:not(:disabled){background:#3730a3}
+.upload-btn:disabled{background:#a5b4fc;cursor:default}
+.count-hint{font-size:13px;color:#6b7280;text-align:center;margin-top:10px}
+.succ-card{display:none;background:#fff;border-radius:16px;padding:32px 20px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+.succ-ico{font-size:52px;margin-bottom:12px}
+.succ-card h2{font-size:20px;font-weight:800;color:#1a1a2e}
+.succ-card p{font-size:14px;color:#6b7280;margin-top:6px}
+.more-btn{margin-top:20px;display:block;width:100%;padding:14px;background:#f3f4f6;color:#4f46e5;border:1.5px solid #c7d2fe;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer}
+.limit-banner{margin-top:10px;padding:10px 14px;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;font-size:13px;color:#92400e;text-align:center}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="hdr-logo"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+  <div class="hdr-text"><h1>Oversight</h1><p>Upload photos to your inspection log</p></div>
+</div>
+<div class="body">
+  <div id="upload-section">
+    <div class="card">
+      <div class="step-label">Step 1 &mdash; Select photos</div>
+      <label class="pick-btn" for="file-input" id="pick-lbl">
+        &#128247;&nbsp; Choose Photos from Camera Roll
+      </label>
+      <input type="file" id="file-input" accept="image/*" multiple>
+      <div class="preview-grid" id="preview-grid"></div>
+    </div>
+    <div class="card" id="upload-card" style="display:none">
+      <div class="step-label">Step 2 &mdash; Upload to Oversight</div>
+      <button class="upload-btn" id="upload-btn">
+        &#8679;&nbsp; Upload Photos
+      </button>
+      <div class="count-hint" id="count-hint"></div>
+    </div>
+  </div>
+  <div class="succ-card" id="succ-card">
+    <div class="succ-ico">&#9989;</div>
+    <h2 id="succ-msg">Photos uploaded!</h2>
+    <p>Return to Oversight on the PC to continue.</p>
+    <button class="more-btn" id="more-btn">Upload More Photos</button>
+  </div>
+</div>
+<script>
+(function(){
+  var MAX=5;
+  var totalUploaded=0;
+  var tk=new URLSearchParams(location.search).get('token')||'';
+  var fileInput=document.getElementById('file-input');
+  var pickLbl=document.getElementById('pick-lbl');
+  var previewGrid=document.getElementById('preview-grid');
+  var uploadCard=document.getElementById('upload-card');
+  var uploadBtn=document.getElementById('upload-btn');
+  var countHint=document.getElementById('count-hint');
+  var uploadSection=document.getElementById('upload-section');
+  var succCard=document.getElementById('succ-card');
+  var succMsg=document.getElementById('succ-msg');
+  var moreBtn=document.getElementById('more-btn');
+  var selectedFiles=[];
+  var thumbEls=[];
+
+  function remaining(){return MAX-totalUploaded;}
+
+  fileInput.addEventListener('change',function(){
+    var all=Array.from(fileInput.files||[]);
+    var cap=remaining();
+    var trimmed=all.length>cap;
+    selectedFiles=all.slice(0,cap);
+    previewGrid.innerHTML='';
+    thumbEls=[];
+    selectedFiles.forEach(function(f){
+      var wrap=document.createElement('div');wrap.className='thumb-wrap';
+      var img=document.createElement('img');
+      var overlay=document.createElement('div');overlay.className='thumb-overlay';overlay.textContent='\u23f3';
+      wrap.appendChild(img);wrap.appendChild(overlay);
+      previewGrid.appendChild(wrap);
+      thumbEls.push({wrap:wrap,overlay:overlay});
+      var rd=new FileReader();
+      rd.onload=function(e){img.src=e.target.result;overlay.textContent='';};
+      rd.readAsDataURL(f);
+    });
+    if(selectedFiles.length>0){
+      pickLbl.textContent='\u2713 '+selectedFiles.length+(trimmed?' of '+all.length:'')+' photo'+(selectedFiles.length!==1?'s':'')+' selected \u2014 tap to change';
+      var hint=selectedFiles.length+' photo'+(selectedFiles.length!==1?'s':'')+' selected ('+totalUploaded+'+'+selectedFiles.length+' of '+MAX+' total)';
+      if(trimmed)hint+=' \u2014 only '+cap+' slot'+(cap!==1?'s':'')+' remaining';
+      countHint.textContent=hint;
+      countHint.style.color=trimmed?'#d97706':'';
+      uploadCard.style.display='';
+    } else {
+      pickLbl.innerHTML='\u{1F4F7}&nbsp; Choose Photos from Camera Roll';
+      countHint.textContent='';countHint.style.color='';
+      uploadCard.style.display='none';
+    }
+  });
+
+  uploadBtn.addEventListener('click',async function(){
+    if(!selectedFiles.length)return;
+    uploadBtn.disabled=true;
+    fileInput.disabled=true;
+    pickLbl.style.pointerEvents='none';
+    var ok=0;
+    for(var i=0;i<selectedFiles.length;i++){
+      var f=selectedFiles[i];
+      var el=thumbEls[i];
+      el.wrap.className='thumb-wrap uploading';
+      el.overlay.textContent='\u23f3';
+      try{
+        var fd=new FormData();
+        fd.append('photo',f,f.name);
+        var r=await fetch(location.href.replace(location.search,'')+'?token='+encodeURIComponent(tk),{method:'POST',body:fd});
+        if(r.ok){
+          el.wrap.className='thumb-wrap done';
+          el.overlay.textContent='\u2705';
+          ok++;
+        } else if(r.status===429){
+          el.wrap.className='thumb-wrap err';
+          el.overlay.textContent='\u274c';
+          break;
+        } else {
+          el.wrap.className='thumb-wrap err';
+          el.overlay.textContent='\u274c';
+        }
+      } catch(e){
+        el.wrap.className='thumb-wrap err';
+        el.overlay.textContent='\u274c';
+      }
+    }
+    totalUploaded+=ok;
+    uploadSection.style.display='none';
+    succCard.style.display='';
+    succMsg.textContent=ok+' of '+selectedFiles.length+' photo'+(selectedFiles.length!==1?'s':'')+' uploaded!';
+    if(totalUploaded>=MAX){
+      moreBtn.style.display='none';
+      var lim=document.createElement('p');
+      lim.className='limit-banner';
+      lim.textContent='Maximum '+MAX+' photos reached. Return to Oversight on the PC.';
+      succCard.appendChild(lim);
+    } else {
+      moreBtn.textContent='Upload More Photos ('+(MAX-totalUploaded)+' remaining)';
+    }
+  });
+
+  moreBtn.addEventListener('click',function(){
+    selectedFiles=[];thumbEls=[];
+    previewGrid.innerHTML='';
+    fileInput.value='';fileInput.disabled=false;
+    pickLbl.innerHTML='\u{1F4F7}&nbsp; Choose Photos from Camera Roll ('+(MAX-totalUploaded)+' remaining)';
+    pickLbl.style.pointerEvents='';
+    countHint.textContent='';countHint.style.color='';
+    uploadCard.style.display='none';
+    uploadBtn.disabled=false;
+    uploadSection.style.display='';
+    succCard.style.display='none';
+  });
+})();
+</script>
+</body>
+</html>`;
+}
+
+// Adds a persistent Windows Firewall program rule so the HTTP server can
+// receive connections from phones on any port without a UAC prompt each session.
+// The NSIS installer already adds this at install time (silently, with admin).
+// This function is a fallback for dev/portable mode; it shows a friendly in-app
+// explanation BEFORE triggering Windows UAC so the user knows what to expect
+// and approves it. Once approved the rule persists — this runs only once per machine.
+async function ensureWirelessFirewallRule() {
+  const { exec } = require('child_process');
+  // No spaces in the rule name — spaces cause netsh to silently truncate the
+  // name when Start-Process reconstructs the argument string.
+  const RULE_NAME = 'Oversight-Desktop-Wireless-Import';
+
+  // Step 1: check whether the rule already exists — if yes, skip entirely.
+  const exists = await new Promise((resolve) => {
+    exec(`netsh advfirewall firewall show rule name="${RULE_NAME}"`, { windowsHide: true, timeout: 6000 }, (err, stdout) => {
+      const found = stdout && !stdout.toLowerCase().includes('no rules match');
+      resolve(found);
+    });
+  });
+  if (exists) return;
+
+  // Step 2: try without elevation first (works if the process has admin rights,
+  // e.g. when the packaged installer already set it up for the exe).
+  const execPath = process.execPath;
+  const directOk = await new Promise((resolve) => {
+    exec(
+      `netsh advfirewall firewall add rule name="${RULE_NAME}" dir=in action=allow program="${execPath}" profile=any`,
+      { windowsHide: true, timeout: 8000 },
+      (addErr, addOut) => {
+        const ok = !addErr && !(addOut && addOut.toLowerCase().includes('requires elevation'));
+        resolve(ok);
+      }
+    );
+  });
+  if (directOk) return;
+
+  // Step 3: elevation required — show a friendly in-app explanation first so the
+  // user understands what the upcoming Windows security prompt is for and
+  // approves it rather than cancelling.
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: 'Wireless Import — One-Time Setup',
+    message: 'Allow Oversight to receive photos from your phone',
+    detail:
+      'To let your phone send photos to this PC over Wi-Fi, Oversight needs to add a Windows Firewall exception.\n\n' +
+      'A Windows security prompt will appear next — please click "Yes" to allow it.\n\n' +
+      'This only happens once. After approval, Wireless Import will work without any prompts.',
+    buttons: ['Set Up Now', 'Skip for Now'],
+    defaultId: 0,
+    cancelId: 1,
+    icon: nativeImage.createEmpty(),
+  });
+
+  if (response === 1) {
+    return;
+  }
+
+  // Step 4: one-time UAC elevation — rule name has no spaces so netsh receives it intact.
+  exec(
+    `powershell -NoProfile -NonInteractive -Command "Start-Process -FilePath netsh -ArgumentList 'advfirewall','firewall','add','rule','name=${RULE_NAME}','dir=in','action=allow','program=${execPath}','profile=any' -Verb RunAs -Wait"`,
+    { windowsHide: true, timeout: 30000 },
+    () => {}
+  );
+}
+
+// Starts an HTTP server that serves the mobile upload page and receives files.
+// onFile({ localPath, name }) is called for each successfully normalized photo.
+function startUploadServer(tempDir, sessionToken, port, onFile, maxFiles = 5) {
+  const http = require('http');
+  const Busboy = require('busboy');
+  const fsSync = require('fs');
+
+  let fileCount = 0;
+  const html = getMobileUploadHtml();
+
+  const server = http.createServer((req, res) => {
+    let urlObj;
+    try {
+      urlObj = new URL(req.url, `http://localhost:${port}`);
+    } catch (e) {
+      res.writeHead(400);
+      res.end('Bad request');
+      return;
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+
+    if (req.method === 'GET' && urlObj.pathname === '/upload') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+      return;
+    }
+
+    if (req.method === 'POST' && urlObj.pathname === '/upload') {
+      const token = urlObj.searchParams.get('token');
+      if (token !== sessionToken) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid session — please reopen the upload page.' }));
+        return;
+      }
+
+      if (fileCount >= maxFiles) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Maximum ${maxFiles} photos per session reached.`, limitReached: true }));
+        return;
+      }
+
+      let bb;
+      try {
+        bb = Busboy({ headers: req.headers, limits: { fileSize: 50 * 1024 * 1024, files: 1 } });
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid multipart request' }));
+        return;
+      }
+
+      const pendingNormalize = [];
+
+      bb.on('file', (_fieldname, file, info) => {
+        const rawName = String((info && info.filename) || 'photo.jpg');
+        const safeName = `wireless_${Date.now()}_${Math.random().toString(36).slice(2)}_${path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        const destPath = path.join(tempDir, safeName);
+        const ws = fsSync.createWriteStream(destPath);
+        file.pipe(ws);
+
+        file.on('limit', () => {
+          file.resume();
+          console.warn('[wireless-import] file too large, skipped:', rawName);
+        });
+
+        const p = new Promise((resolve) => {
+          ws.on('finish', async () => {
+            try {
+              const normalizedPath = await normalizePhonePhotoFile(destPath);
+              fileCount++;
+              onFile({ localPath: normalizedPath, name: path.basename(normalizedPath) });
+              resolve(true);
+            } catch (err) {
+              console.error('[wireless-import] normalize error:', err.message);
+              resolve(false);
+            }
+          });
+          ws.on('error', (err) => {
+            console.error('[wireless-import] write error:', err.message);
+            resolve(false);
+          });
+        });
+
+        pendingNormalize.push(p);
+      });
+
+      bb.on('finish', async () => {
+        await Promise.all(pendingNormalize);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      });
+
+      bb.on('error', (err) => {
+        console.error('[wireless-import] busboy error:', err.message);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Upload processing failed' }));
+        }
+      });
+
+      req.pipe(bb);
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
+  });
+
+  server.on('error', (err) => {
+    console.error('[wireless-import] server error:', err.message);
+  });
+
+  server.listen(port, '0.0.0.0');
+  return server;
 }
 
 function normalizePhoneBackend(options) {
@@ -1628,6 +2154,7 @@ ipcMain.handle('read-phone-preview', async (_event, filePath) => {
     const allowedRoots = [
       path.join(tempRoot, 'oversight-phone-import'),
       path.join(tempRoot, 'oversight-phone-thumbs'),
+      path.join(tempRoot, 'oversight-wireless-import'),
     ];
     if (!allowedRoots.some((root) => isPathUnderDir(resolved, root))) {
       return { success: false, error: 'Access denied: file outside temp import directory' };
@@ -1658,6 +2185,7 @@ ipcMain.handle('read-imported-photo', async (_event, filePath) => {
     const allowedRoots = [
       path.join(tempRoot, 'oversight-phone-import'),
       path.join(tempRoot, 'oversight-phone-thumbs'),
+      path.join(tempRoot, 'oversight-wireless-import'),
     ];
     if (!allowedRoots.some((root) => isPathUnderDir(resolved, root))) {
       return { success: false, error: 'Access denied: file outside temp import directory' };
@@ -1697,5 +2225,1286 @@ ipcMain.handle('convert-image-for-upload', async (_event, byteArray, fileName) =
   } catch (error) {
     console.error('HEIC convert error:', error);
     return { success: false, error: error.message || 'HEIC could not be converted' };
+  }
+});
+
+// ---------- Wireless Photo Import (Wi-Fi Direct Legacy AP + HTTP upload) ----------
+
+ipcMain.handle('start-wireless-import', async (event) => {
+  try {
+    // Tear down any pre-existing session
+    if (wirelessImportServer) {
+      try { wirelessImportServer.close(); } catch { /* ignore */ }
+      wirelessImportServer = null;
+    }
+    if (wirelessImportBridgeProc) {
+      try { wirelessImportBridgeProc.kill(); } catch { /* ignore */ }
+      wirelessImportBridgeProc = null;
+    }
+
+    // If the pre-start is still in flight, wait for it rather than spawning a
+    // second conflicting bridge process (two publishers fight over the adapter).
+    if (wifiDirectPrestartPromise) {
+      await wifiDirectPrestartPromise;
+    }
+
+    // Discard a parked prestart whose process has already exited — the publisher
+    // stopped internally and the AP is no longer broadcasting.
+    if (wifiDirectPrestart && wifiDirectPrestart.proc.exitCode !== null) {
+      console.log('[wifi-direct-prestart] process exited (publisher stopped), will restart');
+      wifiDirectPrestart = null;
+    }
+
+    // Use the pre-started bridge if it's already up, otherwise start one now.
+    let bridgeProc, bridgeSsid, bridgePassword, bridgeGatewayIp;
+    if (wifiDirectPrestart) {
+      ({ proc: bridgeProc, ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp } = wifiDirectPrestart);
+      wifiDirectPrestart = null;
+    } else {
+      // Kill any orphaned bridge processes left over from a previous app restart.
+      await new Promise((resolve) => {
+        require('child_process').exec(
+          'powershell -NoProfile -NonInteractive -Command "' +
+          'Get-WmiObject Win32_Process | ' +
+          'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
+          'ForEach-Object { $_.Terminate() }"',
+          { windowsHide: true, timeout: 8000 },
+          () => resolve()
+        );
+      });
+
+      const { createHash } = require('crypto');
+      const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
+      const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
+      const stablePass = machineKey.slice(6, 18);
+      const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
+      if (!result.success) {
+        return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
+      }
+      bridgeProc = proc;
+      bridgeSsid = result.ssid;
+      bridgePassword = result.password;
+      bridgeGatewayIp = result.gatewayIp;
+    }
+    wirelessImportBridgeProc = bridgeProc;
+    wirelessImportBridgeInfo = { ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp };
+
+    // Create a fresh temp directory for this session
+    const tempDir = toWindowsPath(
+      path.join(app.getPath('temp'), 'oversight-wireless-import', Date.now().toString())
+    );
+    await fs.mkdir(tempDir, { recursive: true });
+    wirelessImportTempDir = tempDir;
+    wirelessImportSender = event.sender;
+    wirelessImportPhotoCount = 0;
+
+    const port = await findFreePort();
+    const sessionToken = require('crypto').randomBytes(16).toString('hex');
+    const uploadUrl = `http://${bridgeGatewayIp}:${port}/upload?token=${sessionToken}`;
+
+    // Ensure the Windows Firewall has an inbound rule for this app so the
+    // phone can reach the HTTP server. Awaited so the dialog (if needed for
+    // first-time setup) appears BEFORE the QR codes — preventing it from
+    // obscuring the modal.
+    await ensureWirelessFirewallRule().catch(() => {});
+
+    // Generate QR codes (PNG data URLs)
+    const QRCode = require('qrcode');
+    const wifiQrString = `WIFI:T:WPA;S:${bridgeSsid};P:${bridgePassword};;`;
+    const [wifiQr, urlQr] = await Promise.all([
+      QRCode.toDataURL(wifiQrString, { width: 256, margin: 2 }),
+      QRCode.toDataURL(uploadUrl, { width: 256, margin: 2 }),
+    ]);
+
+    wirelessImportPort = port;
+
+    // Start the HTTP upload server; push events to the renderer as files arrive
+    wirelessImportServer = startUploadServer(tempDir, sessionToken, port, ({ localPath, name }) => {
+      wirelessImportPhotoCount += 1;
+      if (wirelessImportSender && !wirelessImportSender.isDestroyed()) {
+        wirelessImportSender.send('wireless-photo-received', {
+          localPath,
+          name,
+          index: wirelessImportPhotoCount - 1,
+        });
+      }
+    });
+
+    return {
+      success: true,
+      ssid: bridgeSsid,
+      password: bridgePassword,
+      uploadUrl,
+      wifiQr,
+      urlQr,
+    };
+  } catch (err) {
+    console.error('[start-wireless-import] error:', err);
+    // Clean up partial state on error
+    if (wirelessImportBridgeProc) {
+      try { wirelessImportBridgeProc.kill(); } catch { /* ignore */ }
+      wirelessImportBridgeProc = null;
+    }
+    return { success: false, error: err.message };
+  }
+});
+
+let wirelessImportPort = null;
+
+ipcMain.handle('stop-wireless-import', async () => {
+  try {
+    if (wirelessImportServer) {
+      try { wirelessImportServer.close(); } catch { /* ignore */ }
+      wirelessImportServer = null;
+    }
+    // Keep the bridge process alive — move it back to wifiDirectPrestart so
+    // the next modal open is instant without restarting the adapter.
+    if (wirelessImportBridgeProc && wirelessImportBridgeInfo) {
+      wifiDirectPrestart = { proc: wirelessImportBridgeProc, ...wirelessImportBridgeInfo };
+    } else if (wirelessImportBridgeProc) {
+      try { wirelessImportBridgeProc.kill(); } catch { /* ignore */ }
+    }
+    wirelessImportBridgeProc = null;
+    wirelessImportBridgeInfo = null;
+    wirelessImportPort = null;
+    wirelessImportSender = null;
+    return { success: true };
+  } catch (err) {
+    console.error('[stop-wireless-import] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+// ---------- Project JSON Disk Backup (resilient against localStorage wipes) ----------
+
+function getProjectJsonPath(projectId) {
+  const safeId = String(projectId).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(app.getPath('userData'), 'projects', safeId, 'project.json');
+}
+
+ipcMain.handle('save-project-json', async (_event, projectId, jsonString) => {
+  try {
+    const filePath = getProjectJsonPath(projectId);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, jsonString, 'utf8');
+    return { success: true };
+  } catch (err) {
+    console.error('[save-project-json] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('load-project-json', async (_event, projectId) => {
+  try {
+    const filePath = getProjectJsonPath(projectId);
+    const data = await fs.readFile(filePath, 'utf8');
+    return { success: true, data };
+  } catch (err) {
+    if (err.code === 'ENOENT') return { success: false, notFound: true };
+    console.error('[load-project-json] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('list-all-project-ids', async () => {
+  try {
+    const projectsDir = path.join(app.getPath('userData'), 'projects');
+    const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+    const ids = entries
+      .filter(e => e.isDirectory())
+      .map(e => e.name);
+    return { success: true, ids };
+  } catch (err) {
+    if (err.code === 'ENOENT') return { success: true, ids: [] };
+    console.error('[list-all-project-ids] error:', err);
+    return { success: false, ids: [], error: err.message };
+  }
+});
+
+ipcMain.handle('delete-project-json', async (_event, projectId) => {
+  try {
+    const filePath = getProjectJsonPath(projectId);
+    await fs.unlink(filePath);
+    return { success: true };
+  } catch (err) {
+    if (err.code === 'ENOENT') return { success: true };
+    console.error('[delete-project-json] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+// ---------- Project File Storage (photos, documents) ----------
+
+function getProjectFilePath(projectId, category, fileId) {
+  const safeProjectId = String(projectId).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeCategory  = String(category).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeFileId    = String(fileId).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return path.join(app.getPath('userData'), 'projects', safeProjectId, safeCategory, safeFileId);
+}
+
+ipcMain.handle('save-project-file', async (_event, projectId, category, fileId, buffer) => {
+  try {
+    const filePath = getProjectFilePath(projectId, category, fileId);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, Buffer.from(buffer));
+    return { success: true };
+  } catch (err) {
+    console.error('[save-project-file] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('read-project-file', async (_event, projectId, category, fileId) => {
+  try {
+    const filePath = getProjectFilePath(projectId, category, fileId);
+    const data = await fs.readFile(filePath);
+    return { success: true, data };
+  } catch (err) {
+    if (err.code === 'ENOENT') return { success: false, error: 'File not found', notFound: true };
+    console.error('[read-project-file] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('delete-project-file', async (_event, projectId, category, fileId) => {
+  try {
+    const filePath = getProjectFilePath(projectId, category, fileId);
+    await fs.unlink(filePath);
+    return { success: true };
+  } catch (err) {
+    if (err.code === 'ENOENT') return { success: true };
+    console.error('[delete-project-file] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('list-project-files', async (_event, projectId, category) => {
+  try {
+    const safeProjectId = String(projectId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeCategory  = String(category).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dirPath = path.join(app.getPath('userData'), 'projects', safeProjectId, safeCategory);
+    const files = await fs.readdir(dirPath);
+    return { success: true, files };
+  } catch (err) {
+    if (err.code === 'ENOENT') return { success: true, files: [] };
+    console.error('[list-project-files] error:', err);
+    return { success: false, error: err.message, files: [] };
+  }
+});
+
+ipcMain.handle('delete-project-folder', async (_event, projectId) => {
+  try {
+    const safeProjectId = String(projectId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dirPath = path.join(app.getPath('userData'), 'projects', safeProjectId);
+    await fs.rm(dirPath, { recursive: true, force: true });
+    return { success: true };
+  } catch (err) {
+    console.error('[delete-project-folder] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('copy-file-to-project', async (_event, projectId, category, fileId, srcPath) => {
+  try {
+    if (!srcPath || typeof srcPath !== 'string' || srcPath.includes('\0')) {
+      return { success: false, error: 'Invalid source path' };
+    }
+    const resolved = path.resolve(srcPath);
+    const tempRoot = app.getPath('temp');
+    if (!isPathUnderDir(resolved, tempRoot)) {
+      return { success: false, error: 'Access denied: source outside temp directory' };
+    }
+    const destPath = getProjectFilePath(projectId, category, fileId);
+    await fs.mkdir(path.dirname(destPath), { recursive: true });
+    await fs.copyFile(resolved, destPath);
+    const stat = await fs.stat(destPath);
+    return { success: true, sizeBytes: stat.size };
+  } catch (err) {
+    console.error('[copy-file-to-project] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('open-file-dialog', async (_event, options) => {
+  try {
+    const filters = options?.filters || [
+      { name: 'Documents', extensions: ['pdf', 'docx', 'doc', 'png', 'jpg', 'jpeg'] },
+      { name: 'All Files', extensions: ['*'] },
+    ];
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: options?.title || 'Open File',
+      filters,
+      properties: ['openFile'],
+    });
+    if (canceled || !filePaths.length) return { success: false, canceled: true };
+    const filePath = filePaths[0];
+    const stat = await fs.stat(filePath);
+    const data = await fs.readFile(filePath);
+    return {
+      success: true,
+      filePath,
+      fileName: path.basename(filePath),
+      ext: path.extname(filePath).toLowerCase().slice(1),
+      sizeBytes: stat.size,
+      data,
+    };
+  } catch (err) {
+    console.error('[open-file-dialog] error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+// ---------- Document Upload Server & Mobile Page ----------
+
+function getMobileDocumentUploadHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Oversight — Upload Document</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;min-height:100vh;display:flex;flex-direction:column}
+.hdr{background:#1e3a5f;color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.hdr svg{width:28px;height:28px;flex-shrink:0}
+.hdr h1{font-size:1.05rem;font-weight:700;letter-spacing:.01em}
+.hdr .sub{font-size:.72rem;opacity:.75}
+.main{flex:1;padding:16px;display:flex;flex-direction:column;gap:16px;max-width:480px;width:100%;margin:0 auto}
+.mode-tabs{display:flex;gap:0;border-radius:8px;overflow:hidden;border:1.5px solid #d1d5db;background:#fff}
+.mode-tab{flex:1;padding:9px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#6b7280;cursor:pointer;border:none;background:transparent;transition:.15s}
+.mode-tab.active{background:#1e3a5f;color:#fff}
+.mode-panel{display:none}
+.mode-panel.active{display:flex;flex-direction:column;gap:12px}
+.card{background:#fff;border-radius:12px;border:1.5px solid #e5e7eb;padding:16px;display:flex;flex-direction:column;gap:12px}
+.lbl{font-size:.8rem;font-weight:600;color:#374151}
+.hint{font-size:.75rem;color:#6b7280}
+.pick-area{border:2px dashed #d1d5db;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fafafa}
+.pick-area:hover,.pick-area.drag{border-color:#1e3a5f;background:#eff6ff}
+.pick-area input{display:none}
+.pick-ico{font-size:2rem;margin-bottom:8px}
+.pick-area p{font-size:.82rem;color:#6b7280}
+.previews{display:flex;flex-wrap:wrap;gap:8px}
+.thumb-wrap{position:relative;width:80px;height:80px;border-radius:6px;overflow:hidden;border:1.5px solid #e5e7eb;flex-shrink:0}
+.thumb-wrap img{width:100%;height:100%;object-fit:cover}
+.thumb-del{position:absolute;top:2px;right:2px;background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.crop-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px}
+.crop-overlay canvas{max-width:100%;max-height:60vh;touch-action:none;border-radius:4px;cursor:crosshair}
+.crop-overlay .crop-btns{display:flex;gap:10px}
+.cam-wrap{position:relative;width:100%;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:3/4;max-height:55vh}
+.cam-wrap video{width:100%;height:100%;object-fit:cover}
+.cam-wrap canvas.overlay{position:absolute;inset:0;pointer-events:none}
+.cam-btns{display:flex;gap:10px;justify-content:center}
+.cam-handle{position:absolute;width:44px;height:44px;border-radius:50%;background:#4A90D9;border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45);transform:translate(-50%,-50%);touch-action:none;cursor:grab;-webkit-tap-highlight-color:transparent}
+.btn{padding:11px 22px;border-radius:8px;font-size:.9rem;font-weight:600;border:none;cursor:pointer;transition:.15s}
+.btn-primary{background:#1e3a5f;color:#fff}
+.btn-primary:hover:not(:disabled){background:#152c49}
+.btn-secondary{background:#f3f4f6;color:#374151;border:1.5px solid #d1d5db}
+.btn-danger{background:#ef4444;color:#fff}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-sm{padding:7px 14px;font-size:.8rem}
+.prog-bar{height:5px;background:#e5e7eb;border-radius:4px;overflow:hidden}
+.prog-fill{height:100%;background:#1e3a5f;width:0;transition:.3s}
+.status-msg{font-size:.82rem;text-align:center;color:#374151;min-height:1.2em}
+.err-msg{color:#dc2626;font-size:.82rem;text-align:center}
+.succ-card{background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:12px;padding:20px 16px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:8px}
+.succ-card h2{color:#166534;font-size:1rem}
+.name-inp{width:100%;border:1.5px solid #d1d5db;border-radius:8px;padding:9px 12px;font-size:.9rem;background:#fff}
+.name-inp:focus{outline:none;border-color:#1e3a5f}
+</style>
+</head>
+<body>
+<header class="hdr">
+  <svg viewBox="0 0 36 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M18 2L4 8v10c0 9.5 5.9 18.4 14 21.4C26.1 36.4 32 27.5 32 18V8L18 2z" fill="#4A90D9" stroke="#2E6DA4" stroke-width="1.5"/>
+    <path d="M13 20l3.5 3.5L23 16" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div>
+    <div class="hdr h1">Oversight</div>
+    <div class="sub">Upload Document</div>
+  </div>
+</header>
+
+<div class="main">
+  <!-- Mode selector -->
+  <div class="mode-tabs">
+    <button class="mode-tab active" id="tab-library">Photo Library</button>
+    <button class="mode-tab" id="tab-camera">Camera Scan</button>
+    <button class="mode-tab" id="tab-files">Files App</button>
+  </div>
+
+  <!-- Photo Library mode -->
+  <div class="mode-panel active" id="panel-library">
+    <div class="card">
+      <div class="lbl">Select Photos to Scan</div>
+      <div class="hint">Select one or more photos. Each photo will go through a scan/crop step before being saved as a PDF.</div>
+      <label class="pick-area" id="lib-pick">
+        <input type="file" id="lib-input" accept="image/*" multiple>
+        <div class="pick-ico">&#128444;</div>
+        <p>Tap to select photos from your library</p>
+      </label>
+      <div class="previews" id="lib-previews"></div>
+      <div class="prog-bar" id="lib-prog-bar" style="display:none"><div class="prog-fill" id="lib-prog-fill"></div></div>
+      <div class="status-msg" id="lib-status"></div>
+      <button class="btn btn-primary" id="lib-upload-btn" disabled>Scan &amp; Upload as PDF</button>
+    </div>
+  </div>
+
+  <!-- Camera Scan mode -->
+  <div class="mode-panel" id="panel-camera">
+    <div class="card">
+      <div class="lbl">Scan Document with Camera</div>
+      <div class="hint">Scan one page at a time &mdash; add all pages, then tap Upload.</div>
+      <div class="previews" id="cam-pages-list" style="display:none;"></div>
+      <div id="cam-take-wrap">
+        <label class="pick-area">
+          <input type="file" id="cam-fallback-input" accept="image/*" capture="environment">
+          <div class="pick-ico">&#128247;</div>
+          <p id="cam-take-label">Tap to scan first page</p>
+        </label>
+      </div>
+
+      <div class="prog-bar" id="cam-prog-bar" style="display:none"><div class="prog-fill" id="cam-prog-fill"></div></div>
+      <div class="status-msg" id="cam-status"></div>
+      <button class="btn btn-primary" id="cam-upload-btn" disabled style="display:none;">Upload Document</button>
+    </div>
+  </div>
+
+  <!-- Files App mode -->
+  <div class="mode-panel" id="panel-files">
+    <div class="card">
+      <div class="lbl">Upload from Files App</div>
+      <div class="hint">Select a PDF, Word document, or image file directly from your phone's Files app.</div>
+      <label class="pick-area" id="files-pick">
+        <input type="file" id="files-input" accept="image/*,.pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple>
+        <div class="pick-ico">&#128196;</div>
+        <p>Tap to select one or more files</p>
+      </label>
+      <div id="files-list" style="display:none;flex-direction:column;gap:4px;"></div>
+      <div class="prog-bar" id="files-prog-bar" style="display:none"><div class="prog-fill" id="files-prog-fill"></div></div>
+      <div class="status-msg" id="files-status"></div>
+      <button class="btn btn-primary" id="files-upload-btn" disabled>Upload File</button>
+    </div>
+  </div>
+
+  <div id="global-succ" class="succ-card" style="display:none">
+    <div style="font-size:2rem">&#10003;</div>
+    <h2>Document uploaded!</h2>
+    <p class="hint">Return to Oversight on the PC to name and save it.</p>
+    <button class="btn btn-secondary btn-sm" id="upload-another-btn">Upload Another</button>
+  </div>
+</div>
+
+<div class="crop-overlay" id="crop-overlay" style="display:none">
+  <div style="color:#fff;font-size:.9rem;text-align:center">Drag the corners to align with the document edges</div>
+  <canvas id="crop-canvas" width="400" height="530"></canvas>
+  <div class="crop-btns">
+    <button class="btn btn-secondary btn-sm" id="crop-skip-btn">Skip Crop</button>
+    <button class="btn btn-primary btn-sm" id="crop-confirm-btn">Crop &amp; Add</button>
+  </div>
+</div>
+
+<script>
+(function(){
+'use strict';
+var tk=new URLSearchParams(location.search).get('token')||'';
+
+// #region agent log
+var _dbgBase=location.origin;
+function _dbgLog(payload){fetch(_dbgBase+'/dbg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(function(){});}
+_dbgLog({sessionId:'32be09',location:'mobile-upload.html:load',message:'page loaded - context info',data:{protocol:location.protocol,host:location.host,isSecureContext:window.isSecureContext,mediaDevicesType:typeof navigator.mediaDevices,hasGetUserMedia:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),userAgent:navigator.userAgent.substring(0,120)},timestamp:Date.now(),hypothesisId:'A'});
+// #endregion
+
+// ---- Tab switching ----
+['library','camera','files'].forEach(function(name){
+  document.getElementById('tab-'+name).addEventListener('click',function(){
+    document.querySelectorAll('.mode-tab').forEach(function(t){t.classList.remove('active');});
+    document.querySelectorAll('.mode-panel').forEach(function(p){p.classList.remove('active');});
+    this.classList.add('active');
+    document.getElementById('panel-'+name).classList.add('active');
+  }.bind(document.getElementById('tab-'+name)));
+});
+
+// ---- Minimal PDF builder (no library) ----
+// Packs one or more JPEG ArrayBuffers into a valid multi-page PDF byte stream.
+function buildPdf(jpegPages){
+  // jpegPages: Array of {data: Uint8Array, w: number, h: number}
+  var objs=[]; // [{offset,content}]
+  var offsets=[];
+  var body='';
+  function ao(s){ var o=body.length; body+=s; return o; }
+
+  // obj 1: catalog
+  offsets.push(body.length);
+  body+='1 0 obj\\n<< /Type /Catalog /Pages 2 0 R >>\\nendobj\\n';
+  // obj 2: pages (placeholder, patched below)
+  var pagesObjOffset=body.length;
+  offsets.push(body.length);
+  var kidsPlaceholder=''; // filled later
+  // We'll build page objects first, then patch obj 2
+
+  var pageObjNums=[];
+  var imgObjNums=[];
+  var nextObj=3;
+  var pageData=[];
+  for(var pi=0;pi<jpegPages.length;pi++){
+    var pg=jpegPages[pi];
+    var wPt=Math.round(pg.w*0.75); // px -> pt at 96dpi (96/72=4/3, so pt=px*0.75)
+    var hPt=Math.round(pg.h*0.75);
+    var imgNum=nextObj++;
+    var pageNum=nextObj++;
+    pageObjNums.push(pageNum);
+    imgObjNums.push(imgNum);
+    pageData.push({wPt:wPt,hPt:hPt,imgNum:imgNum,pageNum:pageNum,jpeg:pg.data});
+  }
+
+  // Rebuild from scratch using a byte array approach for binary safety
+  var parts=[]; // Array of Uint8Array or string
+  function enc(s){ return new TextEncoder().encode(s); }
+
+  var xrefOffsets=[];
+  var rawParts=[];
+  var byteOffset=0;
+
+  function addPart(s){
+    var bytes=typeof s==='string'?enc(s):s;
+    rawParts.push(bytes);
+    byteOffset+=bytes.byteLength;
+    return byteOffset-bytes.byteLength;
+  }
+
+  // Header
+  addPart('%PDF-1.4\\n%\\xE2\\xE3\\xCF\\xD3\\n');
+
+  // obj 1 catalog
+  xrefOffsets[1]=byteOffset;
+  addPart('1 0 obj\\n<< /Type /Catalog /Pages 2 0 R >>\\nendobj\\n');
+
+  // obj 2 pages (written after page objs; placeholder now)
+  var pages2Placeholder=byteOffset;
+  xrefOffsets[2]=byteOffset;
+  var kidsStr=pageObjNums.map(function(n){return n+' 0 R';}).join(' ');
+  addPart('2 0 obj\\n<< /Type /Pages /Count '+jpegPages.length+' /Kids ['+kidsStr+'] >>\\nendobj\\n');
+
+  for(var pi2=0;pi2<pageData.length;pi2++){
+    var pd=pageData[pi2];
+    // image XObject
+    xrefOffsets[pd.imgNum]=byteOffset;
+    var jpegLen=pd.jpeg.byteLength;
+    addPart(pd.imgNum+' 0 obj\\n<< /Type /XObject /Subtype /Image /Width '+pd.wPt+
+      ' /Height '+pd.hPt+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+jpegLen+' >>\\nstream\\n');
+    addPart(pd.jpeg);
+    addPart('\\nendstream\\nendobj\\n');
+    // page
+    xrefOffsets[pd.pageNum]=byteOffset;
+    var cStream='q '+pd.wPt+' 0 0 '+pd.hPt+' 0 0 cm /Im'+pi2+' Do Q';
+    addPart(pd.pageNum+' 0 obj\\n<< /Type /Page /Parent 2 0 R'+
+      ' /MediaBox [0 0 '+pd.wPt+' '+pd.hPt+']'+
+      ' /Resources << /XObject << /Im'+pi2+' '+pd.imgNum+' 0 R >> >>'+
+      ' /Contents '+(nextObj+pi2)+' 0 R >>\\nendobj\\n');
+    var cObjNum=nextObj+pi2;
+    xrefOffsets[cObjNum]=byteOffset;
+    addPart(cObjNum+' 0 obj\\n<< /Length '+cStream.length+' >>\\nstream\\n'+cStream+'\\nendstream\\nendobj\\n');
+  }
+  // content stream obj numbers start at nextObj
+  // We already wrote them above; increment nextObj
+  var totalObjs=nextObj+pageData.length-1;
+
+  // xref
+  var xrefOffset=byteOffset;
+  var xrefStr='xref\\n0 '+(totalObjs+1)+'\\n0000000000 65535 f \\n';
+  for(var i=1;i<=totalObjs;i++){
+    var off=xrefOffsets[i]||0;
+    xrefStr+=off.toString().padStart(10,'0')+' 00000 n \\n';
+  }
+  addPart(xrefStr);
+  addPart('trailer\\n<< /Size '+(totalObjs+1)+' /Root 1 0 R >>\\n');
+  addPart('startxref\\n'+xrefOffset+'\\nendobj\\n%%EOF\\n');
+
+  // Concat all parts
+  var total=rawParts.reduce(function(s,p){return s+p.byteLength;},0);
+  var out=new Uint8Array(total);
+  var pos=0;
+  rawParts.forEach(function(p){out.set(p,pos);pos+=p.byteLength;});
+  return out;
+}
+
+// ---- Perspective warp ----
+// Given src canvas/image and 4 corner points [{x,y}] in src space (TL,TR,BR,BL),
+// draw the perspective-corrected image onto dst canvas.
+function perspectiveWarp(srcCanvas,corners,dstCanvas){
+  var W=dstCanvas.width,H=dstCanvas.height;
+  var ctx=dstCanvas.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  // Sample each destination pixel from source using bilinear perspective mapping
+  var idata=ctx.createImageData(W,H);
+  var src2d=srcCanvas.getContext('2d');
+  var srcData=src2d.getImageData(0,0,srcCanvas.width,srcCanvas.height);
+  var sw=srcCanvas.width,sh=srcCanvas.height;
+  var tl=corners[0],tr=corners[1],br=corners[2],bl=corners[3];
+  for(var dy=0;dy<H;dy++){
+    var v=dy/H;
+    for(var dx=0;dx<W;dx++){
+      var u=dx/W;
+      // Bilinear interpolation in source space
+      var topX=tl.x+(tr.x-tl.x)*u;
+      var topY=tl.y+(tr.y-tl.y)*u;
+      var botX=bl.x+(br.x-bl.x)*u;
+      var botY=bl.y+(br.y-bl.y)*u;
+      var sx=topX+(botX-topX)*v;
+      var sy=topY+(botY-topY)*v;
+      var six=Math.round(sx),siy=Math.round(sy);
+      if(six<0||six>=sw||siy<0||siy>=sh) continue;
+      var si=(siy*sw+six)*4;
+      var di=(dy*W+dx)*4;
+      idata.data[di]=srcData.data[si];
+      idata.data[di+1]=srcData.data[si+1];
+      idata.data[di+2]=srcData.data[si+2];
+      idata.data[di+3]=srcData.data[si+3];
+    }
+  }
+  ctx.putImageData(idata,0,0);
+}
+
+// ---- Sobel edge detector ----
+function sobelEdges(canvas){
+  var ctx=canvas.getContext('2d');
+  var w=canvas.width,h=canvas.height;
+  var id=ctx.getImageData(0,0,w,h);
+  var gray=new Float32Array(w*h);
+  for(var i=0;i<w*h;i++) gray[i]=0.299*id.data[i*4]+0.587*id.data[i*4+1]+0.114*id.data[i*4+2];
+  var mag=new Float32Array(w*h);
+  var maxMag=0;
+  for(var y=1;y<h-1;y++) for(var x=1;x<w-1;x++){
+    var gx=-gray[(y-1)*w+(x-1)]+gray[(y-1)*w+(x+1)]-2*gray[y*w+(x-1)]+2*gray[y*w+(x+1)]-gray[(y+1)*w+(x-1)]+gray[(y+1)*w+(x+1)];
+    var gy=-gray[(y-1)*w+(x-1)]-2*gray[(y-1)*w+x]-gray[(y-1)*w+(x+1)]+gray[(y+1)*w+(x-1)]+2*gray[(y+1)*w+x]+gray[(y+1)*w+(x+1)];
+    var m=Math.sqrt(gx*gx+gy*gy);
+    mag[y*w+x]=m;
+    if(m>maxMag) maxMag=m;
+  }
+  return {mag:mag,max:maxMag,w:w,h:h};
+}
+
+// ---- Auto-detect document quad from edge map ----
+function detectDocQuad(canvas){
+  var s=sobelEdges(canvas);
+  var thresh=s.max*0.25;
+  var w=s.w,h=s.h;
+  // Find bounding box of strong edges
+  var minX=w,maxX=0,minY=h,maxY=0;
+  for(var y=0;y<h;y++) for(var x=0;x<w;x++){
+    if(s.mag[y*w+x]>thresh){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
+  }
+  // Pad a little
+  var pad=8;
+  minX=Math.max(0,minX-pad); minY=Math.max(0,minY-pad);
+  maxX=Math.min(w-1,maxX+pad); maxY=Math.min(h-1,maxY+pad);
+  if(maxX<=minX||maxY<=minY) return [{x:10,y:10},{x:w-10,y:10},{x:w-10,y:h-10},{x:10,y:h-10}];
+  return [{x:minX,y:minY},{x:maxX,y:minY},{x:maxX,y:maxY},{x:minX,y:maxY}];
+}
+
+// ---- Corner dragging ----
+function makeCornerDragger(canvas,corners,onDraw){
+  var dragging=-1,scale=1;
+  function getScale(){return canvas.getBoundingClientRect().width/(canvas.width||1);}
+  function getPos(e){
+    var r=canvas.getBoundingClientRect();
+    var sc=getScale();
+    var cl=e.touches?e.touches[0]:e;
+    return {x:(cl.clientX-r.left)/sc,y:(cl.clientY-r.top)/sc};
+  }
+  function hit(p){
+    var r=Math.max(22,40/getScale());
+    for(var i=0;i<corners.length;i++){
+      var dx=p.x-corners[i].x,dy=p.y-corners[i].y;
+      if(Math.sqrt(dx*dx+dy*dy)<r) return i;
+    }
+    return -1;
+  }
+  canvas.addEventListener('mousedown',function(e){dragging=hit(getPos(e));});
+  canvas.addEventListener('touchstart',function(e){e.preventDefault();dragging=hit(getPos(e));},{passive:false});
+  canvas.addEventListener('mousemove',function(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();});
+  canvas.addEventListener('touchmove',function(e){e.preventDefault();if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();},{passive:false});
+  canvas.addEventListener('mouseup',function(){dragging=-1;});
+  canvas.addEventListener('touchend',function(){dragging=-1;});
+}
+
+// ---- Draw corners overlay ----
+function drawCornersOverlay(canvas,img,corners){
+  var ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(img) ctx.drawImage(img,0,0,canvas.width,canvas.height);
+  ctx.strokeStyle='rgba(74,144,217,0.85)';
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(corners[0].x,corners[0].y);
+  for(var i=1;i<corners.length;i++) ctx.lineTo(corners[i].x,corners[i].y);
+  ctx.closePath();
+  ctx.stroke();
+  // Fill overlay
+  ctx.fillStyle='rgba(74,144,217,0.12)';
+  ctx.beginPath();
+  ctx.moveTo(corners[0].x,corners[0].y);
+  for(var j=1;j<corners.length;j++) ctx.lineTo(corners[j].x,corners[j].y);
+  ctx.closePath();
+  ctx.fill();
+  corners.forEach(function(c){
+    ctx.beginPath();
+    ctx.arc(c.x,c.y,10,0,Math.PI*2);
+    ctx.fillStyle='#4A90D9';
+    ctx.fill();
+    ctx.strokeStyle='#fff';
+    ctx.lineWidth=2;
+    ctx.stroke();
+  });
+}
+
+// ---- Crop overlay (shared for library photos) ----
+var cropQueue=[];
+var cropCurrentImg=null;
+var cropCorners=null;
+var cropResolve=null;
+var cropCanvas=document.getElementById('crop-canvas');
+var cropOverlay=document.getElementById('crop-overlay');
+
+function showCropOverlay(imgEl){
+  return new Promise(function(resolve){
+    cropResolve=resolve;
+    cropCurrentImg=imgEl;
+    cropCanvas.width=imgEl.naturalWidth||imgEl.width;
+    cropCanvas.height=imgEl.naturalHeight||imgEl.height;
+    var w=cropCanvas.width,h=cropCanvas.height;
+    var pad=Math.min(w,h)*0.05;
+    cropCorners=[{x:pad,y:pad},{x:w-pad,y:pad},{x:w-pad,y:h-pad},{x:pad,y:h-pad}];
+    // Try auto-detect
+    var tmpCanvas=document.createElement('canvas');
+    tmpCanvas.width=w; tmpCanvas.height=h;
+    tmpCanvas.getContext('2d').drawImage(imgEl,0,0,w,h);
+    var detected=detectDocQuad(tmpCanvas);
+    cropCorners=detected;
+    drawCornersOverlay(cropCanvas,imgEl,cropCorners);
+    makeCornerDragger(cropCanvas,cropCorners,function(){drawCornersOverlay(cropCanvas,imgEl,cropCorners);});
+    cropOverlay.style.display='flex';
+  });
+}
+
+document.getElementById('crop-skip-btn').addEventListener('click',function(){
+  cropOverlay.style.display='none';
+  if(cropResolve) cropResolve(null);
+});
+document.getElementById('crop-confirm-btn').addEventListener('click',function(){
+  cropOverlay.style.display='none';
+  if(!cropResolve||!cropCurrentImg) return;
+  // Produce warp: output is A4 ratio
+  var imgW=cropCurrentImg.naturalWidth||cropCurrentImg.width;
+  var imgH=cropCurrentImg.naturalHeight||cropCurrentImg.height;
+  var outW=794,outH=1123; // A4 at 96dpi
+  var out=document.createElement('canvas');
+  out.width=outW; out.height=outH;
+  perspectiveWarp(cropCanvas,cropCorners,out); // cropCanvas already has imgEl drawn
+  cropResolve(out);
+});
+
+// ---- Library mode ----
+var libFiles=[];
+var libInput=document.getElementById('lib-input');
+var libPreviews=document.getElementById('lib-previews');
+var libUploadBtn=document.getElementById('lib-upload-btn');
+var libStatus=document.getElementById('lib-status');
+var libProgBar=document.getElementById('lib-prog-bar');
+var libProgFill=document.getElementById('lib-prog-fill');
+
+libInput.addEventListener('change',function(){
+  Array.from(libInput.files).forEach(function(f){ libFiles.push(f); });
+  libInput.value='';
+  renderLibPreviews();
+});
+
+function renderLibPreviews(){
+  libPreviews.innerHTML='';
+  libFiles.forEach(function(f,i){
+    var w=document.createElement('div');
+    w.className='thumb-wrap';
+    var img=document.createElement('img');
+    img.src=URL.createObjectURL(f);
+    var del=document.createElement('button');
+    del.className='thumb-del'; del.textContent='\u00d7';
+    del.addEventListener('click',function(){libFiles.splice(i,1);renderLibPreviews();});
+    w.appendChild(img); w.appendChild(del);
+    libPreviews.appendChild(w);
+  });
+  libUploadBtn.disabled=libFiles.length===0;
+}
+
+libUploadBtn.addEventListener('click',async function(){
+  if(!libFiles.length) return;
+  libUploadBtn.disabled=true;
+  libProgBar.style.display='';
+  libStatus.textContent='Scanning photos\u2026';
+
+  var pages=[];
+  for(var i=0;i<libFiles.length;i++){
+    libProgFill.style.width=Math.round((i/libFiles.length)*50)+'%';
+    var img=new Image();
+    await new Promise(function(res){
+      img.onload=res; img.onerror=res;
+      img.src=URL.createObjectURL(libFiles[i]);
+    });
+    // Show crop overlay
+    var croppedCanvas=await showCropOverlay(img);
+    var srcCanvas;
+    if(croppedCanvas){
+      srcCanvas=croppedCanvas;
+    } else {
+      srcCanvas=document.createElement('canvas');
+      srcCanvas.width=img.naturalWidth; srcCanvas.height=img.naturalHeight;
+      srcCanvas.getContext('2d').drawImage(img,0,0);
+    }
+    var jpegBlob=await new Promise(function(res){srcCanvas.toBlob(res,'image/jpeg',0.88);});
+    var buf=await jpegBlob.arrayBuffer();
+    pages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height});
+  }
+
+  libProgFill.style.width='70%';
+  libStatus.textContent='Building PDF\u2026';
+  var pdfBytes=buildPdf(pages);
+
+  libProgFill.style.width='85%';
+  libStatus.textContent='Uploading\u2026';
+  var fd=new FormData();
+  fd.append('document',new Blob([pdfBytes],{type:'application/pdf'}),'scan_'+Date.now()+'.pdf');
+  try{
+    var r=await fetch(location.href.replace(location.search,'')+'?token='+encodeURIComponent(tk),{method:'POST',body:fd});
+    libProgFill.style.width='100%';
+    if(r.ok){
+      libStatus.textContent='';
+      showSuccess();
+    } else {
+      var j=await r.json().catch(function(){return {};});
+      libStatus.textContent=j.error||('Upload failed ('+r.status+')');
+      libUploadBtn.disabled=false;
+    }
+  } catch(e){
+    libStatus.textContent='Upload error: '+e.message;
+    libUploadBtn.disabled=false;
+  }
+});
+
+// ---- Camera mode ----
+// Uses the same corner-drag perspective-warp scanner as Library mode (showCropOverlay).
+// Cropper.js has been removed \u2014 it used Cropper.default which doesn't exist in the
+// UMD build and silently crashed the crop UI.
+var camFallbackInput=document.getElementById('cam-fallback-input');
+var camTakeWrap=document.getElementById('cam-take-wrap');
+var camTakeLabel=document.getElementById('cam-take-label');
+var camStatus=document.getElementById('cam-status');
+var camProgBar=document.getElementById('cam-prog-bar');
+var camProgFill=document.getElementById('cam-prog-fill');
+var camUploadBtn=document.getElementById('cam-upload-btn');
+var camPages=[];
+
+function renderCamPages(){
+  var list=document.getElementById('cam-pages-list');
+  list.innerHTML='';
+  if(camPages.length===0){list.style.display='none';return;}
+  list.style.display='';
+  camPages.forEach(function(pg,i){
+    var w=document.createElement('div');
+    w.className='thumb-wrap';
+    var img=document.createElement('img');
+    img.src=pg.objectUrl;
+    var del=document.createElement('button');
+    del.className='thumb-del'; del.textContent='\u00d7';
+    del.addEventListener('click',function(){
+      URL.revokeObjectURL(pg.objectUrl);
+      camPages.splice(i,1);
+      renderCamPages();
+      updateCamUploadBtn();
+      camTakeLabel.textContent='Tap to scan page '+(camPages.length+1);
+      camStatus.textContent=camPages.length>0?camPages.length+' page'+(camPages.length!==1?'s':'')+' ready.':'';
+    });
+    var lbl=document.createElement('div');
+    lbl.style.cssText='position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.5);color:#fff;font-size:.6rem;text-align:center;padding:2px;pointer-events:none;';
+    lbl.textContent='p.'+(i+1);
+    w.appendChild(img); w.appendChild(del); w.appendChild(lbl);
+    list.appendChild(w);
+  });
+}
+
+function updateCamUploadBtn(){
+  if(camPages.length===0){camUploadBtn.style.display='none';camUploadBtn.disabled=true;}
+  else{camUploadBtn.style.display='';camUploadBtn.disabled=false;camUploadBtn.textContent='Upload Document ('+camPages.length+' page'+(camPages.length!==1?'s':'')+')';}
+}
+
+// Photo taken \u2192 show the shared corner-drag overlay \u2192 add to pages list.
+camFallbackInput.addEventListener('change',async function(){
+  var file=this.files[0];
+  this.value='';
+  if(!file) return;
+  camStatus.textContent='Loading\u2026';
+  var img=new Image();
+  var objUrl=URL.createObjectURL(file);
+  try{
+    await new Promise(function(res,rej){img.onload=res;img.onerror=rej;img.src=objUrl;});
+  }catch(e){
+    camStatus.textContent='Failed to load photo. Please try again.';
+    URL.revokeObjectURL(objUrl);
+    return;
+  }
+  URL.revokeObjectURL(objUrl);
+  camStatus.textContent='';
+
+  // showCropOverlay: auto-detects document quad, lets user drag corners, returns
+  // a perspective-corrected canvas \u2014 or null if the user taps Skip.
+  var croppedCanvas=await showCropOverlay(img);
+
+  var srcCanvas;
+  if(croppedCanvas){
+    srcCanvas=croppedCanvas;
+  } else {
+    srcCanvas=document.createElement('canvas');
+    srcCanvas.width=img.naturalWidth||img.width;
+    srcCanvas.height=img.naturalHeight||img.height;
+    srcCanvas.getContext('2d').drawImage(img,0,0);
+  }
+
+  var jpegBlob=await new Promise(function(res){srcCanvas.toBlob(res,'image/jpeg',0.88);});
+  var buf=await jpegBlob.arrayBuffer();
+  camPages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height,objectUrl:URL.createObjectURL(new Blob([jpegBlob],{type:'image/jpeg'}))});
+  renderCamPages();
+  updateCamUploadBtn();
+  camStatus.textContent='Page '+camPages.length+' added \u2014 scan another or tap Upload.';
+  camTakeLabel.textContent='Tap to scan page '+(camPages.length+1);
+});
+
+// Combine all scanned pages into one PDF and upload.
+camUploadBtn.addEventListener('click',async function(){
+  if(!camPages.length) return;
+  camUploadBtn.disabled=true;
+  camTakeWrap.style.display='none';
+  camProgBar.style.display='';
+  camProgFill.style.width='50%';
+  camStatus.textContent='Building PDF\u2026';
+  var pdfBytes=buildPdf(camPages);
+  camProgFill.style.width='80%';
+  camStatus.textContent='Uploading\u2026';
+  var fd=new FormData();
+  fd.append('document',new Blob([pdfBytes],{type:'application/pdf'}),'scan_'+Date.now()+'.pdf');
+  try{
+    var r=await fetch(location.href.replace(location.search,'')+'?token='+encodeURIComponent(tk),{method:'POST',body:fd});
+    camProgFill.style.width='100%';
+    if(r.ok){
+      camPages.forEach(function(pg){URL.revokeObjectURL(pg.objectUrl);}); camPages=[];
+      camStatus.textContent='';
+      showSuccess();
+    }else{
+      var j=await r.json().catch(function(){return{};});
+      camStatus.textContent=j.error||('Upload failed ('+r.status+')');
+      camUploadBtn.disabled=false;
+      camTakeWrap.style.display='';
+    }
+  }catch(e){
+    camStatus.textContent='Upload error: '+e.message;
+    camUploadBtn.disabled=false;
+    camTakeWrap.style.display='';
+  }
+});
+
+// ---- Files mode ----
+var filesInput=document.getElementById('files-input');
+var filesUploadBtn=document.getElementById('files-upload-btn');
+var filesStatus=document.getElementById('files-status');
+var filesProgBar=document.getElementById('files-prog-bar');
+var filesProgFill=document.getElementById('files-prog-fill');
+var filesListEl=document.getElementById('files-list');
+var selectedFiles=[];
+
+filesInput.addEventListener('change',function(){
+  Array.from(filesInput.files).forEach(function(f){selectedFiles.push(f);});
+  filesInput.value='';
+  renderFilesList();
+});
+
+function renderFilesList(){
+  filesListEl.innerHTML='';
+  if(selectedFiles.length===0){filesListEl.style.display='none';filesUploadBtn.disabled=true;return;}
+  filesListEl.style.display='flex';
+  selectedFiles.forEach(function(f,i){
+    var row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 8px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;font-size:.8rem;';
+    var name=document.createElement('span');
+    name.style.cssText='flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    name.textContent=f.name;
+    var size=document.createElement('span');
+    size.style.cssText='color:#9ca3af;flex-shrink:0;';
+    size.textContent=formatSize(f.size);
+    var del=document.createElement('button');
+    del.style.cssText='background:none;border:none;color:#9ca3af;font-size:1.1rem;cursor:pointer;flex-shrink:0;padding:0 4px;line-height:1;';
+    del.textContent='\u00d7';
+    del.addEventListener('click',function(){selectedFiles.splice(i,1);renderFilesList();});
+    row.appendChild(name); row.appendChild(size); row.appendChild(del);
+    filesListEl.appendChild(row);
+  });
+  filesUploadBtn.disabled=false;
+  filesUploadBtn.textContent='Upload '+selectedFiles.length+' File'+(selectedFiles.length!==1?'s':'');
+}
+
+function formatSize(n){
+  if(n<1024) return n+' B';
+  if(n<1048576) return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+
+// Upload each selected file as its own document (sequential POSTs).
+filesUploadBtn.addEventListener('click',async function(){
+  if(!selectedFiles.length) return;
+  filesUploadBtn.disabled=true;
+  filesProgBar.style.display='';
+  var total=selectedFiles.length;
+  for(var i=0;i<total;i++){
+    filesProgFill.style.width=Math.round((i/total)*90)+'%';
+    filesStatus.textContent='Uploading '+(i+1)+' of '+total+'\u2026';
+    var fd=new FormData();
+    fd.append('document',selectedFiles[i],selectedFiles[i].name);
+    try{
+      var r=await fetch(location.href.replace(location.search,'')+'?token='+encodeURIComponent(tk),{method:'POST',body:fd});
+      if(!r.ok){
+        var j=await r.json().catch(function(){return{};});
+        filesStatus.textContent=j.error||('Upload failed on file '+(i+1)+' ('+r.status+')');
+        filesUploadBtn.disabled=false;
+        return;
+      }
+    }catch(e){
+      filesStatus.textContent='Upload error: '+e.message;
+      filesUploadBtn.disabled=false;
+      return;
+    }
+  }
+  filesProgFill.style.width='100%';
+  filesStatus.textContent='';
+  showSuccess();
+});
+
+// ---- Success screen ----
+function showSuccess(){
+  document.getElementById('global-succ').style.display='flex';
+}
+document.getElementById('upload-another-btn').addEventListener('click',function(){
+  document.getElementById('global-succ').style.display='none';
+  libFiles=[]; renderLibPreviews();
+  camPages.forEach(function(pg){URL.revokeObjectURL(pg.objectUrl);}); camPages=[];
+  renderCamPages(); updateCamUploadBtn();
+  camStatus.textContent=''; camTakeLabel.textContent='Tap to scan first page';
+  camTakeWrap.style.display='';
+  selectedFiles=[]; renderFilesList();
+  filesProgBar.style.display='none'; filesProgFill.style.width='0';
+  libProgBar.style.display='none'; libProgFill.style.width='0';
+  camProgBar.style.display='none'; camProgFill.style.width='0';
+});
+
+})();
+</script>
+</body>
+</html>`;
+}
+
+function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
+  const http = require('http');
+  const Busboy = require('busboy');
+  const fsSync = require('fs');
+
+  const html = getMobileDocumentUploadHtml();
+  const ALLOWED_MIME = new Set([
+    'application/pdf','image/jpeg','image/png','image/gif','image/webp',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/msword',
+  ]);
+
+  const server = http.createServer((req, res) => {
+    let urlObj;
+    try { urlObj = new URL(req.url, `http://localhost:${port}`); } catch (e) {
+      res.writeHead(400); res.end('Bad request'); return;
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+    if (req.method === 'GET' && urlObj.pathname === '/upload') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+      return;
+    }
+
+    if (req.method === 'GET' && urlObj.pathname === '/cropperjs.js') {
+      try {
+        const cropperPath = require('path').join(__dirname, 'node_modules', 'cropperjs', 'dist', 'cropper.min.js');
+        const content = fsSync.readFileSync(cropperPath);
+        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'max-age=3600' });
+        res.end(content);
+      } catch (e) { res.writeHead(404); res.end('Not found'); }
+      return;
+    }
+
+    // #region agent log
+    if (req.method === 'POST' && urlObj.pathname === '/dbg') {
+      let dbgBody = '';
+      req.on('data', function(d){ dbgBody += d; });
+      req.on('end', function(){
+        try { fsSync.appendFileSync('debug-32be09.log', dbgBody + '\n'); } catch(e){}
+        res.writeHead(200); res.end('ok');
+      });
+      return;
+    }
+    // #endregion
+
+    if (req.method === 'POST' && urlObj.pathname === '/upload') {
+      const token = urlObj.searchParams.get('token');
+      if (token !== sessionToken) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid session — please reopen the upload page.' }));
+        return;
+      }
+
+      let bb;
+      try {
+        bb = Busboy({ headers: req.headers, limits: { fileSize: 50 * 1024 * 1024, files: 1 } });
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid multipart request' }));
+        return;
+      }
+
+      const pending = [];
+
+      bb.on('file', (_fieldname, file, info) => {
+        const rawName = String((info && info.filename) || 'document.pdf');
+        const ext = path.extname(rawName).toLowerCase() || '.pdf';
+        const safeName = `wdoc_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`;
+        const destPath = path.join(tempDir, safeName);
+        const ws = fsSync.createWriteStream(destPath);
+        file.pipe(ws);
+
+        file.on('limit', () => { file.resume(); });
+
+        const p = new Promise((resolve) => {
+          ws.on('finish', async () => {
+            try {
+              const stat = fsSync.statSync(destPath);
+              const mimeType = info.mimeType || (ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
+              onDocument({ localPath: destPath, name: rawName, mimeType, sizeBytes: stat.size });
+              resolve(true);
+            } catch (err) {
+              console.error('[doc-upload] process error:', err.message);
+              resolve(false);
+            }
+          });
+          ws.on('error', () => resolve(false));
+        });
+        pending.push(p);
+      });
+
+      bb.on('finish', async () => {
+        await Promise.all(pending);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      });
+
+      bb.on('error', (err) => {
+        console.error('[doc-upload] busboy error:', err.message);
+        if (!res.headersSent) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Upload failed' })); }
+      });
+
+      req.pipe(bb);
+      return;
+    }
+
+    res.writeHead(404); res.end('Not found');
+  });
+
+  server.on('error', (err) => console.error('[doc-upload] server error:', err.message));
+  server.listen(port, '0.0.0.0');
+  return server;
+}
+
+// ---------- Wireless Document Upload ----------
+
+let wirelessDocServer = null;
+let wirelessDocBridgeProc = null;
+let wirelessDocSender = null;
+let wirelessDocTempDir = null;
+
+ipcMain.handle('start-wireless-document-import', async (event) => {
+  try {
+    if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
+    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
+
+    await new Promise((resolve) => {
+      require('child_process').exec(
+        'powershell -NoProfile -NonInteractive -Command "' +
+        'Get-WmiObject Win32_Process | ' +
+        'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
+        'ForEach-Object { $_.Terminate() }"',
+        { windowsHide: true, timeout: 8000 },
+        () => resolve()
+      );
+    });
+
+    const { createHash } = require('crypto');
+    const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
+    const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
+    const stablePass = machineKey.slice(6, 18);
+
+    const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
+    if (!result.success) return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
+    wirelessDocBridgeProc = proc;
+
+    const tempDir = toWindowsPath(
+      path.join(app.getPath('temp'), 'oversight-wireless-docs', Date.now().toString())
+    );
+    await fs.mkdir(tempDir, { recursive: true });
+    wirelessDocTempDir = tempDir;
+    wirelessDocSender = event.sender;
+
+    const port = await findFreePort();
+    const sessionToken = require('crypto').randomBytes(16).toString('hex');
+    const uploadUrl = `http://${result.gatewayIp}:${port}/upload?token=${sessionToken}`;
+
+    // #region agent log
+    try { require('fs').appendFileSync('debug-32be09.log', JSON.stringify({sessionId:'32be09',location:'main.js:uploadUrl',message:'document-upload server URL generated',data:{protocol:uploadUrl.split(':')[0],host:`${result.gatewayIp}:${port}`,isHttps:uploadUrl.startsWith('https')},timestamp:Date.now(),hypothesisId:'A'}) + '\n'); } catch(e){}
+    // #endregion
+
+    await ensureWirelessFirewallRule().catch(() => {});
+
+    const QRCode = require('qrcode');
+    const wifiQrString = `WIFI:T:WPA;S:${result.ssid};P:${result.password};;`;
+    const [wifiQr, urlQr] = await Promise.all([
+      QRCode.toDataURL(wifiQrString, { width: 256, margin: 2 }),
+      QRCode.toDataURL(uploadUrl, { width: 256, margin: 2 }),
+    ]);
+
+    wirelessDocServer = startDocumentUploadServer(tempDir, sessionToken, port, ({ localPath, name, mimeType, sizeBytes }) => {
+      if (wirelessDocSender && !wirelessDocSender.isDestroyed()) {
+        wirelessDocSender.send('wireless-document-received', { localPath, name, mimeType, sizeBytes });
+      }
+    });
+
+    return { success: true, ssid: result.ssid, password: result.password, uploadUrl, wifiQr, urlQr };
+  } catch (err) {
+    console.error('[start-wireless-document-import] error:', err);
+    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('stop-wireless-document-import', async () => {
+  try {
+    if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
+    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
+    wirelessDocSender = null;
+    return { success: true };
+  } catch (err) {
+    console.error('[stop-wireless-document-import] error:', err);
+    return { success: false, error: err.message };
   }
 });
