@@ -3,8 +3,9 @@ const path = require('path');
 const fs = require('fs').promises;
 const { spawn } = require('child_process');
 
-/** Default page zoom for all app windows (1.0 = browser 100%) */
-const DEFAULT_ZOOM_FACTOR = 0.675;
+/** Default page zoom for all app windows (1.0 = browser 100%).
+ *  0.80 = 20% zoomed out so 1920×1080 inspector displays can fit more content. */
+const DEFAULT_ZOOM_FACTOR = 0.80;
 
 let mainWindow;
 let updateCheckInProgress = false;
@@ -82,9 +83,18 @@ function setupAutoUpdater() {
 }
 
 /**
- * Show page zoom in the window title (e.g. "AsbTrack Oversight — 75%") so Ctrl+/Ctrl- zoom is visible
+ * Show page zoom in the window title (e.g. "AsbTrack Oversight — 80%") so Ctrl+/Ctrl- zoom is visible
  * in the title bar and taskbar preview.
  */
+function applyDefaultZoom(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.webContents.setZoomFactor(DEFAULT_ZOOM_FACTOR);
+  } catch (err) {
+    console.warn('Failed to apply default zoom factor:', err);
+  }
+}
+
 function wireZoomTitleDisplay(win) {
   let baseTitle = 'Oversight Desktop';
 
@@ -108,7 +118,10 @@ function wireZoomTitleDisplay(win) {
     apply();
   });
 
+  // Full-document navigations (index ↔ project) reset Chromium zoom; re-apply
+  // the default before refreshing the title so the intended density sticks.
   win.webContents.on('did-finish-load', () => {
+    applyDefaultZoom(win);
     const stripped = stripZoomSuffix(win.webContents.getTitle());
     if (stripped) baseTitle = stripped;
     apply();
@@ -128,6 +141,7 @@ function createWindow() {
       webSecurity: true,
       allowRunningInsecureContent: false,
       plugins: true, // enable Chromium's built-in PDF viewer for in-app document preview
+      zoomFactor: DEFAULT_ZOOM_FACTOR,
       preload: path.join(__dirname, 'preload.js')
     },
     icon: path.join(__dirname, 'assets', 'icon.png')
@@ -165,7 +179,7 @@ function createWindow() {
 
   wireZoomTitleDisplay(mainWindow);
 
-  mainWindow.webContents.setZoomFactor(DEFAULT_ZOOM_FACTOR);
+  applyDefaultZoom(mainWindow);
 
   // Load the index.html file - using relative path from main.js location
   mainWindow.loadFile('index.html');

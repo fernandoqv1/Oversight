@@ -20,12 +20,20 @@ function _shellRefresh() {
 // Convert stored unit codes to user-facing display strings.
 // Storage values stay as legacy codes for backwards compatibility.
 function displayUnit(u, fallback) {
-    if (u === 'SF') return 'ft\u00b2';
-    if (u === 'LF') return 'LF';
-    if (u === 'EA') return 'EA';
-    if (u === 'CF') return 'ft\u00b3';
-    return u || fallback || '';
+    const raw = u == null ? '' : String(u).trim();
+    if (!raw) return fallback || '';
+    const code = raw.toUpperCase();
+    if (code === 'SF' || raw === 'ft^2' || raw === 'ft\u00b2' || raw.toLowerCase() === 'sq ft' || raw.toLowerCase() === 'square feet') {
+        return 'ft\u00b2';
+    }
+    if (code === 'CF' || raw === 'ft^3' || raw === 'ft\u00b3' || raw.toLowerCase() === 'cu ft' || raw.toLowerCase() === 'cubic feet') {
+        return 'ft\u00b3';
+    }
+    if (code === 'LF') return 'LF';
+    if (code === 'EA') return 'EA';
+    return raw || fallback || '';
 }
+window.displayUnit = displayUnit;
 
 // Stage name constants matching example_oversight
 const STAGE_CONTAINMENT_PREPARATION = 'Containment Preparation';
@@ -446,7 +454,6 @@ function renderMaterials() {
                     <div class="flex-1 min-w-0">
                         <span class="font-medium text-gray-800">${escapeHtml(material.name)}</span>
                         ${hazardTypeBadgeHtml(material.hazardType)}
-                        ${material.friable ? '<span class="ml-2 px-2 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded">Friable</span>' : ''}
                         <div class="text-sm mt-1 space-x-3">
                             <span class="text-gray-500">Total: <strong>${material.totalQuantity || 0}</strong> ${displayUnit(material.unit, 'units')}</span>
                             <span class="text-blue-600">Assigned: <strong>${assigned}</strong></span>
@@ -1157,11 +1164,25 @@ function hazardTypeBadgeHtml(hazardType) {
 function buildMaterialHazardSelectorHtml(namePrefix, selected = 'asbestos') {
     const ht = normalizeHazardType(selected);
     const radioName = `${namePrefix}-hazard`;
-    return `<div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Hazard *</label>
-        <div style="display:flex; gap:16px; align-items:center;">
-            ${buildModalRadioRow(`${namePrefix}-hazard-asb`, radioName, 'asbestos', 'Asb', ht !== 'lead')}
-            ${buildModalRadioRow(`${namePrefix}-hazard-pb`, radioName, 'lead', 'Pb', ht === 'lead')}
+    return `<div class="material-hazard-field">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Hazard Type *</label>
+        <div class="material-hazard-options">
+            ${buildModalRadioRow(
+                `${namePrefix}-hazard-asb`,
+                radioName,
+                'asbestos',
+                '<span class="modal-check-title">Asbestos (ASB)</span><span class="modal-check-subtitle">Asbestos-containing material</span>',
+                ht !== 'lead',
+                'material-hazard-option'
+            )}
+            ${buildModalRadioRow(
+                `${namePrefix}-hazard-pb`,
+                radioName,
+                'lead',
+                '<span class="modal-check-title">Lead (Pb)</span><span class="modal-check-subtitle">Lead-based material</span>',
+                ht === 'lead',
+                'material-hazard-option'
+            )}
         </div>
     </div>`;
 }
@@ -1169,6 +1190,106 @@ function buildMaterialHazardSelectorHtml(namePrefix, selected = 'asbestos') {
 function readMaterialHazardFromForm(namePrefix) {
     const checked = document.querySelector(`input[name="${namePrefix}-hazard"]:checked`);
     return normalizeHazardType(checked?.value);
+}
+
+const NEW_MATERIAL_SELECT_VALUE = '__new__';
+
+function buildMaterialUnitOptionsHtml(selectedUnit = 'SF') {
+    const units = [
+        { value: 'SF', label: 'ft\u00b2' },
+        { value: 'LF', label: 'LF' },
+        { value: 'EA', label: 'EA' },
+        { value: 'CF', label: 'ft\u00b3' }
+    ];
+    return units.map(u =>
+        `<option value="${u.value}" ${selectedUnit === u.value ? 'selected' : ''}>${u.label}</option>`
+    ).join('');
+}
+
+function buildMaterialQtyUnitRowHtml({ qtyId, unitId, qtyLabel = 'Total Quantity', qtyValue = '', selectedUnit = 'SF' }) {
+    const valueAttr = qtyValue === '' || qtyValue == null ? '' : ` value="${escapeHtml(String(qtyValue))}"`;
+    return `<div class="material-qty-unit-row">
+        <div class="material-qty-field">
+            <label class="block text-sm font-medium text-gray-700 mb-1" for="${qtyId}">${escapeHtml(qtyLabel)}</label>
+            <input type="number" id="${qtyId}" class="w-full p-3 border rounded-lg" placeholder="0"${valueAttr}>
+        </div>
+        <div class="material-unit-field">
+            <label class="block text-sm font-medium text-gray-700 mb-1" for="${unitId}">Unit</label>
+            <select id="${unitId}" class="w-full p-3 border rounded-lg bg-white">
+                ${buildMaterialUnitOptionsHtml(selectedUnit)}
+            </select>
+        </div>
+    </div>`;
+}
+
+function buildSiteMaterialSelectOptionsHtml(materials, { newLabel = 'New Site Material', selectedId = null } = {}) {
+    const list = materials || [];
+    const newSelected = !selectedId || selectedId === NEW_MATERIAL_SELECT_VALUE;
+    const options = list.map(m => {
+        const hazard = hazardTypeLabel(m.hazardType);
+        const selected = !newSelected && m.id === selectedId ? ' selected' : '';
+        return `<option value="${escapeHtml(m.id)}"${selected}>${escapeHtml(m.name)} · ${hazard} (${displayUnit(m.unit, 'units')})</option>`;
+    });
+    options.push(`<option value="${NEW_MATERIAL_SELECT_VALUE}"${newSelected ? ' selected' : ''}>${escapeHtml(newLabel)}</option>`);
+    return options.join('');
+}
+
+function setMaterialHazardRadios(namePrefix, hazardType) {
+    const ht = normalizeHazardType(hazardType);
+    const asb = document.getElementById(`${namePrefix}-hazard-asb`);
+    const pb = document.getElementById(`${namePrefix}-hazard-pb`);
+    if (asb) asb.checked = ht !== 'lead';
+    if (pb) pb.checked = ht === 'lead';
+}
+
+/**
+ * Toggle the conditional name field when a material select switches between
+ * an existing site material and the New sentinel. Optionally sync qty/unit/hazard
+ * from the selected site material and hide a hazard block for existing picks.
+ */
+function wireMaterialSelectToggle(modal, {
+    selectId,
+    nameWrapId,
+    nameInputId = null,
+    hazardWrapId = null,
+    hazardPrefix = null,
+    quantityId = null,
+    unitId = null,
+    syncExistingFields = true
+} = {}) {
+    const select = modal.querySelector(`#${selectId}`);
+    const nameWrap = modal.querySelector(`#${nameWrapId}`);
+    if (!select || !nameWrap) return;
+
+    const apply = () => {
+        const isNew = select.value === NEW_MATERIAL_SELECT_VALUE || !select.value;
+        nameWrap.style.display = isNew ? '' : 'none';
+        if (hazardWrapId) {
+            const hazardWrap = modal.querySelector(`#${hazardWrapId}`);
+            if (hazardWrap) hazardWrap.style.display = isNew ? '' : 'none';
+        }
+        if (!isNew && syncExistingFields) {
+            const material = (currentProject.materials || []).find(m => m.id === select.value);
+            if (material) {
+                if (quantityId) {
+                    const qtyInput = modal.querySelector(`#${quantityId}`);
+                    if (qtyInput) qtyInput.value = material.totalQuantity ?? 0;
+                }
+                if (unitId) {
+                    const unitSelect = modal.querySelector(`#${unitId}`);
+                    if (unitSelect) unitSelect.value = material.unit || 'SF';
+                }
+                if (hazardPrefix) setMaterialHazardRadios(hazardPrefix, material.hazardType);
+            }
+        } else if (isNew && nameInputId) {
+            const nameInput = modal.querySelector(`#${nameInputId}`);
+            // After createModal's initial focus (50ms), prefer the name field when New is selected.
+            if (nameInput) setTimeout(() => nameInput.focus(), 80);
+        }
+    };
+
+    select.addEventListener('change', apply);
+    apply();
 }
 
 function buildAirSampleHazardSelectorHtml(idPrefix, project, selected = '') {
@@ -1811,48 +1932,84 @@ function deleteSpace(buildingId, spaceId) {
 }
 
 function openAddMaterialModal() {
+    const materials = currentProject.materials || [];
+    const hasMaterials = materials.length > 0;
+    const defaultSelectedId = hasMaterials ? materials[0].id : NEW_MATERIAL_SELECT_VALUE;
+    const defaultMaterial = hasMaterials ? materials[0] : null;
+
     const modal = createModal('Add Site Material', `
-        <div class="space-y-4">
+        <div class="space-y-4 material-form">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Material Name</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="site-material-select">Site Material</label>
+                <select id="site-material-select" class="w-full p-3 border rounded-lg bg-white">
+                    ${buildSiteMaterialSelectOptionsHtml(materials, {
+                        newLabel: 'New Site Material',
+                        selectedId: defaultSelectedId
+                    })}
+                </select>
+            </div>
+            <div id="site-material-name-wrap"${hasMaterials ? ' style="display:none"' : ''}>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="new-material-name">Material Name</label>
                 <input type="text" id="new-material-name" class="w-full p-3 border rounded-lg" placeholder="e.g., 9x9 VAT, Pipe Insulation">
             </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Total Quantity</label>
-                    <input type="number" id="new-material-quantity" class="w-full p-3 border rounded-lg" placeholder="0">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Unit</label>
-                    <select id="new-material-unit" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="SF">Square Feet (ft\u00b2)</option>
-                        <option value="LF">Linear Feet (LF)</option>
-                        <option value="EA">Each (EA)</option>
-                        <option value="CF">Cubic Feet (CF)</option>
-                    </select>
-                </div>
+            ${buildMaterialQtyUnitRowHtml({
+                qtyId: 'new-material-quantity',
+                unitId: 'new-material-unit',
+                qtyLabel: 'Total Quantity',
+                qtyValue: defaultMaterial ? (defaultMaterial.totalQuantity || 0) : '',
+                selectedUnit: defaultMaterial?.unit || 'SF'
+            })}
+            <div id="site-material-hazard-wrap">
+                ${buildMaterialHazardSelectorHtml('new-material', defaultMaterial?.hazardType || 'asbestos')}
             </div>
-            ${buildMaterialHazardSelectorHtml('new-material', 'asbestos')}
-            ${buildModalCheckboxRow('new-material-friable', '', '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
+        const selectedId = document.getElementById('site-material-select')?.value;
+        const isNew = selectedId === NEW_MATERIAL_SELECT_VALUE;
+        const hazardType = readMaterialHazardFromForm('new-material');
+        const totalQuantity = parseFloat(document.getElementById('new-material-quantity').value) || 0;
+        const unit = document.getElementById('new-material-unit').value || 'SF';
+
+        if (!isNew) {
+            const material = (currentProject.materials || []).find(m => m.id === selectedId);
+            if (!material) {
+                alert('Please select a site material');
+                return false;
+            }
+            material.totalQuantity = totalQuantity;
+            material.unit = unit;
+            material.hazardType = hazardType;
+            saveCurrentProject();
+            renderProject();
+            return;
+        }
+
         const name = document.getElementById('new-material-name').value.trim();
         if (!name) {
             alert('Please enter a material name');
             return false;
         }
-        
+
         if (!currentProject.materials) currentProject.materials = [];
         currentProject.materials.push({
             id: generateId(),
             name,
-            totalQuantity: parseFloat(document.getElementById('new-material-quantity').value) || 0,
-            unit: document.getElementById('new-material-unit').value,
-            friable: document.getElementById('new-material-friable').checked,
-            hazardType: readMaterialHazardFromForm('new-material')
+            totalQuantity,
+            unit,
+            hazardType
         });
         saveCurrentProject();
         renderProject();
+    });
+
+    wireMaterialSelectToggle(modal, {
+        selectId: 'site-material-select',
+        nameWrapId: 'site-material-name-wrap',
+        nameInputId: 'new-material-name',
+        hazardPrefix: 'new-material',
+        quantityId: 'new-material-quantity',
+        unitId: 'new-material-unit',
+        syncExistingFields: true
     });
 }
 
@@ -1863,32 +2020,23 @@ function openEditMaterialModal(materialId) {
     const oldName = material.name;
     
     const modal = createModal('Edit Material', `
-        <div class="space-y-4">
+        <div class="space-y-4 material-form">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Material Name</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="edit-material-name">Material Name</label>
                 <input type="text" id="edit-material-name" class="w-full p-3 border rounded-lg" value="${escapeHtml(material.name)}">
             </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Total Quantity</label>
-                    <input type="number" id="edit-material-quantity" class="w-full p-3 border rounded-lg" value="${material.totalQuantity || 0}">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Unit</label>
-                    <select id="edit-material-unit" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="SF" ${material.unit === 'SF' ? 'selected' : ''}>Square Feet (ft\u00b2)</option>
-                        <option value="LF" ${material.unit === 'LF' ? 'selected' : ''}>Linear Feet (LF)</option>
-                        <option value="EA" ${material.unit === 'EA' ? 'selected' : ''}>Each (EA)</option>
-                        <option value="CF" ${material.unit === 'CF' ? 'selected' : ''}>Cubic Feet (CF)</option>
-                    </select>
-                </div>
-            </div>
+            ${buildMaterialQtyUnitRowHtml({
+                qtyId: 'edit-material-quantity',
+                unitId: 'edit-material-unit',
+                qtyLabel: 'Total Quantity',
+                qtyValue: material.totalQuantity || 0,
+                selectedUnit: material.unit || 'SF'
+            })}
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">HMR# (optional)</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="edit-material-hmr">HMR# (optional)</label>
                 <input type="text" id="edit-material-hmr" class="w-full p-3 border rounded-lg" placeholder="e.g., 01" value="${escapeHtml(material.hmrNumber || '')}">
             </div>
             ${buildMaterialHazardSelectorHtml('edit-material', material.hazardType)}
-            ${buildModalCheckboxRow('edit-material-friable', '', material.friable ? 'checked' : '', '<span class="modal-check-title">Friable Material</span>')}
         </div>
     `, () => {
         const name = document.getElementById('edit-material-name').value.trim();
@@ -1909,7 +2057,6 @@ function openEditMaterialModal(materialId) {
         material.totalQuantity = parseFloat(document.getElementById('edit-material-quantity').value) || 0;
         material.unit = newUnit;
         material.hmrNumber = (document.getElementById('edit-material-hmr').value || '').trim() || undefined;
-        material.friable = document.getElementById('edit-material-friable').checked;
         material.hazardType = readMaterialHazardFromForm('edit-material');
         saveCurrentProject();
         renderProject();
@@ -2728,56 +2875,48 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
     const building = currentProject.buildings?.find(b => b.id === buildingId);
     const space = building?.spaces?.find(s => s.id === spaceId);
     if (!space) return;
-    
-    // Get available materials from site materials
-    const materialOptions = (currentProject.materials || []).map(m => 
-        `<option value="${m.id}">${escapeHtml(m.name)} (${displayUnit(m.unit, 'units')})</option>`
-    ).join('');
-    
+
+    const materials = currentProject.materials || [];
+    const hasMaterials = materials.length > 0;
+    const defaultSelectedId = hasMaterials ? materials[0].id : NEW_MATERIAL_SELECT_VALUE;
+    const defaultMaterial = hasMaterials ? materials[0] : null;
+
     const modal = createModal(`Add Material to ${escapeHtml(space.name)}`, `
-        <div class="space-y-4">
-            ${materialOptions ? `
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Select Material</label>
-                    <select id="space-material-select" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="">-- Select a site material --</option>
-                        ${materialOptions}
-                    </select>
-                </div>
-            ` : '<p class="text-gray-500">No site materials defined. Add site materials first.</p>'}
+        <div class="space-y-4 material-form">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Or Enter Custom Material Name</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="space-material-select">Material</label>
+                <select id="space-material-select" class="w-full p-3 border rounded-lg bg-white">
+                    ${buildSiteMaterialSelectOptionsHtml(materials, {
+                        newLabel: 'New Material',
+                        selectedId: defaultSelectedId
+                    })}
+                </select>
+            </div>
+            <div id="space-material-name-wrap"${hasMaterials ? ' style="display:none"' : ''}>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="space-material-name">Material Name</label>
                 <input type="text" id="space-material-name" class="w-full p-3 border rounded-lg" placeholder="e.g., 9x9 VAT">
             </div>
-            <div id="space-custom-hazard-wrap">
+            ${buildMaterialQtyUnitRowHtml({
+                qtyId: 'space-material-quantity',
+                unitId: 'space-material-unit',
+                qtyLabel: 'Quantity',
+                qtyValue: '',
+                selectedUnit: defaultMaterial?.unit || 'SF'
+            })}
+            <div id="space-custom-hazard-wrap"${hasMaterials ? ' style="display:none"' : ''}>
                 ${buildMaterialHazardSelectorHtml('space-custom', 'asbestos')}
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
-                    <input type="number" id="space-material-quantity" class="w-full p-3 border rounded-lg" placeholder="0">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Unit</label>
-                    <select id="space-material-unit" class="w-full p-3 border rounded-lg bg-white">
-                        <option value="SF">Square Feet (ft\u00b2)</option>
-                        <option value="LF">Linear Feet (LF)</option>
-                        <option value="EA">Each (EA)</option>
-                        <option value="CF">Cubic Feet (CF)</option>
-                    </select>
-                </div>
             </div>
         </div>
     `, () => {
         const selectedId = document.getElementById('space-material-select')?.value;
+        const isNew = selectedId === NEW_MATERIAL_SELECT_VALUE;
         let name = document.getElementById('space-material-name').value.trim();
-        let unit = document.getElementById('space-material-unit').value;
-        
+        let unit = document.getElementById('space-material-unit').value || 'SF';
         const quantity = parseFloat(document.getElementById('space-material-quantity').value) || 0;
 
         let siteMaterial = null;
-        if (selectedId) {
-            siteMaterial = currentProject.materials?.find(m => m.id === selectedId) || null;
+        if (!isNew && selectedId) {
+            siteMaterial = (currentProject.materials || []).find(m => m.id === selectedId) || null;
             if (siteMaterial) {
                 name = siteMaterial.name;
                 unit = siteMaterial.unit || unit;
@@ -2799,17 +2938,28 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
         if (siteMaterial && quantity > (Number(siteMaterial.totalQuantity) || 0)) {
             siteMaterial.totalQuantity = quantity;
         }
-        
+
         if (!space.materials) space.materials = [];
         space.materials.push({
             id: generateId(),
-            materialId: siteMaterial?.id || selectedId || null,
+            materialId: siteMaterial?.id || null,
             name,
             quantity,
             unit
         });
         saveCurrentProject();
         renderProject();
+    });
+
+    wireMaterialSelectToggle(modal, {
+        selectId: 'space-material-select',
+        nameWrapId: 'space-material-name-wrap',
+        nameInputId: 'space-material-name',
+        hazardWrapId: 'space-custom-hazard-wrap',
+        unitId: 'space-material-unit',
+        // Space quantity is assignment-specific; only inherit unit from the site material.
+        syncExistingFields: true,
+        quantityId: null
     });
 }
 
