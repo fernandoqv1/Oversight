@@ -23,6 +23,12 @@ Oversight Desktop is a **standalone offline Electron desktop app** (no backend s
 
 - `js/main.js` defines `DATA_SCHEMA_VERSION` and `PROJECT_MIGRATIONS`. On renderer load, `migrateAllProjects()` upgrades stored projects to the current version (tracked via the `oversight_data_schema_version` localStorage key). Migrations must be **additive/safe** — never delete inspector data. To force a re-run during testing, clear that key in DevTools.
 
+### Phone upload / document scanner (wireless import)
+
+- The wireless import (photo + document) hosts a local website and a Wi-Fi Direct AP created by `scripts/wifi-direct-bridge.ps1`. The AP + `check-wireless-client-connected` (ARP-based) are **Windows-only** and cannot run on the Linux dev VM — the `start-wireless-*-import` handlers fail here with `spawn powershell.exe ENOENT`.
+- The mobile scanner page is a static HTML string returned by `getMobileDocumentUploadHtml()` in `main.js` (no interpolation). Document auto-detection uses **self-hosted OpenCV.js + jscanify** (served from `node_modules/jscanify/src` via the `/opencv.js` and `/jscanify.min.js` routes) so the phone needs no internet; it falls back to a built-in Sobel detector until OpenCV finishes loading.
+- To test the scanner page's detection + crop/loupe UI without the Windows AP: serve that HTML string plus the two asset files from a tiny local HTTP server and open it in a browser (the page is self-contained; only the `/upload` POST needs the real app). OpenCV.js (~9 MB) takes a few seconds to initialize before jscanify detection works.
+
 ### Lint / test / build
 
 - There is no configured linter or automated test runner (no `lint`/`test` npm scripts; the files in `scripts/test-*.js` are ad-hoc node scripts, not a suite). Verify JS edits with `node --check <file>` and validate behavior by running the app.
