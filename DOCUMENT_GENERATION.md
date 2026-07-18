@@ -80,7 +80,7 @@ Row 2 (images):  | {#col1}
 - Layout: Photo #1 and #2 side by side, then Photo #3 and #4 on the next row, etc.
 - The signature uses `{%%image}`; photo log uses `{%%photo}` for the 3.5" size.
 
-**Negative pressure placeholder:** Use `{negativePressure}` to display aggregated negative pressure readings from all log entries. When inspectors enter readings in their log entries, the app aggregates them (most recent per containment when the same containment appears in multiple entries). Format when populated: "Negative pressure reading in the containments are as follow, Containment 1 is at -0.02 inWC, Containment 2 is at -0.03 inWC." When no readings exist, the placeholder renders blank (nothing is generated).
+**Negative pressure placeholder:** Use `{negativePressure}` to display aggregated negative pressure readings from all log entries. Place it **outside** the `{#logEntries}` loop (after the log-entries table, before the signature). If it sits inside the loop row, the same pressure sentence is repeated after every entry. When inspectors enter readings in their log entries, the app aggregates them (most recent per containment when the same containment appears in multiple entries). Format when populated: "Negative pressure reading in the containments are as follow, Containment 1 is at -0.02 inWC, Containment 2 is at -0.03 inWC." When no readings exist, the placeholder renders blank (nothing is generated).
 
 ### 4. Worker Roster Template (Required Updates)
 

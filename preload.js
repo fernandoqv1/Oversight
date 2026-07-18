@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   startWirelessImport: () => ipcRenderer.invoke('start-wireless-import'),
   stopWirelessImport: () => ipcRenderer.invoke('stop-wireless-import'),
+  checkWirelessClientConnected: () => ipcRenderer.invoke('check-wireless-client-connected'),
   onWirelessPhotoReceived: (callback) => {
     if (typeof callback !== 'function') return () => {};
     const listener = (_event, payload) => callback(payload);
