@@ -1011,6 +1011,26 @@ function repairDocxPlaceholderXml(xml) {
         new RegExp(`${runCap}\\{\\/${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
         (_m, rPr1, tagName) => mergedRun(`{/${tagName.trim()}}`, rPr1)
     );
+    // {#name} / {/name} split as "{#" + "name}" (common Word grammar-check split)
+    xml = xml.replace(
+        new RegExp(`${runCap}\\{([#\\/])${runEnd}${proof}${run}([^<{}]+)\\}${runEnd}`, 'g'),
+        (_m, rPr1, prefix, tagName) => {
+            const name = String(tagName || '').trim();
+            if (!/^[\w.]+$/.test(name)) return _m;
+            return mergedRun(`{${prefix}${name}}`, rPr1);
+        }
+    );
+    // "{#" + a + b + "c}{trailing}" (e.g. logEntries split around a capital letter)
+    xml = xml.replace(
+        new RegExp(`${runCap}\\{([#\\/])${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)\\}([^<]*)${runEnd}`, 'g'),
+        (_m, rPr1, prefix, part1, part2, part3, trailing) => {
+            const name = `${part1}${part2}${part3}`.trim();
+            if (!/^[\w.]+$/.test(name)) return _m;
+            const tagRun = mergedRun(`{${prefix}${name}}`, rPr1);
+            const rest = String(trailing || '');
+            return rest ? `${tagRun}${mergedRun(rest, rPr1)}` : tagRun;
+        }
+    );
     xml = xml.replace(
         new RegExp(`${runCap}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
         (_m, rPr1, part1, part2) => {
