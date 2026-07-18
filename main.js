@@ -23,6 +23,13 @@ let wifiDirectPrestartPromise = null; // in-flight Promise while startup is runn
 // Gateway IP of the currently active Wi-Fi Direct AP, used to detect when a
 // phone has joined the network (so the modal can reveal the upload-page QR).
 let lastWirelessGatewayIp = null;
+// Whether a wireless session (modal open) is currently active, per flow. Used by
+// the AP watchdog to auto-restart the bridge if it drops mid-session (e.g. the
+// inspector toggles Wi-Fi off) without fighting an intentional stop.
+let wirelessImportSessionActive = false;
+let wirelessDocSessionActive = false;
+let wirelessBridgeRestarts = 0;
+const WIFI_MAX_MIDSESSION_RESTARTS = 3;
 
 function getAutoUpdater() {
   if (!app.isPackaged) return null;
@@ -562,6 +569,133 @@ function startWifiDirectBridge(ssid, password) {
   });
 }
 
+// Returns the inspector's stable Wi-Fi Direct credentials. Generated once and
+// persisted to the user-data folder so the network name and password never
+// change between sessions (the inspector keeps the same QR code). Each machine
+// gets its own unique credentials. Falls back to a deterministic
+// hostname-derived value if the file cannot be read/written, so the values are
+// still stable on that machine.
+let cachedWifiCredentials = null;
+function getStableWifiCredentials() {
+  if (cachedWifiCredentials) return cachedWifiCredentials;
+  const fsSync = require('fs');
+  const alnum = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const rand = (n) => {
+    const b = require('crypto').randomBytes(n);
+    let s = '';
+    for (let i = 0; i < n; i++) s += alnum[b[i] % alnum.length];
+    return s;
+  };
+  let credPath = null;
+  try { credPath = path.join(app.getPath('userData'), 'wifi-direct-credentials.json'); } catch { /* app not ready */ }
+
+  if (credPath) {
+    try {
+      const parsed = JSON.parse(fsSync.readFileSync(credPath, 'utf8'));
+      if (parsed && parsed.ssid && parsed.password) {
+        cachedWifiCredentials = { ssid: String(parsed.ssid), password: String(parsed.password) };
+        return cachedWifiCredentials;
+      }
+    } catch { /* not created yet — fall through and generate */ }
+  }
+
+  const creds = { ssid: 'Oversight-' + rand(6), password: rand(12) };
+  let persisted = false;
+  if (credPath) {
+    try {
+      fsSync.mkdirSync(path.dirname(credPath), { recursive: true });
+      fsSync.writeFileSync(credPath, JSON.stringify(creds, null, 2));
+      persisted = true;
+    } catch { /* fall back below */ }
+  }
+  if (!persisted) {
+    try {
+      const machineKey = require('crypto').createHash('sha256').update(require('os').hostname()).digest('hex');
+      creds.ssid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
+      creds.password = machineKey.slice(6, 18);
+    } catch { /* keep the random values */ }
+  }
+  cachedWifiCredentials = creds;
+  return creds;
+}
+
+// Terminates any lingering wifi-direct-bridge PowerShell processes (e.g. from a
+// previous app run or a failed attempt) so a fresh publisher can own the adapter.
+function killOrphanedBridges() {
+  return new Promise((resolve) => {
+    require('child_process').exec(
+      'powershell -NoProfile -NonInteractive -Command "' +
+      'Get-WmiObject Win32_Process | ' +
+      'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
+      'ForEach-Object { $_.Terminate() }"',
+      { windowsHide: true, timeout: 8000 },
+      () => resolve()
+    );
+  });
+}
+
+// Starts the Wi-Fi Direct bridge with automatic retries. Wi-Fi Direct start-up
+// is flaky on Windows (adapter busy, Mobile Hotspot contention, transient WinRT
+// errors), so we retry a few times, cleaning up orphaned publishers between
+// attempts, before giving up. Resolves with { result, proc } or throws.
+async function startWifiDirectBridgeWithRetry(ssid, password, maxAttempts = 3) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { result, proc } = await startWifiDirectBridge(ssid, password);
+      if (result && result.success) return { result, proc };
+      lastErr = new Error((result && result.error) || 'Wi-Fi Direct AP failed to start');
+      try { proc.kill(); } catch { /* ignore */ }
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt < maxAttempts) {
+      console.warn(`[wifi-direct] start attempt ${attempt}/${maxAttempts} failed: ${lastErr && lastErr.message}; retrying…`);
+      await killOrphanedBridges();
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+  }
+  throw lastErr || new Error('Wi-Fi Direct AP failed to start after retries');
+}
+
+// Watchdog: if the active session's AP process dies unexpectedly (e.g. the
+// inspector toggles Wi-Fi off mid-session, or the publisher aborts), transparently
+// restart it with the SAME stable credentials so the QR the inspector already
+// scanned stays valid. Guarded so it never fights an intentional stop and never
+// loops forever.
+function attachBridgeWatchdog(tag) {
+  const getProc = () => (tag === 'doc' ? wirelessDocBridgeProc : wirelessImportBridgeProc);
+  const isActive = () => (tag === 'doc' ? wirelessDocSessionActive : wirelessImportSessionActive);
+  const proc = getProc();
+  if (!proc || proc.__oversightWatchdog) return;
+  proc.__oversightWatchdog = true;
+  proc.once('exit', async () => {
+    if (!isActive() || getProc() !== proc) return; // intentional stop / handed to prestart
+    if (wirelessBridgeRestarts >= WIFI_MAX_MIDSESSION_RESTARTS) {
+      console.warn('[wifi-direct] AP dropped mid-session; restart limit reached.');
+      return;
+    }
+    wirelessBridgeRestarts += 1;
+    console.warn(`[wifi-direct] AP dropped mid-session; auto-restart ${wirelessBridgeRestarts}/${WIFI_MAX_MIDSESSION_RESTARTS}…`);
+    try {
+      const { ssid, password } = getStableWifiCredentials();
+      await killOrphanedBridges();
+      const { result, proc: newProc } = await startWifiDirectBridgeWithRetry(ssid, password, 2);
+      if (!result || !result.success) return;
+      lastWirelessGatewayIp = result.gatewayIp;
+      if (tag === 'doc') {
+        wirelessDocBridgeProc = newProc;
+      } else {
+        wirelessImportBridgeProc = newProc;
+        wirelessImportBridgeInfo = { ssid: result.ssid, password: result.password, gatewayIp: result.gatewayIp };
+      }
+      attachBridgeWatchdog(tag);
+    } catch (e) {
+      console.warn('[wifi-direct] mid-session AP restart failed:', e.message);
+    }
+  });
+}
+
 // Pre-starts the Wi-Fi Direct AP in the background so the first button press
 // shows QR codes immediately instead of waiting 5-15 s for the AP to come up.
 // Stores an in-flight Promise so a concurrent start-wireless-import call can
@@ -570,11 +704,8 @@ function preStartWifiDirect(attempt = 0) {
   if (wifiDirectPrestart || wifiDirectPrestartPromise) return;
   wifiDirectPrestartPromise = (async () => {
     try {
-      const { createHash } = require('crypto');
-      const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
-      const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
-      const stablePass = machineKey.slice(6, 18);
-      const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
+      const { ssid: stableSsid, password: stablePass } = getStableWifiCredentials();
+      const { result, proc } = await startWifiDirectBridgeWithRetry(stableSsid, stablePass, 2);
       if (result.success) {
         wifiDirectPrestart = { proc, ssid: result.ssid, password: result.password, gatewayIp: result.gatewayIp };
         console.log('[wifi-direct-prestart] AP ready:', result.ssid);
@@ -2265,22 +2396,13 @@ ipcMain.handle('start-wireless-import', async (event) => {
       wifiDirectPrestart = null;
     } else {
       // Kill any orphaned bridge processes left over from a previous app restart.
-      await new Promise((resolve) => {
-        require('child_process').exec(
-          'powershell -NoProfile -NonInteractive -Command "' +
-          'Get-WmiObject Win32_Process | ' +
-          'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
-          'ForEach-Object { $_.Terminate() }"',
-          { windowsHide: true, timeout: 8000 },
-          () => resolve()
-        );
-      });
+      await killOrphanedBridges();
 
-      const { createHash } = require('crypto');
-      const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
-      const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
-      const stablePass = machineKey.slice(6, 18);
-      const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
+      // Stable, persisted per-inspector credentials (network name + password
+      // never change between sessions) and automatic retries so a flaky Wi-Fi
+      // Direct start-up recovers on its own.
+      const { ssid: stableSsid, password: stablePass } = getStableWifiCredentials();
+      const { result, proc } = await startWifiDirectBridgeWithRetry(stableSsid, stablePass, 3);
       if (!result.success) {
         return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
       }
@@ -2292,6 +2414,9 @@ ipcMain.handle('start-wireless-import', async (event) => {
     wirelessImportBridgeProc = bridgeProc;
     wirelessImportBridgeInfo = { ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp };
     lastWirelessGatewayIp = bridgeGatewayIp;
+    wirelessImportSessionActive = true;
+    wirelessBridgeRestarts = 0;
+    attachBridgeWatchdog('photo');
 
     // Create a fresh temp directory for this session
     const tempDir = toWindowsPath(
@@ -2357,6 +2482,7 @@ let wirelessImportPort = null;
 
 ipcMain.handle('stop-wireless-import', async () => {
   try {
+    wirelessImportSessionActive = false; // stop the watchdog from restarting the AP
     if (wirelessImportServer) {
       try { wirelessImportServer.close(); } catch { /* ignore */ }
       wirelessImportServer = null;
@@ -3538,25 +3664,16 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
     if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
     if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
 
-    await new Promise((resolve) => {
-      require('child_process').exec(
-        'powershell -NoProfile -NonInteractive -Command "' +
-        'Get-WmiObject Win32_Process | ' +
-        'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
-        'ForEach-Object { $_.Terminate() }"',
-        { windowsHide: true, timeout: 8000 },
-        () => resolve()
-      );
-    });
+    await killOrphanedBridges();
 
-    const { createHash } = require('crypto');
-    const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
-    const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
-    const stablePass = machineKey.slice(6, 18);
-
-    const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
+    // Stable, persisted per-inspector credentials + automatic start-up retries.
+    const { ssid: stableSsid, password: stablePass } = getStableWifiCredentials();
+    const { result, proc } = await startWifiDirectBridgeWithRetry(stableSsid, stablePass, 3);
     if (!result.success) return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
     wirelessDocBridgeProc = proc;
+    wirelessDocSessionActive = true;
+    wirelessBridgeRestarts = 0;
+    attachBridgeWatchdog('doc');
 
     const tempDir = toWindowsPath(
       path.join(app.getPath('temp'), 'oversight-wireless-docs', Date.now().toString())
@@ -3595,6 +3712,7 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
 
 ipcMain.handle('stop-wireless-document-import', async () => {
   try {
+    wirelessDocSessionActive = false; // stop the watchdog from restarting the AP
     if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
     if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
     wirelessDocSender = null;
