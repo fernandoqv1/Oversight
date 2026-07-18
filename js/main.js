@@ -133,12 +133,31 @@ const INDEX_KEY = 'oversight_project_index';
 // version to the new one. Migrations MUST be additive — never delete
 // inspector data; fall back to safe defaults if a field is missing.
 // =====================================================================
-const DATA_SCHEMA_VERSION = 1;
+const DATA_SCHEMA_VERSION = 2;
 const SCHEMA_VERSION_KEY = 'oversight_data_schema_version';
 
 const PROJECT_MIGRATIONS = {
-    // Example for future use:
-    // 1: (p) => { p.someNewField = p.someNewField ?? []; return p; },
+    // 1 -> 2: Worker roster requirements changed — Respirator Fit Test is now
+    // the only required certification (AHERA Training and Asbestos Medical are
+    // optional). Normalize existing worker records so older data loads cleanly
+    // under the new rules. Additive/safe: never deletes inspector data.
+    2: (p) => {
+        p.workerRoster = (p.workerRoster || []).map(w => {
+            const worker = w || {};
+            return {
+                ...worker,
+                name: typeof worker.name === 'string' ? worker.name : (worker.name || ''),
+                certificationType: worker.certificationType === 'S' ? 'S' : 'W',
+                aheraExpiration: worker.aheraExpiration || '',
+                medicalExpiration: worker.medicalExpiration || '',
+                respiratorFitExpiration: worker.respiratorFitExpiration || '',
+                leadExpiration: worker.leadExpiration || '',
+                leadMedExpiration: worker.leadMedExpiration || '',
+                respiratorTypes: Array.isArray(worker.respiratorTypes) ? worker.respiratorTypes : []
+            };
+        });
+        return p;
+    },
 };
 
 function migrateProject(project) {
