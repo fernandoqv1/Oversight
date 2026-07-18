@@ -20,6 +20,9 @@ let wirelessImportPhotoCount = 0;
 // Pre-started Wi-Fi Direct bridge so the QR modal appears immediately
 let wifiDirectPrestart = null;        // { proc, ssid, password, gatewayIp } — set when ready
 let wifiDirectPrestartPromise = null; // in-flight Promise while startup is running
+// Gateway IP of the currently active Wi-Fi Direct AP, used to detect when a
+// phone has joined the network (so the modal can reveal the upload-page QR).
+let lastWirelessGatewayIp = null;
 
 function getAutoUpdater() {
   if (!app.isPackaged) return null;
@@ -2288,6 +2291,7 @@ ipcMain.handle('start-wireless-import', async (event) => {
     }
     wirelessImportBridgeProc = bridgeProc;
     wirelessImportBridgeInfo = { ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp };
+    lastWirelessGatewayIp = bridgeGatewayIp;
 
     // Create a fresh temp directory for this session
     const tempDir = toWindowsPath(
@@ -2611,7 +2615,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .succ-card h2{color:#166534;font-size:1rem}
 .name-inp{width:100%;border:1.5px solid #d1d5db;border-radius:8px;padding:9px 12px;font-size:.9rem;background:#fff}
 .name-inp:focus{outline:none;border-color:#1e3a5f}
+.crop-loupe{position:fixed;width:132px;height:132px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 12px rgba(0,0,0,.55);pointer-events:none;display:none;z-index:120;background:#000;overflow:hidden}
 </style>
+<!-- Self-hosted OpenCV.js + jscanify for automatic document (paper) detection. -->
+<!-- Served locally by the Oversight PC so the phone needs no internet access. -->
+<script src="/opencv.js" async></script>
+<script src="/jscanify.min.js"></script>
 </head>
 <body>
 <header class="hdr">
@@ -2696,8 +2705,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 
 <div class="crop-overlay" id="crop-overlay" style="display:none">
-  <div style="color:#fff;font-size:.9rem;text-align:center">Drag the corners to align with the document edges</div>
+  <div id="crop-hint" style="color:#fff;font-size:.9rem;text-align:center">Drag the corners to align with the document edges</div>
   <canvas id="crop-canvas" width="400" height="530"></canvas>
+  <canvas class="crop-loupe" id="crop-loupe" width="132" height="132"></canvas>
   <div class="crop-btns">
     <button class="btn btn-secondary btn-sm" id="crop-skip-btn">Skip Crop</button>
     <button class="btn btn-primary btn-sm" id="crop-confirm-btn">Crop &amp; Add</button>
@@ -2708,12 +2718,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 (function(){
 'use strict';
 var tk=new URLSearchParams(location.search).get('token')||'';
-
-// #region agent log
-var _dbgBase=location.origin;
-function _dbgLog(payload){fetch(_dbgBase+'/dbg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(function(){});}
-_dbgLog({sessionId:'32be09',location:'mobile-upload.html:load',message:'page loaded - context info',data:{protocol:location.protocol,host:location.host,isSecureContext:window.isSecureContext,mediaDevicesType:typeof navigator.mediaDevices,hasGetUserMedia:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),userAgent:navigator.userAgent.substring(0,120)},timestamp:Date.now(),hypothesisId:'A'});
-// #endregion
 
 // ---- Tab switching ----
 ['library','camera','files'].forEach(function(name){
@@ -2903,10 +2907,78 @@ function detectDocQuad(canvas){
   return [{x:minX,y:minY},{x:maxX,y:minY},{x:maxX,y:maxY},{x:minX,y:maxY}];
 }
 
+// ---- OpenCV.js + jscanify document detection (self-hosted, offline) ----
+// Uses OpenCV contour detection for a real "auto-detect the page" quad, and
+// gracefully falls back to the lightweight Sobel detector above when OpenCV
+// has not finished loading or fails to find paper.
+var _jscanner=null;
+function cvIsReady(){
+  return !!(window.cv && window.cv.Mat && typeof window.cv.imread==='function' && typeof window.cv.Canny==='function');
+}
+function getScanner(){
+  if(!_jscanner && window.jscanify){ try{ _jscanner=new window.jscanify(); }catch(e){ _jscanner=null; } }
+  return _jscanner;
+}
+function quadArea(q){
+  var a=0;
+  for(var i=0;i<q.length;i++){ var p1=q[i],p2=q[(i+1)%q.length]; a+=(p1.x*p2.y-p2.x*p1.y); }
+  return Math.abs(a/2);
+}
+function detectWithJscanify(canvas){
+  if(!cvIsReady()) return null;
+  var scanner=getScanner();
+  if(!scanner) return null;
+  var img=null;
+  try{
+    img=window.cv.imread(canvas);
+    var contour=scanner.findPaperContour(img);
+    if(!contour){ img.delete(); return null; }
+    var c=scanner.getCornerPoints(contour,img);
+    img.delete(); img=null;
+    if(!c||!c.topLeftCorner||!c.topRightCorner||!c.bottomRightCorner||!c.bottomLeftCorner) return null;
+    var quad=[
+      {x:c.topLeftCorner.x,y:c.topLeftCorner.y},
+      {x:c.topRightCorner.x,y:c.topRightCorner.y},
+      {x:c.bottomRightCorner.x,y:c.bottomRightCorner.y},
+      {x:c.bottomLeftCorner.x,y:c.bottomLeftCorner.y}
+    ];
+    // Reject implausible detections (too small = probably noise, not the page).
+    if(quadArea(quad) < (canvas.width*canvas.height)*0.05) return null;
+    return quad;
+  }catch(e){
+    try{ if(img) img.delete(); }catch(_e){}
+    return null;
+  }
+}
+
+// ---- Magnifier loupe (iOS-style) shown while dragging a crop corner ----
+var loupeEl=document.getElementById('crop-loupe');
+function showLoupeAt(clientX,clientY,imgPt){
+  if(!loupeEl||!cropCurrentImg) return;
+  var LSIZE=132, ZOOM=2.6;
+  var lctx=loupeEl.getContext('2d');
+  var srcSpan=LSIZE/ZOOM;
+  var sx=imgPt.x-srcSpan/2, sy=imgPt.y-srcSpan/2;
+  lctx.clearRect(0,0,LSIZE,LSIZE);
+  lctx.fillStyle='#000'; lctx.fillRect(0,0,LSIZE,LSIZE);
+  try{ lctx.drawImage(cropCanvas,sx,sy,srcSpan,srcSpan,0,0,LSIZE,LSIZE); }catch(e){}
+  lctx.strokeStyle='rgba(74,144,217,0.9)'; lctx.lineWidth=1.5;
+  lctx.beginPath(); lctx.moveTo(LSIZE/2,0); lctx.lineTo(LSIZE/2,LSIZE); lctx.moveTo(0,LSIZE/2); lctx.lineTo(LSIZE,LSIZE/2); lctx.stroke();
+  lctx.beginPath(); lctx.arc(LSIZE/2,LSIZE/2,7,0,Math.PI*2); lctx.strokeStyle='#fff'; lctx.lineWidth=2; lctx.stroke();
+  var left=clientX-LSIZE/2, top=clientY-LSIZE-24;
+  if(top<8) top=clientY+24;
+  left=Math.max(8,Math.min(left,window.innerWidth-LSIZE-8));
+  top=Math.max(8,Math.min(top,window.innerHeight-LSIZE-8));
+  loupeEl.style.left=left+'px'; loupeEl.style.top=top+'px';
+  loupeEl.style.display='block';
+}
+function hideLoupe(){ if(loupeEl) loupeEl.style.display='none'; }
+
 // ---- Corner dragging ----
 function makeCornerDragger(canvas,corners,onDraw){
-  var dragging=-1,scale=1;
+  var dragging=-1;
   function getScale(){return canvas.getBoundingClientRect().width/(canvas.width||1);}
+  function getClient(e){var cl=e.touches?e.touches[0]:e;return {x:cl.clientX,y:cl.clientY};}
   function getPos(e){
     var r=canvas.getBoundingClientRect();
     var sc=getScale();
@@ -2921,12 +2993,15 @@ function makeCornerDragger(canvas,corners,onDraw){
     }
     return -1;
   }
-  canvas.addEventListener('mousedown',function(e){dragging=hit(getPos(e));});
-  canvas.addEventListener('touchstart',function(e){e.preventDefault();dragging=hit(getPos(e));},{passive:false});
-  canvas.addEventListener('mousemove',function(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();});
-  canvas.addEventListener('touchmove',function(e){e.preventDefault();if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();},{passive:false});
-  canvas.addEventListener('mouseup',function(){dragging=-1;});
-  canvas.addEventListener('touchend',function(){dragging=-1;});
+  function start(e){dragging=hit(getPos(e));if(dragging>=0){var c=getClient(e);showLoupeAt(c.x,c.y,corners[dragging]);}}
+  function move(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();var c=getClient(e);showLoupeAt(c.x,c.y,corners[dragging]);}
+  function end(){dragging=-1;hideLoupe();}
+  canvas.addEventListener('mousedown',start);
+  canvas.addEventListener('touchstart',function(e){e.preventDefault();start(e);},{passive:false});
+  canvas.addEventListener('mousemove',move);
+  canvas.addEventListener('touchmove',function(e){e.preventDefault();move(e);},{passive:false});
+  canvas.addEventListener('mouseup',end);
+  canvas.addEventListener('touchend',end);
 }
 
 // ---- Draw corners overlay ----
@@ -2976,11 +3051,18 @@ function showCropOverlay(imgEl){
     var w=cropCanvas.width,h=cropCanvas.height;
     var pad=Math.min(w,h)*0.05;
     cropCorners=[{x:pad,y:pad},{x:w-pad,y:pad},{x:w-pad,y:h-pad},{x:pad,y:h-pad}];
-    // Try auto-detect
+    // Try auto-detect: OpenCV/jscanify first (real page detection), then Sobel fallback.
     var tmpCanvas=document.createElement('canvas');
     tmpCanvas.width=w; tmpCanvas.height=h;
     tmpCanvas.getContext('2d').drawImage(imgEl,0,0,w,h);
-    var detected=detectDocQuad(tmpCanvas);
+    var detected=detectWithJscanify(tmpCanvas);
+    var autoHint=document.getElementById('crop-hint');
+    if(detected){
+      if(autoHint) autoHint.textContent='Page detected \u2014 drag the corners to fine-tune';
+    } else {
+      detected=detectDocQuad(tmpCanvas);
+      if(autoHint) autoHint.textContent='Drag the corners to align with the document edges';
+    }
     cropCorners=detected;
     drawCornersOverlay(cropCanvas,imgEl,cropCorners);
     makeCornerDragger(cropCanvas,cropCorners,function(){drawCornersOverlay(cropCanvas,imgEl,cropCorners);});
@@ -3336,27 +3418,18 @@ function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
       return;
     }
 
-    if (req.method === 'GET' && urlObj.pathname === '/cropperjs.js') {
+    // Self-hosted document-detection assets (served locally so the phone,
+    // connected over the offline Wi-Fi Direct network, needs no internet).
+    if (req.method === 'GET' && (urlObj.pathname === '/opencv.js' || urlObj.pathname === '/jscanify.min.js')) {
       try {
-        const cropperPath = require('path').join(__dirname, 'node_modules', 'cropperjs', 'dist', 'cropper.min.js');
-        const content = fsSync.readFileSync(cropperPath);
+        const fileName = urlObj.pathname === '/opencv.js' ? 'opencv.js' : 'jscanify.js';
+        const assetPath = require('path').join(__dirname, 'node_modules', 'jscanify', 'src', fileName);
+        const content = fsSync.readFileSync(assetPath);
         res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'max-age=3600' });
         res.end(content);
       } catch (e) { res.writeHead(404); res.end('Not found'); }
       return;
     }
-
-    // #region agent log
-    if (req.method === 'POST' && urlObj.pathname === '/dbg') {
-      let dbgBody = '';
-      req.on('data', function(d){ dbgBody += d; });
-      req.on('end', function(){
-        try { fsSync.appendFileSync('debug-32be09.log', dbgBody + '\n'); } catch(e){}
-        res.writeHead(200); res.end('ok');
-      });
-      return;
-    }
-    // #endregion
 
     if (req.method === 'POST' && urlObj.pathname === '/upload') {
       const token = urlObj.searchParams.get('token');
@@ -3434,6 +3507,32 @@ let wirelessDocBridgeProc = null;
 let wirelessDocSender = null;
 let wirelessDocTempDir = null;
 
+// Best-effort detection of a phone that has joined the Wi-Fi Direct AP.
+// Reads the ARP table and looks for any host in the AP's /24 subnet other than
+// the gateway itself. Windows-only in practice; returns { connected:false } on
+// any error or when no AP gateway is known, so the renderer can safely fall
+// back to revealing the upload QR after a short timeout.
+ipcMain.handle('check-wireless-client-connected', async () => {
+  try {
+    const gw = lastWirelessGatewayIp;
+    if (!gw) return { connected: false };
+    const prefix = gw.split('.').slice(0, 3).join('.') + '.';
+    const out = await new Promise((resolve) => {
+      require('child_process').exec('arp -a', { windowsHide: true, timeout: 6000 }, (err, stdout) => resolve(err ? '' : String(stdout || '')));
+    });
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})/);
+      if (!m) continue;
+      const ip = m[1];
+      if (!ip.startsWith(prefix) || ip === gw || ip.endsWith('.255')) continue;
+      return { connected: true, ip };
+    }
+    return { connected: false };
+  } catch (e) {
+    return { connected: false };
+  }
+});
+
 ipcMain.handle('start-wireless-document-import', async (event) => {
   try {
     if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
@@ -3469,10 +3568,7 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
     const port = await findFreePort();
     const sessionToken = require('crypto').randomBytes(16).toString('hex');
     const uploadUrl = `http://${result.gatewayIp}:${port}/upload?token=${sessionToken}`;
-
-    // #region agent log
-    try { require('fs').appendFileSync('debug-32be09.log', JSON.stringify({sessionId:'32be09',location:'main.js:uploadUrl',message:'document-upload server URL generated',data:{protocol:uploadUrl.split(':')[0],host:`${result.gatewayIp}:${port}`,isHttps:uploadUrl.startsWith('https')},timestamp:Date.now(),hypothesisId:'A'}) + '\n'); } catch(e){}
-    // #endregion
+    lastWirelessGatewayIp = result.gatewayIp;
 
     await ensureWirelessFirewallRule().catch(() => {});
 

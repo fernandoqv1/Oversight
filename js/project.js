@@ -5956,11 +5956,15 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
     let receivedPhotos = [];
     let unsubscribeReceived = () => {};
     let stopped = false;
+    let connPollTimer = null;
+    let qr2FallbackTimer = null;
 
     const stopImport = async () => {
         if (stopped) return;
         stopped = true;
         unsubscribeReceived();
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
         try { await window.electronAPI.stopWirelessImport?.(); } catch { /* ignore */ }
     };
 
@@ -6071,8 +6075,12 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
             </div>
             <div class="text-center">
                 <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Step 2 &mdash; Open Upload Page</p>
-                <img src="${urlQr}" alt="Upload page QR code" style="width:190px;height:190px;border-radius:0.5rem;border:1px solid #e5e7eb;">
-                <p class="text-xs text-gray-400 mt-2" style="word-break:break-all;line-height:1.4;">${escapeHtml(uploadUrl)}</p>
+                <div id="wireless-url-wait" style="width:190px;height:190px;border-radius:0.5rem;border:1px dashed #cbd5e1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#94a3b8;font-size:.78rem;text-align:center;padding:12px;margin:0 auto;">
+                    <span style="font-size:1.8rem;">&#128241;</span>
+                    <span>Waiting for phone to join Wi&#8209;Fi&hellip;</span>
+                </div>
+                <img id="wireless-url-qr" src="" alt="Upload page QR code" style="display:none;width:190px;height:190px;border-radius:0.5rem;border:1px solid #e5e7eb;">
+                <p id="wireless-url-caption" class="text-xs text-gray-400 mt-2" style="display:none;word-break:break-all;line-height:1.4;">${escapeHtml(uploadUrl)}</p>
             </div>
         </div>
         <div style="border-top:1px solid #f3f4f6;padding-top:0.75rem;">
@@ -6080,6 +6088,33 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
             <div id="wireless-received-grid" class="flex flex-wrap gap-2"></div>
         </div>
     `;
+
+    // Two-stage QR: reveal the upload-page QR once the phone joins the Wi-Fi
+    // (detected via ARP), or after a short fallback timeout so it always appears.
+    let wqr2Revealed = false;
+    const revealUploadQr = (connected) => {
+        if (wqr2Revealed || stopped) return;
+        wqr2Revealed = true;
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
+        const waitEl = modal.querySelector('#wireless-url-wait');
+        const qrEl = modal.querySelector('#wireless-url-qr');
+        const capEl = modal.querySelector('#wireless-url-caption');
+        if (waitEl) waitEl.style.display = 'none';
+        if (qrEl) { qrEl.src = urlQr; qrEl.style.display = ''; }
+        if (capEl) capEl.style.display = '';
+    };
+    const pollConnection = async () => {
+        try {
+            const r = await window.electronAPI.checkWirelessClientConnected?.();
+            if (r && r.connected) revealUploadQr(true);
+        } catch (e) { /* ignore; fallback timer will reveal */ }
+    };
+    if (typeof window.electronAPI.checkWirelessClientConnected === 'function') {
+        connPollTimer = setInterval(pollConnection, 2000);
+        pollConnection();
+    }
+    qr2FallbackTimer = setTimeout(() => revealUploadQr(false), 12000);
 
     modal.querySelector('#wireless-copy-pw')?.addEventListener('click', () => {
         navigator.clipboard?.writeText(password).then(() => {
@@ -8058,8 +8093,12 @@ async function openWirelessDocumentImportModal() {
                     </div>
                     <div style="text-align:center;">
                         <div class="text-xs text-gray-500 mb-1">2&nbsp;&nbsp;Open Scanner</div>
-                        <img id="wdoc-url-qr" src="" alt="URL QR" style="width:140px;height:140px;border:1px solid #e5e7eb;border-radius:6px;">
-                        <div class="text-xs text-gray-400 mt-1">Scan on phone</div>
+                        <div id="wdoc-url-wait" style="width:140px;height:140px;border:1px dashed #cbd5e1;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:#94a3b8;font-size:.7rem;text-align:center;padding:8px;">
+                            <span style="font-size:1.4rem;">&#128241;</span>
+                            <span id="wdoc-wait-text">Waiting for phone to join Wi&#8209;Fi&hellip;</span>
+                        </div>
+                        <img id="wdoc-url-qr" src="" alt="URL QR" style="display:none;width:140px;height:140px;border:1px solid #e5e7eb;border-radius:6px;">
+                        <div id="wdoc-url-caption" class="text-xs text-gray-400 mt-1" style="display:none;">Scan on phone</div>
                     </div>
                 </div>
                 <div class="mt-3 p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
@@ -8088,9 +8127,13 @@ async function openWirelessDocumentImportModal() {
 
     const receivedDocs = [];
     let stopListener = null;
+    let connPollTimer = null;
+    let qr2FallbackTimer = null;
 
     const stopImport = async () => {
         if (stopListener) { stopListener(); stopListener = null; }
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
         await window.electronAPI.stopWirelessDocumentImport().catch(() => {});
     };
 
@@ -8122,10 +8165,39 @@ async function openWirelessDocumentImportModal() {
 
     statusEl.style.display = 'none';
     wifiQrImg.src = startResult.wifiQr;
-    urlQrImg.src = startResult.urlQr;
     ssidEl.textContent = `${startResult.ssid} · ${startResult.password}`;
     qrSection.style.display = '';
     doneBtn.style.display = '';
+
+    // Two-stage QR: show the Wi-Fi QR first, then reveal the upload-page QR once
+    // the phone has joined the network (detected via ARP), or after a short
+    // fallback timeout so it always appears even if detection is unavailable.
+    let qr2Revealed = false;
+    const revealUploadQr = (connected) => {
+        if (qr2Revealed) return;
+        qr2Revealed = true;
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
+        const waitEl = modal.querySelector('#wdoc-url-wait');
+        const captionEl = modal.querySelector('#wdoc-url-caption');
+        if (waitEl) waitEl.style.display = 'none';
+        urlQrImg.src = startResult.urlQr;
+        urlQrImg.style.display = '';
+        if (captionEl) captionEl.style.display = '';
+        if (connected) statusEl.textContent = '';
+    };
+
+    const pollConnection = async () => {
+        try {
+            const r = await window.electronAPI.checkWirelessClientConnected?.();
+            if (r && r.connected) revealUploadQr(true);
+        } catch (e) { /* ignore, fallback timer will reveal */ }
+    };
+    if (typeof window.electronAPI.checkWirelessClientConnected === 'function') {
+        connPollTimer = setInterval(pollConnection, 2000);
+        pollConnection();
+    }
+    qr2FallbackTimer = setTimeout(() => revealUploadQr(false), 12000);
 
     // Listen for received documents
     stopListener = window.electronAPI.onWirelessDocumentReceived(async (payload) => {
