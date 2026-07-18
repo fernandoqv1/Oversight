@@ -2693,26 +2693,27 @@ function getMobileDocumentUploadHtml() {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Oversight — Upload Document</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;min-height:100vh;display:flex;flex-direction:column}
-.hdr{background:#1e3a5f;color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}
+.hdr{background:#1e3a5f;color:#fff;padding:12px 16px;padding-top:max(12px,env(safe-area-inset-top));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));display:flex;align-items:center;gap:10px;flex-shrink:0}
 .hdr svg{width:28px;height:28px;flex-shrink:0}
 .hdr h1{font-size:1.05rem;font-weight:700;letter-spacing:.01em}
 .hdr .sub{font-size:.72rem;opacity:.75}
-.main{flex:1;padding:16px;display:flex;flex-direction:column;gap:16px;max-width:480px;width:100%;margin:0 auto}
+.main{flex:1;padding:16px;padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));padding-bottom:max(16px,env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:16px;max-width:480px;width:100%;margin:0 auto}
 .mode-tabs{display:flex;gap:0;border-radius:8px;overflow:hidden;border:1.5px solid #d1d5db;background:#fff}
-.mode-tab{flex:1;padding:9px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#6b7280;cursor:pointer;border:none;background:transparent;transition:.15s}
+.mode-tab{flex:1;padding:9px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#6b7280;cursor:pointer;border:none;background:transparent;transition:.15s;-webkit-tap-highlight-color:transparent}
 .mode-tab.active{background:#1e3a5f;color:#fff}
 .mode-panel{display:none}
 .mode-panel.active{display:flex;flex-direction:column;gap:12px}
 .card{background:#fff;border-radius:12px;border:1.5px solid #e5e7eb;padding:16px;display:flex;flex-direction:column;gap:12px}
 .lbl{font-size:.8rem;font-weight:600;color:#374151}
 .hint{font-size:.75rem;color:#6b7280}
-.pick-area{border:2px dashed #d1d5db;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fafafa}
-.pick-area:hover,.pick-area.drag{border-color:#1e3a5f;background:#eff6ff}
+.pick-area{border:2px dashed #d1d5db;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fafafa;-webkit-tap-highlight-color:transparent}
+.pick-area.drag,.pick-area:active{border-color:#1e3a5f;background:#eff6ff}
+@media (hover:hover){.pick-area:hover{border-color:#1e3a5f;background:#eff6ff}}
 .pick-area input{display:none}
 .pick-ico{font-size:2rem;margin-bottom:8px}
 .pick-area p{font-size:.82rem;color:#6b7280}
@@ -2728,9 +2729,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .cam-wrap canvas.overlay{position:absolute;inset:0;pointer-events:none}
 .cam-btns{display:flex;gap:10px;justify-content:center}
 .cam-handle{position:absolute;width:44px;height:44px;border-radius:50%;background:#4A90D9;border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45);transform:translate(-50%,-50%);touch-action:none;cursor:grab;-webkit-tap-highlight-color:transparent}
-.btn{padding:11px 22px;border-radius:8px;font-size:.9rem;font-weight:600;border:none;cursor:pointer;transition:.15s}
+.btn{padding:11px 22px;border-radius:8px;font-size:.9rem;font-weight:600;border:none;cursor:pointer;transition:.15s;-webkit-tap-highlight-color:transparent}
 .btn-primary{background:#1e3a5f;color:#fff}
-.btn-primary:hover:not(:disabled){background:#152c49}
+@media (hover:hover){.btn-primary:hover:not(:disabled){background:#152c49}}
 .btn-secondary{background:#f3f4f6;color:#374151;border:1.5px solid #d1d5db}
 .btn-danger{background:#ef4444;color:#fff}
 .btn:disabled{opacity:.5;cursor:not-allowed}
