@@ -4604,14 +4604,14 @@ function renderWorkerRosterView(project) {
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div>
                                     <label for="worker-ahera-exp" class="block text-xs text-gray-500 mb-1">AHERA</label>
-                                    <input type="date" id="worker-ahera-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
+                                    <input type="date" id="worker-ahera-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors">
                                 </div>
                                 <div>
                                     <label for="worker-medical-exp" class="block text-xs text-gray-500 mb-1">Medical</label>
-                                    <input type="date" id="worker-medical-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
+                                    <input type="date" id="worker-medical-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors">
                                 </div>
                                 <div>
-                                    <label for="worker-respirator-exp" class="block text-xs text-gray-500 mb-1">Respirator Fit Test</label>
+                                    <label for="worker-respirator-exp" class="block text-xs text-gray-500 mb-1">Respirator Fit Test *</label>
                                     <input type="date" id="worker-respirator-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
                                 </div>
                                 <div>
@@ -4673,6 +4673,10 @@ function renderWorkerRosterView(project) {
         const respiratorSelections = Array.from(rosterForm.querySelectorAll('.respirator-type-checkbox:checked')).map(cb => cb.value);
         if (!name) {
             showNotification('Enter a worker name.', true);
+            return;
+        }
+        if (!respiratorExp) {
+            showNotification('Respirator Fit Test expiration date is required.', true);
             return;
         }
         if (!respiratorSelections.length) {
@@ -4749,14 +4753,14 @@ function openEditWorkerModal(worker) {
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
                         <label for="edit-worker-ahera-exp" class="block text-sm font-medium text-gray-700 mb-1">AHERA Training</label>
-                        <input type="date" id="edit-worker-ahera-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.aheraExpiration || ''}" required>
+                        <input type="date" id="edit-worker-ahera-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.aheraExpiration || ''}">
                     </div>
                     <div>
                         <label for="edit-worker-medical-exp" class="block text-sm font-medium text-gray-700 mb-1">Asbestos Medical</label>
-                        <input type="date" id="edit-worker-medical-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.medicalExpiration || ''}" required>
+                        <input type="date" id="edit-worker-medical-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.medicalExpiration || ''}">
                     </div>
                     <div>
-                        <label for="edit-worker-respirator-exp" class="block text-sm font-medium text-gray-700 mb-1">Respirator Fit Test</label>
+                        <label for="edit-worker-respirator-exp" class="block text-sm font-medium text-gray-700 mb-1">Respirator Fit Test *</label>
                         <input type="date" id="edit-worker-respirator-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.respiratorFitExpiration || ''}" required>
                     </div>
                     <div>
@@ -4820,6 +4824,7 @@ function openEditWorkerModal(worker) {
         const respiratorSelections = Array.from(modal.querySelectorAll('.edit-respirator-type-checkbox:checked')).map(cb => cb.value);
 
         if (!name) { showNotification('Enter a worker name.', true); return; }
+        if (!respiratorExp) { showNotification('Respirator Fit Test expiration date is required.', true); return; }
         if (!respiratorSelections.length) { showNotification('Select at least one respirator type.', true); return; }
 
         const updatedWorker = {

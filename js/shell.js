@@ -1631,8 +1631,8 @@
   }
   function validateWorkerFields(fields) {
     if (!fields.name) { showShellNote('Enter a worker name.'); return false; }
-    if (!fields.aheraExp || !fields.medicalExp || !fields.respiratorExp) {
-      showShellNote('AHERA, Medical, and Respirator Fit expiration dates are required.');
+    if (!fields.respiratorExp) {
+      showShellNote('Respirator Fit Test expiration date is required.');
       return false;
     }
     if (!fields.respiratorSelections.length) {
@@ -1670,6 +1670,7 @@
       <div class="filter-bar">
         <span class="muted small">${ws.length} worker${ws.length === 1 ? '' : 's'} on roster</span>
         <div class="filter-spacer"></div>
+        <button class="btn-ghost" id="import-workers-btn" type="button">${ICONS.download} Import workers</button>
         <button class="btn-ghost" id="export-worker-roster-btn" type="button" ${ws.length === 0 ? 'disabled' : ''}>${ICONS.doc} Export roster</button>
         <button class="btn-primary" id="toggle-add-worker-btn" type="button">${ICONS.plus} ${workerAddOpen ? 'Cancel' : 'Add worker'}</button>
       </div>
@@ -1685,9 +1686,9 @@
           </div>
           <div class="worker-field"><span class="worker-section-lbl">Certifications (expiration dates)</span>
             <div class="worker-dates-grid">
-              <div class="worker-field"><label for="worker-ahera-exp">AHERA Training</label><input type="date" id="worker-ahera-exp" required></div>
-              <div class="worker-field"><label for="worker-medical-exp">Asbestos Medical</label><input type="date" id="worker-medical-exp" required></div>
-              <div class="worker-field"><label for="worker-respirator-exp">Respirator Fit Test</label><input type="date" id="worker-respirator-exp" required></div>
+              <div class="worker-field"><label for="worker-ahera-exp">AHERA Training</label><input type="date" id="worker-ahera-exp"></div>
+              <div class="worker-field"><label for="worker-medical-exp">Asbestos Medical</label><input type="date" id="worker-medical-exp"></div>
+              <div class="worker-field"><label for="worker-respirator-exp">Respirator Fit Test <span class="req-star">*</span></label><input type="date" id="worker-respirator-exp" required></div>
               <div class="worker-field"><label for="worker-lead-exp">Lead Training</label><input type="date" id="worker-lead-exp"></div>
               <div class="worker-field"><label for="worker-lead-med-exp">Lead Medical</label><input type="date" id="worker-lead-med-exp"></div>
             </div>
@@ -1697,13 +1698,16 @@
         </form>
       </section>` : ''}
       ${ws.length === 0 && !workerAddOpen
-        ? '<div class="empty-state"><div class="title">No workers on the roster</div><div class="sub">Track AHERA Training, Asbestos Medical, Respirator Fit Test, and optional Lead Training / Lead Medical. Only filled certifications appear on each card.</div></div>'
+        ? '<div class="empty-state"><div class="title">No workers on the roster</div><div class="sub">Respirator Fit Test is required. AHERA Training, Asbestos Medical, and Lead Training / Lead Medical are optional. Only filled certifications appear on each card.</div></div>'
         : `<div class="worker-roster-list">${ws.map(w => renderWorkerRosterCard(w)).join('')}</div>`}
     `;
 
     wrap.querySelector('#toggle-add-worker-btn')?.addEventListener('click', () => {
       workerAddOpen = !workerAddOpen;
       renderTabTeam(getCurrentProject());
+    });
+    wrap.querySelector('#import-workers-btn')?.addEventListener('click', () => {
+      openImportWorkersModal();
     });
     wrap.querySelector('#export-worker-roster-btn')?.addEventListener('click', () => {
       const proj = getCurrentProject();
@@ -1742,6 +1746,165 @@
       showShellNote('Worker removed.');
       renderTabTeam(getCurrentProject());
     }));
+  }
+
+  function normalizeImportedWorker(w) {
+    return {
+      id: 'w_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+      name: (w.name || '').trim(),
+      certificationType: w.certificationType === 'S' ? 'S' : 'W',
+      aheraExpiration: w.aheraExpiration || '',
+      medicalExpiration: w.medicalExpiration || '',
+      respiratorFitExpiration: w.respiratorFitExpiration || '',
+      leadExpiration: w.leadExpiration || '',
+      leadMedExpiration: w.leadMedExpiration || '',
+      respiratorTypes: Array.isArray(w.respiratorTypes) ? w.respiratorTypes.slice() : [],
+      createdAt: Date.now()
+    };
+  }
+
+  function workerDedupeKey(w) {
+    return (w.name || '').trim().toLowerCase() + '|' + (w.certificationType === 'S' ? 'S' : 'W');
+  }
+
+  let importWorkerCandidates = [];
+
+  function openImportWorkersModal() {
+    const proj = getCurrentProject();
+    if (!proj) { showShellNote('Open a project first.'); return; }
+    importWorkerCandidates = [];
+    const otherProjects = getProjects().filter(p =>
+      p && p.id !== proj.id && Array.isArray(p.workerRoster) && p.workerRoster.length > 0);
+
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+      <div class="modal-content" style="max-width:640px;">
+        <h3>Import workers</h3>
+        <p class="text-sm text-gray-600" style="margin-top:0;">Add workers to this roster from another saved project or from an exported project Excel file. Duplicate names with the same certification type are skipped.</p>
+        <div class="worker-import-sources" style="display:flex;gap:8px;margin:14px 0;">
+          <button type="button" class="btn btn-secondary worker-import-src-btn active" data-src="local">From saved project</button>
+          <button type="button" class="btn btn-secondary worker-import-src-btn" data-src="file">From Excel export</button>
+        </div>
+        <div data-src-panel="local">
+          ${otherProjects.length
+            ? `<label class="block text-sm font-medium text-gray-700 mb-1">Source project</label>
+               <select id="worker-import-project" class="w-full border border-gray-300 rounded-lg p-2 bg-white">
+                 <option value="">Select a project…</option>
+                 ${otherProjects.map(p => `<option value="${esc(p.id)}">${esc(siteName(p))} — ${(p.workerRoster || []).length} worker${(p.workerRoster || []).length === 1 ? '' : 's'}</option>`).join('')}
+               </select>`
+            : '<p class="text-sm text-gray-500">No other saved projects have workers to import.</p>'}
+        </div>
+        <div data-src-panel="file" style="display:none;">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Exported project (.xlsx)</label>
+          <input type="file" id="worker-import-file" accept=".xlsx" class="text-sm text-gray-600">
+        </div>
+        <div id="worker-import-list" class="worker-import-list" style="margin-top:14px;max-height:280px;overflow:auto;"></div>
+        <div class="modal-footer" style="margin-top:16px;">
+          <button type="button" class="btn btn-secondary" data-imp-cancel>Cancel</button>
+          <button type="button" class="btn btn-primary" data-imp-confirm disabled>Import selected</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+
+    const listEl = modal.querySelector('#worker-import-list');
+    const confirmBtn = modal.querySelector('[data-imp-confirm]');
+    const existingKeys = new Set((proj.workerRoster || []).map(workerDedupeKey));
+
+    function renderCandidateList() {
+      if (!importWorkerCandidates.length) {
+        listEl.innerHTML = '';
+        confirmBtn.disabled = true;
+        return;
+      }
+      listEl.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <span class="muted small">${importWorkerCandidates.length} worker${importWorkerCandidates.length === 1 ? '' : 's'} available</span>
+          <label class="worker-resp-check"><input type="checkbox" id="worker-import-all"><span>Select all</span></label>
+        </div>
+        ${importWorkerCandidates.map((w, i) => {
+          const dup = existingKeys.has(workerDedupeKey(w));
+          return `<label class="worker-import-row" style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-bottom:1px solid #eee;${dup ? 'opacity:.55;' : ''}">
+            <input type="checkbox" class="worker-import-cb" data-i="${i}" ${dup ? 'disabled' : ''}>
+            <span style="flex:1;">${esc(w.name || '(no name)')} <span class="worker-badge ${w.certificationType === 'S' ? 'worker-badge-supervisor' : 'worker-badge-worker'}">${w.certificationType === 'S' ? 'S' : 'W'}</span>${dup ? ' <span class="muted small">(already on roster)</span>' : ''}</span>
+            <span class="muted small">Fit: ${esc(w.respiratorFitExpiration || '—')}</span>
+          </label>`;
+        }).join('')}`;
+      const updateConfirm = () => {
+        confirmBtn.disabled = listEl.querySelectorAll('.worker-import-cb:checked').length === 0;
+      };
+      listEl.querySelector('#worker-import-all')?.addEventListener('change', (e) => {
+        listEl.querySelectorAll('.worker-import-cb:not(:disabled)').forEach(cb => { cb.checked = e.target.checked; });
+        updateConfirm();
+      });
+      listEl.querySelectorAll('.worker-import-cb').forEach(cb => cb.addEventListener('change', updateConfirm));
+      updateConfirm();
+    }
+
+    modal.querySelectorAll('.worker-import-src-btn').forEach(btn => btn.addEventListener('click', () => {
+      modal.querySelectorAll('.worker-import-src-btn').forEach(b => b.classList.toggle('active', b === btn));
+      const src = btn.dataset.src;
+      modal.querySelector('[data-src-panel="local"]').style.display = src === 'local' ? '' : 'none';
+      modal.querySelector('[data-src-panel="file"]').style.display = src === 'file' ? '' : 'none';
+      importWorkerCandidates = [];
+      renderCandidateList();
+    }));
+
+    modal.querySelector('#worker-import-project')?.addEventListener('change', (e) => {
+      const src = otherProjects.find(p => p.id === e.target.value);
+      importWorkerCandidates = src ? (src.workerRoster || []).slice() : [];
+      renderCandidateList();
+    });
+
+    modal.querySelector('#worker-import-file')?.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          if (typeof window.importProjectFromExcel !== 'function') {
+            showShellNote('Excel import is not available on this page.');
+            return;
+          }
+          const data = new Uint8Array(ev.target.result);
+          const imported = window.importProjectFromExcel(data);
+          importWorkerCandidates = (imported && Array.isArray(imported.workerRoster)) ? imported.workerRoster.slice() : [];
+          if (!importWorkerCandidates.length) showShellNote('No workers found in that Excel file.');
+          renderCandidateList();
+        } catch (err) {
+          console.error('Worker import (excel) failed:', err);
+          showShellNote('Could not read that Excel file.');
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    const close = () => modal.remove();
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    modal.querySelector('[data-imp-cancel]')?.addEventListener('click', close);
+
+    confirmBtn.addEventListener('click', () => {
+      const picked = Array.from(listEl.querySelectorAll('.worker-import-cb:checked'))
+        .map(cb => importWorkerCandidates[Number(cb.dataset.i)])
+        .filter(Boolean);
+      if (!picked.length) return;
+      const current = getCurrentProject();
+      current.workerRoster = current.workerRoster || [];
+      const keys = new Set(current.workerRoster.map(workerDedupeKey));
+      let added = 0, skipped = 0;
+      picked.forEach(w => {
+        const rec = normalizeImportedWorker(w);
+        const k = workerDedupeKey(rec);
+        if (keys.has(k)) { skipped += 1; return; }
+        keys.add(k);
+        current.workerRoster.push(rec);
+        added += 1;
+      });
+      saveAndRefresh(current);
+      close();
+      showShellNote(`Imported ${added} worker${added === 1 ? '' : 's'}${skipped ? `, skipped ${skipped} duplicate${skipped === 1 ? '' : 's'}` : ''}.`);
+      renderTabTeam(getCurrentProject());
+    });
   }
 
   function renderWorkerRosterCard(w) {
