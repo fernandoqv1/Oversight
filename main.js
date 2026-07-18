@@ -2759,7 +2759,7 @@ function buildPdf(jpegPages){
     var pageNum=nextObj++;
     pageObjNums.push(pageNum);
     imgObjNums.push(imgNum);
-    pageData.push({wPt:wPt,hPt:hPt,imgNum:imgNum,pageNum:pageNum,jpeg:pg.data});
+    pageData.push({wPt:wPt,hPt:hPt,wPx:pg.w,hPx:pg.h,imgNum:imgNum,pageNum:pageNum,jpeg:pg.data});
   }
 
   // Rebuild from scratch using a byte array approach for binary safety
@@ -2795,8 +2795,8 @@ function buildPdf(jpegPages){
     // image XObject
     xrefOffsets[pd.imgNum]=byteOffset;
     var jpegLen=pd.jpeg.byteLength;
-    addPart(pd.imgNum+' 0 obj\\n<< /Type /XObject /Subtype /Image /Width '+pd.wPt+
-      ' /Height '+pd.hPt+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+jpegLen+' >>\\nstream\\n');
+    addPart(pd.imgNum+' 0 obj\\n<< /Type /XObject /Subtype /Image /Width '+pd.wPx+
+      ' /Height '+pd.hPx+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+jpegLen+' >>\\nstream\\n');
     addPart(pd.jpeg);
     addPart('\\nendstream\\nendobj\\n');
     // page
