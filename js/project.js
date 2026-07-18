@@ -1188,10 +1188,10 @@ const NEW_MATERIAL_SELECT_VALUE = '__new__';
 
 function buildMaterialUnitOptionsHtml(selectedUnit = 'SF') {
     const units = [
-        { value: 'SF', label: 'SF' },
+        { value: 'SF', label: 'ft\u00b2' },
         { value: 'LF', label: 'LF' },
         { value: 'EA', label: 'EA' },
-        { value: 'CF', label: 'CF' }
+        { value: 'CF', label: 'ft\u00b3' }
     ];
     return units.map(u =>
         `<option value="${u.value}" ${selectedUnit === u.value ? 'selected' : ''}>${u.label}</option>`
