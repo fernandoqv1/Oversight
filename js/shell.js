@@ -76,9 +76,6 @@
       if (!fid || !pid) continue;
       try {
         const result = await window.electronAPI.readProjectFile(pid, 'photos', fid);
-        // #region agent log
-        fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/shell.js:loadDiskPhotosInElement',message:'disk photo read',data:{projectId:pid,fileId:fid,success:!!result?.success,notFound:!!result?.notFound,hasData:!!result?.data},timestamp:Date.now(),hypothesisId:'H-A'})}).catch(()=>{});
-        // #endregion
         if (result?.success && result.data) {
           img.src = URL.createObjectURL(new Blob([result.data], { type: 'image/jpeg' }));
           img.dataset.loaded = '1';
