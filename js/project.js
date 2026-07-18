@@ -8199,34 +8199,66 @@ async function openWirelessDocumentImportModal() {
     }
     qr2FallbackTimer = setTimeout(() => revealUploadQr(false), 12000);
 
-    // Listen for received documents
+    // Listen for received documents. Each gets an editable name field so the
+    // inspector can name/rename it before saving (prompt() is unsupported in
+    // Electron, which previously caused every document to be skipped).
     stopListener = window.electronAPI.onWirelessDocumentReceived(async (payload) => {
+        const idx = receivedDocs.length;
         receivedDocs.push(payload);
+        if (receivedDocs.length === 1) {
+            const hint = document.createElement('p');
+            hint.className = 'text-xs text-gray-500';
+            hint.style.cssText = 'margin:0 0 6px;';
+            hint.textContent = 'Name each document, then tap Done to save.';
+            receivedList.appendChild(hint);
+        }
+        const defaultName = (payload.name || 'document').replace(/\.[^.]+$/, '');
         const item = document.createElement('div');
         item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;font-size:.82rem;';
-        item.innerHTML = `<span style="color:#16a34a;">&#10003;</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(payload.name || 'document')}</span><span style="color:#9ca3af;">${payload.sizeBytes ? (payload.sizeBytes / 1024).toFixed(0) + ' KB' : ''}</span>`;
+        const check = document.createElement('span');
+        check.style.color = '#16a34a';
+        check.innerHTML = '&#10003;';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'wdoc-name-input';
+        input.dataset.idx = String(idx);
+        input.value = defaultName;
+        input.placeholder = 'Document name';
+        input.style.cssText = 'flex:1;min-width:0;padding:6px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:.82rem;';
+        const size = document.createElement('span');
+        size.style.cssText = 'color:#9ca3af;white-space:nowrap;';
+        size.textContent = payload.sizeBytes ? (payload.sizeBytes / 1024).toFixed(0) + ' KB' : '';
+        item.appendChild(check);
+        item.appendChild(input);
+        item.appendChild(size);
         receivedList.appendChild(item);
+        doneBtn.textContent = `Done (${receivedDocs.length})`;
     });
 
     doneBtn.addEventListener('click', async () => {
-        doneBtn.disabled = true;
-        cancelBtn.disabled = true;
-        doneBtn.textContent = 'Saving\u2026';
-
-        await stopImport();
-
         if (receivedDocs.length === 0) {
+            await stopImport();
             modal.remove();
             showNotification('No documents were received.', true);
             return;
         }
 
-        // Save each received document to the project
-        for (const doc of receivedDocs) {
+        doneBtn.disabled = true;
+        cancelBtn.disabled = true;
+        doneBtn.textContent = 'Saving\u2026';
+
+        // Read the (possibly edited) names BEFORE removing the modal.
+        const nameInputs = Array.from(modal.querySelectorAll('.wdoc-name-input'));
+        const nameByIdx = {};
+        nameInputs.forEach(inp => { nameByIdx[Number(inp.dataset.idx)] = inp.value.trim(); });
+
+        await stopImport();
+
+        let saved = 0;
+        for (let i = 0; i < receivedDocs.length; i++) {
+            const doc = receivedDocs[i];
             try {
-                const docNameRaw = prompt(`Name this document:\n(${doc.name || 'document'})`, (doc.name || 'document').replace(/\.[^.]+$/, ''));
-                if (docNameRaw === null) continue;
-                const docName = docNameRaw.trim() || 'Document';
+                const docName = nameByIdx[i] || (doc.name || 'Document').replace(/\.[^.]+$/, '') || 'Document';
                 const ext = (doc.name || 'document.pdf').split('.').pop().toLowerCase() || 'pdf';
                 const docId = generateId();
                 const fileId = `doc_${docId}.${ext}`;
@@ -8241,6 +8273,7 @@ async function openWirelessDocumentImportModal() {
                     addedAt: new Date().toISOString(),
                     sizeBytes: copyResult.sizeBytes || doc.sizeBytes || 0,
                 });
+                saved++;
             } catch (e) {
                 console.error('[wdoc-modal] save error:', e);
             }
@@ -8248,7 +8281,7 @@ async function openWirelessDocumentImportModal() {
 
         saveCurrentProject();
         modal.remove();
-        showNotification(`${receivedDocs.length} document${receivedDocs.length !== 1 ? 's' : ''} saved.`);
+        showNotification(`${saved} document${saved !== 1 ? 's' : ''} saved.`);
         if (window.OverShell?.renderAll) window.OverShell.renderAll();
     });
 }

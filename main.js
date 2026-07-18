@@ -658,6 +658,36 @@ async function startWifiDirectBridgeWithRetry(ssid, password, maxAttempts = 3) {
   throw lastErr || new Error('Wi-Fi Direct AP failed to start after retries');
 }
 
+// Acquires the shared, always-on Wi-Fi Direct AP for a wireless session. Reuses
+// the background pre-started AP if it is up (so both the photo and document
+// upload flows are instant), otherwise starts one with retries. Both flows call
+// this and hand the AP back via parkSharedAp() on stop, so a single AP stays up
+// across uploads and only the per-session upload URL/QR is regenerated.
+async function acquireSharedAp() {
+  if (wifiDirectPrestartPromise) { try { await wifiDirectPrestartPromise; } catch { /* ignore */ } }
+  if (wifiDirectPrestart && wifiDirectPrestart.proc && wifiDirectPrestart.proc.exitCode !== null) {
+    wifiDirectPrestart = null; // parked AP died — start a fresh one
+  }
+  if (wifiDirectPrestart) {
+    const info = wifiDirectPrestart;
+    wifiDirectPrestart = null;
+    return info;
+  }
+  await killOrphanedBridges();
+  const { ssid, password } = getStableWifiCredentials();
+  const { result, proc } = await startWifiDirectBridgeWithRetry(ssid, password, 3);
+  if (!result || !result.success) throw new Error((result && result.error) || 'Failed to start Wi-Fi Direct AP');
+  return { proc, ssid: result.ssid, password: result.password, gatewayIp: result.gatewayIp };
+}
+
+// Parks the AP back into the shared prestart slot (kept alive) so the next
+// upload — photo or document — reuses it instead of restarting the adapter.
+function parkSharedAp(info) {
+  if (info && info.proc && info.proc.exitCode === null) {
+    wifiDirectPrestart = { proc: info.proc, ssid: info.ssid, password: info.password, gatewayIp: info.gatewayIp };
+  }
+}
+
 // Watchdog: if the active session's AP process dies unexpectedly (e.g. the
 // inspector toggles Wi-Fi off mid-session, or the publisher aborts), transparently
 // restart it with the SAME stable credentials so the QR the inspector already
@@ -2376,41 +2406,13 @@ ipcMain.handle('start-wireless-import', async (event) => {
       wirelessImportBridgeProc = null;
     }
 
-    // If the pre-start is still in flight, wait for it rather than spawning a
-    // second conflicting bridge process (two publishers fight over the adapter).
-    if (wifiDirectPrestartPromise) {
-      await wifiDirectPrestartPromise;
-    }
-
-    // Discard a parked prestart whose process has already exited — the publisher
-    // stopped internally and the AP is no longer broadcasting.
-    if (wifiDirectPrestart && wifiDirectPrestart.proc.exitCode !== null) {
-      console.log('[wifi-direct-prestart] process exited (publisher stopped), will restart');
-      wifiDirectPrestart = null;
-    }
-
-    // Use the pre-started bridge if it's already up, otherwise start one now.
-    let bridgeProc, bridgeSsid, bridgePassword, bridgeGatewayIp;
-    if (wifiDirectPrestart) {
-      ({ proc: bridgeProc, ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp } = wifiDirectPrestart);
-      wifiDirectPrestart = null;
-    } else {
-      // Kill any orphaned bridge processes left over from a previous app restart.
-      await killOrphanedBridges();
-
-      // Stable, persisted per-inspector credentials (network name + password
-      // never change between sessions) and automatic retries so a flaky Wi-Fi
-      // Direct start-up recovers on its own.
-      const { ssid: stableSsid, password: stablePass } = getStableWifiCredentials();
-      const { result, proc } = await startWifiDirectBridgeWithRetry(stableSsid, stablePass, 3);
-      if (!result.success) {
-        return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
-      }
-      bridgeProc = proc;
-      bridgeSsid = result.ssid;
-      bridgePassword = result.password;
-      bridgeGatewayIp = result.gatewayIp;
-    }
+    // Reuse the shared always-on AP (started when the app launched) if it's up,
+    // otherwise start it with retries. Both upload flows share one AP.
+    const ap = await acquireSharedAp();
+    const bridgeProc = ap.proc;
+    const bridgeSsid = ap.ssid;
+    const bridgePassword = ap.password;
+    const bridgeGatewayIp = ap.gatewayIp;
     wirelessImportBridgeProc = bridgeProc;
     wirelessImportBridgeInfo = { ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp };
     lastWirelessGatewayIp = bridgeGatewayIp;
@@ -3630,6 +3632,7 @@ function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
 
 let wirelessDocServer = null;
 let wirelessDocBridgeProc = null;
+let wirelessDocBridgeInfo = null;
 let wirelessDocSender = null;
 let wirelessDocTempDir = null;
 
@@ -3662,18 +3665,16 @@ ipcMain.handle('check-wireless-client-connected', async () => {
 ipcMain.handle('start-wireless-document-import', async (event) => {
   try {
     if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
-    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
 
-    await killOrphanedBridges();
-
-    // Stable, persisted per-inspector credentials + automatic start-up retries.
-    const { ssid: stableSsid, password: stablePass } = getStableWifiCredentials();
-    const { result, proc } = await startWifiDirectBridgeWithRetry(stableSsid, stablePass, 3);
-    if (!result.success) return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
-    wirelessDocBridgeProc = proc;
+    // Reuse the shared always-on AP (same one the photo flow uses); only the
+    // per-session upload URL/QR is regenerated below.
+    const ap = await acquireSharedAp();
+    wirelessDocBridgeProc = ap.proc;
+    wirelessDocBridgeInfo = { ssid: ap.ssid, password: ap.password, gatewayIp: ap.gatewayIp };
     wirelessDocSessionActive = true;
     wirelessBridgeRestarts = 0;
     attachBridgeWatchdog('doc');
+    const result = { success: true, ssid: ap.ssid, password: ap.password, gatewayIp: ap.gatewayIp };
 
     const tempDir = toWindowsPath(
       path.join(app.getPath('temp'), 'oversight-wireless-docs', Date.now().toString())
@@ -3705,7 +3706,11 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
     return { success: true, ssid: result.ssid, password: result.password, uploadUrl, wifiQr, urlQr };
   } catch (err) {
     console.error('[start-wireless-document-import] error:', err);
-    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
+    // Keep the shared AP alive for the next attempt instead of tearing it down.
+    wirelessDocSessionActive = false;
+    parkSharedAp(wirelessDocBridgeInfo && wirelessDocBridgeProc ? { proc: wirelessDocBridgeProc, ...wirelessDocBridgeInfo } : null);
+    wirelessDocBridgeProc = null;
+    wirelessDocBridgeInfo = null;
     return { success: false, error: err.message };
   }
 });
@@ -3714,7 +3719,10 @@ ipcMain.handle('stop-wireless-document-import', async () => {
   try {
     wirelessDocSessionActive = false; // stop the watchdog from restarting the AP
     if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
-    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
+    // Park the AP back into the shared slot (kept alive) so the next upload reuses it.
+    parkSharedAp(wirelessDocBridgeInfo && wirelessDocBridgeProc ? { proc: wirelessDocBridgeProc, ...wirelessDocBridgeInfo } : null);
+    wirelessDocBridgeProc = null;
+    wirelessDocBridgeInfo = null;
     wirelessDocSender = null;
     return { success: true };
   } catch (err) {
