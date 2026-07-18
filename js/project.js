@@ -8011,9 +8011,9 @@ async function openAddDocumentModal() {
     if (!result?.success || result.canceled) return;
     if (!result.data) { showNotification('Could not read file.', true); return; }
 
-    // Ask for a name
+    // Ask for a name (styled modal; window.prompt is unsupported in Electron)
     const defaultName = (result.fileName || '').replace(/\.[^.]+$/, '') || 'Document';
-    const docName = prompt('Name this document:', defaultName);
+    const docName = await window.showPromptModal({ title: 'Name Document', label: 'Document name', defaultValue: defaultName, okText: 'Add' });
     if (docName === null) return;
     const trimmedName = (docName || '').trim() || defaultName;
 

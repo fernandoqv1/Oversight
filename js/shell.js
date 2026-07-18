@@ -1779,8 +1779,8 @@
       <div class="modal-content" style="max-width:640px;">
         <h3>Import workers</h3>
         <p class="text-sm text-gray-600" style="margin-top:0;">Add workers to this roster from another saved project or from an exported project Excel file. Duplicate names with the same certification type are skipped.</p>
-        <div class="worker-import-sources" style="display:flex;gap:8px;margin:14px 0;">
-          <button type="button" class="btn btn-secondary worker-import-src-btn active" data-src="local">From saved project</button>
+        <div class="worker-import-sources" style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-primary worker-import-src-btn" data-src="local">From saved project</button>
           <button type="button" class="btn btn-secondary worker-import-src-btn" data-src="file">From Excel export</button>
         </div>
         <div data-src-panel="local">
@@ -1839,7 +1839,11 @@
     }
 
     modal.querySelectorAll('.worker-import-src-btn').forEach(btn => btn.addEventListener('click', () => {
-      modal.querySelectorAll('.worker-import-src-btn').forEach(b => b.classList.toggle('active', b === btn));
+      modal.querySelectorAll('.worker-import-src-btn').forEach(b => {
+        const on = b === btn;
+        b.classList.toggle('btn-primary', on);
+        b.classList.toggle('btn-secondary', !on);
+      });
       const src = btn.dataset.src;
       modal.querySelector('[data-src-panel="local"]').style.display = src === 'local' ? '' : 'none';
       modal.querySelector('[data-src-panel="file"]').style.display = src === 'file' ? '' : 'none';
@@ -2062,37 +2066,41 @@
           if (!result?.success || !result.data) { showShellNote('Could not read document.'); return; }
           const blob = new Blob([result.data], { type: doc.mimeType || 'application/octet-stream' });
           const url = URL.createObjectURL(blob);
+          const isImage = !!(doc.mimeType && doc.mimeType.startsWith('image/'));
           const dlg = document.createElement('div');
           dlg.className = 'modal active';
           dlg.style.cssText = 'z-index:2000;';
           dlg.innerHTML = `
-            <div class="modal-content" style="max-width:900px;width:95vw;height:90vh;display:flex;flex-direction:column;">
-              <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;border-bottom:1px solid #e5e7eb;margin-bottom:10px;">
-                <h3 style="margin:0;font-size:1rem;">${esc(doc.name || 'Document')}</h3>
-                <button class="btn btn-secondary btn-sm" id="doc-preview-close">Close</button>
-              </div>
-              <div style="flex:1;overflow:auto;">
-                ${doc.mimeType && doc.mimeType.startsWith('image/')
-                  ? `<img src="${url}" style="max-width:100%;height:auto;display:block;margin:0 auto;">`
-                  : `<embed src="${url}" type="${doc.mimeType || 'application/pdf'}" style="width:100%;height:100%;min-height:600px;">`
+            <div class="modal-content" style="max-width:960px;width:95vw;height:90vh;display:flex;flex-direction:column;">
+              <h3>${esc(doc.name || 'Document')}</h3>
+              <div class="doc-preview-body" style="flex:1;min-height:0;">
+                ${isImage
+                  ? `<img src="${url}" alt="${esc(doc.name || 'Document')}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;margin:0 auto;border-radius:8px;">`
+                  : `<iframe src="${url}" title="${esc(doc.name || 'Document')}" style="width:100%;height:100%;border:1px solid var(--border,#e5e7eb);border-radius:8px;background:#fff;"></iframe>`
                 }
+              </div>
+              <div class="modal-footer">
+                <button class="btn btn-secondary modal-cancel-btn" id="doc-preview-close">Close</button>
               </div>
             </div>
           `;
           document.body.appendChild(dlg);
-          dlg.querySelector('#doc-preview-close').addEventListener('click', () => { URL.revokeObjectURL(url); dlg.remove(); });
-          dlg.addEventListener('click', e => { if (e.target === dlg) { URL.revokeObjectURL(url); dlg.remove(); } });
+          const closePreview = () => { URL.revokeObjectURL(url); dlg.remove(); };
+          dlg.querySelector('#doc-preview-close').addEventListener('click', closePreview);
+          dlg.addEventListener('click', e => { if (e.target === dlg) closePreview(); });
         } catch (e) { showShellNote('Failed to preview document: ' + (e.message || '')); }
       });
     });
 
     // Rename
     wrap.querySelectorAll('.doc-rename-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const idx = parseInt(btn.dataset.idx, 10);
         const doc = (p.documents || [])[idx];
         if (!doc) return;
-        const newName = prompt('Enter new document name:', doc.name || '');
+        const newName = typeof window.showPromptModal === 'function'
+          ? await window.showPromptModal({ title: 'Rename Document', label: 'Document name', defaultValue: doc.name || '', okText: 'Rename' })
+          : null;
         if (newName === null) return;
         const trimmed = newName.trim();
         if (!trimmed) return;
