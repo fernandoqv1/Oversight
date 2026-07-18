@@ -43,8 +43,26 @@
     return n ? `${n} Containment` : 'Containment';
   }
   function displayUnit(u, fallback) {
-    if (u === 'SF') return 'ft\u00b2';
-    return u || fallback || '';
+    if (typeof window.displayUnit === 'function') {
+      // Prefer the shared global converter used by document generation.
+      try {
+        const shared = window.displayUnit;
+        // Avoid accidental self-recursion if this local was assigned globally.
+        if (shared !== displayUnit) return shared(u, fallback);
+      } catch (_) { /* fall through */ }
+    }
+    const raw = u == null ? '' : String(u).trim();
+    if (!raw) return fallback || '';
+    const code = raw.toUpperCase();
+    if (code === 'SF' || raw === 'ft^2' || raw === 'ft\u00b2' || raw.toLowerCase() === 'sq ft' || raw.toLowerCase() === 'square feet') {
+      return 'ft\u00b2';
+    }
+    if (code === 'CF' || raw === 'ft^3' || raw === 'ft\u00b3' || raw.toLowerCase() === 'cu ft' || raw.toLowerCase() === 'cubic feet') {
+      return 'ft\u00b3';
+    }
+    if (code === 'LF') return 'LF';
+    if (code === 'EA') return 'EA';
+    return raw || fallback || '';
   }
   function formatQty(n) {
     const v = parseFloat(n);
@@ -620,7 +638,7 @@
       p.projectNumber, p.siteName, p.name, p.siteAddress, p.clientName,
       p.clientContactName, p.contractor, p.foremanName
     ];
-    (p.materials || []).forEach(m => parts.push(m.name, m.unit));
+    (p.materials || []).forEach(m => parts.push(m.name, displayUnit(m.unit), m.unit));
     (p.containments || []).forEach(c => {
       parts.push(c.name, c.containmentNumber, c.stage, c.buildingName);
       (c.materials || []).forEach(m => parts.push(m.name, m.materialName, m.location));
