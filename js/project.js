@@ -20,12 +20,20 @@ function _shellRefresh() {
 // Convert stored unit codes to user-facing display strings.
 // Storage values stay as legacy codes for backwards compatibility.
 function displayUnit(u, fallback) {
-    if (u === 'SF') return 'ft\u00b2';
-    if (u === 'LF') return 'LF';
-    if (u === 'EA') return 'EA';
-    if (u === 'CF') return 'ft\u00b3';
-    return u || fallback || '';
+    const raw = u == null ? '' : String(u).trim();
+    if (!raw) return fallback || '';
+    const code = raw.toUpperCase();
+    if (code === 'SF' || raw === 'ft^2' || raw === 'ft\u00b2' || raw.toLowerCase() === 'sq ft' || raw.toLowerCase() === 'square feet') {
+        return 'ft\u00b2';
+    }
+    if (code === 'CF' || raw === 'ft^3' || raw === 'ft\u00b3' || raw.toLowerCase() === 'cu ft' || raw.toLowerCase() === 'cubic feet') {
+        return 'ft\u00b3';
+    }
+    if (code === 'LF') return 'LF';
+    if (code === 'EA') return 'EA';
+    return raw || fallback || '';
 }
+window.displayUnit = displayUnit;
 
 // Stage name constants matching example_oversight
 const STAGE_CONTAINMENT_PREPARATION = 'Containment Preparation';

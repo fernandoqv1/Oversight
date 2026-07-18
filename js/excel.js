@@ -23,14 +23,32 @@ function protectSheet(ws) {
 
 /** Convert stored unit code to display form for Excel export ('SF' -> 'ft\u00b2'). */
 function exportUnit(u) {
-  return u === 'SF' ? 'ft\u00b2' : (u || '');
+  if (typeof window.displayUnit === 'function') {
+    return window.displayUnit(u, '') || '';
+  }
+  const raw = u == null ? '' : String(u).trim();
+  if (!raw) return '';
+  const code = raw.toUpperCase();
+  if (code === 'SF' || raw === 'ft^2' || raw === 'ft\u00b2' || raw.toLowerCase() === 'sq ft' || raw.toLowerCase() === 'square feet') {
+    return 'ft\u00b2';
+  }
+  if (code === 'CF' || raw === 'ft^3' || raw === 'ft\u00b3' || raw.toLowerCase() === 'cu ft' || raw.toLowerCase() === 'cubic feet') {
+    return 'ft\u00b3';
+  }
+  if (code === 'LF') return 'LF';
+  if (code === 'EA') return 'EA';
+  return raw;
 }
 
 /** Normalize a unit cell from Excel back to internal storage code ('ft\u00b2' / 'ft^2' -> 'SF'). */
 function importUnit(u) {
-  if (u == null) return '';
+  if (u == null || u === '') return '';
   const s = String(u).trim();
-  if (s === 'ft\u00b2' || s === 'ft^2' || s.toLowerCase() === 'sq ft' || s.toLowerCase() === 'square feet') return 'SF';
+  const lower = s.toLowerCase();
+  if (s === 'ft\u00b2' || s === 'ft^2' || lower === 'sq ft' || lower === 'square feet' || s.toUpperCase() === 'SF') return 'SF';
+  if (s === 'ft\u00b3' || s === 'ft^3' || lower === 'cu ft' || lower === 'cubic feet' || s.toUpperCase() === 'CF') return 'CF';
+  if (s.toUpperCase() === 'LF') return 'LF';
+  if (s.toUpperCase() === 'EA') return 'EA';
   return s;
 }
 
