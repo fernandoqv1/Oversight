@@ -678,6 +678,38 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
 .modal-material-row select { width:auto !important; flex-shrink:0; }
 .modal-check-group { display:flex; flex-wrap:wrap; gap:8px 12px; }
 .modal-check-group .modal-check-row { flex:1 1 200px; min-width:0; }
+
+/* Material add/edit form layout */
+.material-form .material-qty-unit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(88px, 0.9fr);
+  gap: 12px;
+  align-items: end;
+}
+.material-form .material-qty-field,
+.material-form .material-unit-field { min-width: 0; }
+.material-form .material-hazard-field { margin-top: 2px; }
+.material-form .material-hazard-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.material-form .material-hazard-option {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.material-form .material-hazard-option:has(input:checked) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+@media (max-width: 520px) {
+  .material-form .material-qty-unit-row,
+  .material-form .material-hazard-options {
+    grid-template-columns: 1fr;
+  }
+}
 .sample-set-row .sample-set-location { margin-top:8px; margin-left:26px; width:calc(100% - 26px); max-width:100%; box-sizing:border-box; }
 .modal-inline-add-btn { display:inline-flex; align-items:center; gap:6px; margin-top:10px; padding:6px 14px; border-radius:7px; font-size:13px; font-weight:500; background:var(--surface); color:var(--accent); border:1px solid var(--accent); cursor:pointer; transition:background 120ms, color 120ms; }
 .modal-inline-add-btn:hover { background:var(--accent); color:#fff; }
