@@ -3084,7 +3084,7 @@ function detectWithJscanify(canvas){
 var loupeEl=document.getElementById('crop-loupe');
 function showLoupeAt(clientX,clientY,imgPt){
   if(!loupeEl||!cropCurrentImg) return;
-  var LSIZE=132, ZOOM=2.6;
+  var LSIZE=132, ZOOM=1.5;
   var lctx=loupeEl.getContext('2d');
   var srcSpan=LSIZE/ZOOM;
   var sx=imgPt.x-srcSpan/2, sy=imgPt.y-srcSpan/2;
@@ -3122,8 +3122,20 @@ function makeCornerDragger(canvas,corners,onDraw){
     }
     return -1;
   }
-  function start(e){dragging=hit(getPos(e));if(dragging>=0){var c=getClient(e);showLoupeAt(c.x,c.y,corners[dragging]);}}
-  function move(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();var c=getClient(e);showLoupeAt(c.x,c.y,corners[dragging]);}
+  // Coalesce redraws to one per animation frame so rapid touchmove events don't
+  // queue up expensive full-image redraws (which caused lag while dragging).
+  var rafPending=false,lastCX=0,lastCY=0;
+  function scheduleDraw(){
+    if(rafPending)return;
+    rafPending=true;
+    requestAnimationFrame(function(){
+      rafPending=false;
+      onDraw();
+      if(dragging>=0)showLoupeAt(lastCX,lastCY,corners[dragging]);
+    });
+  }
+  function start(e){dragging=hit(getPos(e));if(dragging>=0){var c=getClient(e);lastCX=c.x;lastCY=c.y;showLoupeAt(c.x,c.y,corners[dragging]);}}
+  function move(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;var c=getClient(e);lastCX=c.x;lastCY=c.y;scheduleDraw();}
   function end(){dragging=-1;hideLoupe();}
   canvas.addEventListener('mousedown',start);
   canvas.addEventListener('touchstart',function(e){e.preventDefault();start(e);},{passive:false});
