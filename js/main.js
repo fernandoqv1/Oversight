@@ -2,11 +2,23 @@
 
 let showingArchivedProjects = false;
 
-// Convert stored unit codes to user-facing display strings ('SF' -> 'ft\u00b2').
+// Convert stored unit codes to user-facing display strings ('SF' -> 'ft²').
+// Used by UI labels and every generated document (containment summary, COCs, Excel, etc.).
 function displayUnit(u, fallback) {
-    if (u === 'SF') return 'ft\u00b2';
-    return u || fallback || '';
+    const raw = u == null ? '' : String(u).trim();
+    if (!raw) return fallback || '';
+    const code = raw.toUpperCase();
+    if (code === 'SF' || raw === 'ft^2' || raw === 'ft\u00b2' || raw.toLowerCase() === 'sq ft' || raw.toLowerCase() === 'square feet') {
+        return 'ft\u00b2';
+    }
+    if (code === 'CF' || raw === 'ft^3' || raw === 'ft\u00b3' || raw.toLowerCase() === 'cu ft' || raw.toLowerCase() === 'cubic feet') {
+        return 'ft\u00b3';
+    }
+    if (code === 'LF') return 'LF';
+    if (code === 'EA') return 'EA';
+    return raw || fallback || '';
 }
+window.displayUnit = displayUnit;
 
 /**
  * Format a phone number as (XXX) XXX-XXXX
