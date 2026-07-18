@@ -1011,6 +1011,26 @@ function repairDocxPlaceholderXml(xml) {
         new RegExp(`${runCap}\\{\\/${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
         (_m, rPr1, tagName) => mergedRun(`{/${tagName.trim()}}`, rPr1)
     );
+    // {#name} / {/name} split as "{#" + "name}" (common Word grammar-check split)
+    xml = xml.replace(
+        new RegExp(`${runCap}\\{([#\\/])${runEnd}${proof}${run}([^<{}]+)\\}${runEnd}`, 'g'),
+        (_m, rPr1, prefix, tagName) => {
+            const name = String(tagName || '').trim();
+            if (!/^[\w.]+$/.test(name)) return _m;
+            return mergedRun(`{${prefix}${name}}`, rPr1);
+        }
+    );
+    // "{#" + a + b + "c}{trailing}" (e.g. logEntries split around a capital letter)
+    xml = xml.replace(
+        new RegExp(`${runCap}\\{([#\\/])${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)\\}([^<]*)${runEnd}`, 'g'),
+        (_m, rPr1, prefix, part1, part2, part3, trailing) => {
+            const name = `${part1}${part2}${part3}`.trim();
+            if (!/^[\w.]+$/.test(name)) return _m;
+            const tagRun = mergedRun(`{${prefix}${name}}`, rPr1);
+            const rest = String(trailing || '');
+            return rest ? `${tagRun}${mergedRun(rest, rPr1)}` : tagRun;
+        }
+    );
     xml = xml.replace(
         new RegExp(`${runCap}\\{${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}([^<{}]+)${runEnd}${proof}${run}\\}${runEnd}`, 'g'),
         (_m, rPr1, part1, part2) => {
@@ -4604,14 +4624,14 @@ function renderWorkerRosterView(project) {
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div>
                                     <label for="worker-ahera-exp" class="block text-xs text-gray-500 mb-1">AHERA</label>
-                                    <input type="date" id="worker-ahera-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
+                                    <input type="date" id="worker-ahera-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors">
                                 </div>
                                 <div>
                                     <label for="worker-medical-exp" class="block text-xs text-gray-500 mb-1">Medical</label>
-                                    <input type="date" id="worker-medical-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
+                                    <input type="date" id="worker-medical-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors">
                                 </div>
                                 <div>
-                                    <label for="worker-respirator-exp" class="block text-xs text-gray-500 mb-1">Respirator Fit Test</label>
+                                    <label for="worker-respirator-exp" class="block text-xs text-gray-500 mb-1">Respirator Fit Test *</label>
                                     <input type="date" id="worker-respirator-exp" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors" required>
                                 </div>
                                 <div>
@@ -4673,6 +4693,10 @@ function renderWorkerRosterView(project) {
         const respiratorSelections = Array.from(rosterForm.querySelectorAll('.respirator-type-checkbox:checked')).map(cb => cb.value);
         if (!name) {
             showNotification('Enter a worker name.', true);
+            return;
+        }
+        if (!respiratorExp) {
+            showNotification('Respirator Fit Test expiration date is required.', true);
             return;
         }
         if (!respiratorSelections.length) {
@@ -4749,14 +4773,14 @@ function openEditWorkerModal(worker) {
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
                         <label for="edit-worker-ahera-exp" class="block text-sm font-medium text-gray-700 mb-1">AHERA Training</label>
-                        <input type="date" id="edit-worker-ahera-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.aheraExpiration || ''}" required>
+                        <input type="date" id="edit-worker-ahera-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.aheraExpiration || ''}">
                     </div>
                     <div>
                         <label for="edit-worker-medical-exp" class="block text-sm font-medium text-gray-700 mb-1">Asbestos Medical</label>
-                        <input type="date" id="edit-worker-medical-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.medicalExpiration || ''}" required>
+                        <input type="date" id="edit-worker-medical-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.medicalExpiration || ''}">
                     </div>
                     <div>
-                        <label for="edit-worker-respirator-exp" class="block text-sm font-medium text-gray-700 mb-1">Respirator Fit Test</label>
+                        <label for="edit-worker-respirator-exp" class="block text-sm font-medium text-gray-700 mb-1">Respirator Fit Test *</label>
                         <input type="date" id="edit-worker-respirator-exp" class="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500" value="${worker.respiratorFitExpiration || ''}" required>
                     </div>
                     <div>
@@ -4820,6 +4844,7 @@ function openEditWorkerModal(worker) {
         const respiratorSelections = Array.from(modal.querySelectorAll('.edit-respirator-type-checkbox:checked')).map(cb => cb.value);
 
         if (!name) { showNotification('Enter a worker name.', true); return; }
+        if (!respiratorExp) { showNotification('Respirator Fit Test expiration date is required.', true); return; }
         if (!respiratorSelections.length) { showNotification('Select at least one respirator type.', true); return; }
 
         const updatedWorker = {
@@ -5951,11 +5976,15 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
     let receivedPhotos = [];
     let unsubscribeReceived = () => {};
     let stopped = false;
+    let connPollTimer = null;
+    let qr2FallbackTimer = null;
 
     const stopImport = async () => {
         if (stopped) return;
         stopped = true;
         unsubscribeReceived();
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
         try { await window.electronAPI.stopWirelessImport?.(); } catch { /* ignore */ }
     };
 
@@ -6066,8 +6095,12 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
             </div>
             <div class="text-center">
                 <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Step 2 &mdash; Open Upload Page</p>
-                <img src="${urlQr}" alt="Upload page QR code" style="width:190px;height:190px;border-radius:0.5rem;border:1px solid #e5e7eb;">
-                <p class="text-xs text-gray-400 mt-2" style="word-break:break-all;line-height:1.4;">${escapeHtml(uploadUrl)}</p>
+                <div id="wireless-url-wait" style="width:190px;height:190px;border-radius:0.5rem;border:1px dashed #cbd5e1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#94a3b8;font-size:.78rem;text-align:center;padding:12px;margin:0 auto;">
+                    <span style="font-size:1.8rem;">&#128241;</span>
+                    <span>Waiting for phone to join Wi&#8209;Fi&hellip;</span>
+                </div>
+                <img id="wireless-url-qr" src="" alt="Upload page QR code" style="display:none;width:190px;height:190px;border-radius:0.5rem;border:1px solid #e5e7eb;">
+                <p id="wireless-url-caption" class="text-xs text-gray-400 mt-2" style="display:none;word-break:break-all;line-height:1.4;">${escapeHtml(uploadUrl)}</p>
             </div>
         </div>
         <div style="border-top:1px solid #f3f4f6;padding-top:0.75rem;">
@@ -6075,6 +6108,33 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
             <div id="wireless-received-grid" class="flex flex-wrap gap-2"></div>
         </div>
     `;
+
+    // Two-stage QR: reveal the upload-page QR once the phone joins the Wi-Fi
+    // (detected via ARP), or after a short fallback timeout so it always appears.
+    let wqr2Revealed = false;
+    const revealUploadQr = (connected) => {
+        if (wqr2Revealed || stopped) return;
+        wqr2Revealed = true;
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
+        const waitEl = modal.querySelector('#wireless-url-wait');
+        const qrEl = modal.querySelector('#wireless-url-qr');
+        const capEl = modal.querySelector('#wireless-url-caption');
+        if (waitEl) waitEl.style.display = 'none';
+        if (qrEl) { qrEl.src = urlQr; qrEl.style.display = ''; }
+        if (capEl) capEl.style.display = '';
+    };
+    const pollConnection = async () => {
+        try {
+            const r = await window.electronAPI.checkWirelessClientConnected?.();
+            if (r && r.connected) revealUploadQr(true);
+        } catch (e) { /* ignore; fallback timer will reveal */ }
+    };
+    if (typeof window.electronAPI.checkWirelessClientConnected === 'function') {
+        connPollTimer = setInterval(pollConnection, 2000);
+        pollConnection();
+    }
+    qr2FallbackTimer = setTimeout(() => revealUploadQr(false), 12000);
 
     modal.querySelector('#wireless-copy-pw')?.addEventListener('click', () => {
         navigator.clipboard?.writeText(password).then(() => {
@@ -7971,9 +8031,9 @@ async function openAddDocumentModal() {
     if (!result?.success || result.canceled) return;
     if (!result.data) { showNotification('Could not read file.', true); return; }
 
-    // Ask for a name
+    // Ask for a name (styled modal; window.prompt is unsupported in Electron)
     const defaultName = (result.fileName || '').replace(/\.[^.]+$/, '') || 'Document';
-    const docName = prompt('Name this document:', defaultName);
+    const docName = await window.showPromptModal({ title: 'Name Document', label: 'Document name', defaultValue: defaultName, okText: 'Add' });
     if (docName === null) return;
     const trimmedName = (docName || '').trim() || defaultName;
 
@@ -8053,8 +8113,12 @@ async function openWirelessDocumentImportModal() {
                     </div>
                     <div style="text-align:center;">
                         <div class="text-xs text-gray-500 mb-1">2&nbsp;&nbsp;Open Scanner</div>
-                        <img id="wdoc-url-qr" src="" alt="URL QR" style="width:140px;height:140px;border:1px solid #e5e7eb;border-radius:6px;">
-                        <div class="text-xs text-gray-400 mt-1">Scan on phone</div>
+                        <div id="wdoc-url-wait" style="width:140px;height:140px;border:1px dashed #cbd5e1;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:#94a3b8;font-size:.7rem;text-align:center;padding:8px;">
+                            <span style="font-size:1.4rem;">&#128241;</span>
+                            <span id="wdoc-wait-text">Waiting for phone to join Wi&#8209;Fi&hellip;</span>
+                        </div>
+                        <img id="wdoc-url-qr" src="" alt="URL QR" style="display:none;width:140px;height:140px;border:1px solid #e5e7eb;border-radius:6px;">
+                        <div id="wdoc-url-caption" class="text-xs text-gray-400 mt-1" style="display:none;">Scan on phone</div>
                     </div>
                 </div>
                 <div class="mt-3 p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
@@ -8083,9 +8147,13 @@ async function openWirelessDocumentImportModal() {
 
     const receivedDocs = [];
     let stopListener = null;
+    let connPollTimer = null;
+    let qr2FallbackTimer = null;
 
     const stopImport = async () => {
         if (stopListener) { stopListener(); stopListener = null; }
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
         await window.electronAPI.stopWirelessDocumentImport().catch(() => {});
     };
 
@@ -8117,39 +8185,100 @@ async function openWirelessDocumentImportModal() {
 
     statusEl.style.display = 'none';
     wifiQrImg.src = startResult.wifiQr;
-    urlQrImg.src = startResult.urlQr;
     ssidEl.textContent = `${startResult.ssid} · ${startResult.password}`;
     qrSection.style.display = '';
     doneBtn.style.display = '';
 
-    // Listen for received documents
+    // Two-stage QR: show the Wi-Fi QR first, then reveal the upload-page QR once
+    // the phone has joined the network (detected via ARP), or after a short
+    // fallback timeout so it always appears even if detection is unavailable.
+    let qr2Revealed = false;
+    const revealUploadQr = (connected) => {
+        if (qr2Revealed) return;
+        qr2Revealed = true;
+        if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
+        if (qr2FallbackTimer) { clearTimeout(qr2FallbackTimer); qr2FallbackTimer = null; }
+        const waitEl = modal.querySelector('#wdoc-url-wait');
+        const captionEl = modal.querySelector('#wdoc-url-caption');
+        if (waitEl) waitEl.style.display = 'none';
+        urlQrImg.src = startResult.urlQr;
+        urlQrImg.style.display = '';
+        if (captionEl) captionEl.style.display = '';
+        if (connected) statusEl.textContent = '';
+    };
+
+    const pollConnection = async () => {
+        try {
+            const r = await window.electronAPI.checkWirelessClientConnected?.();
+            if (r && r.connected) revealUploadQr(true);
+        } catch (e) { /* ignore, fallback timer will reveal */ }
+    };
+    if (typeof window.electronAPI.checkWirelessClientConnected === 'function') {
+        connPollTimer = setInterval(pollConnection, 2000);
+        pollConnection();
+    }
+    qr2FallbackTimer = setTimeout(() => revealUploadQr(false), 12000);
+
+    // Listen for received documents. Each gets an editable name field so the
+    // inspector can name/rename it before saving (prompt() is unsupported in
+    // Electron, which previously caused every document to be skipped).
     stopListener = window.electronAPI.onWirelessDocumentReceived(async (payload) => {
+        const idx = receivedDocs.length;
         receivedDocs.push(payload);
+        if (receivedDocs.length === 1) {
+            const hint = document.createElement('p');
+            hint.className = 'text-xs text-gray-500';
+            hint.style.cssText = 'margin:0 0 6px;';
+            hint.textContent = 'Name each document, then tap Done to save.';
+            receivedList.appendChild(hint);
+        }
+        const defaultName = (payload.name || 'document').replace(/\.[^.]+$/, '');
         const item = document.createElement('div');
         item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;font-size:.82rem;';
-        item.innerHTML = `<span style="color:#16a34a;">&#10003;</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(payload.name || 'document')}</span><span style="color:#9ca3af;">${payload.sizeBytes ? (payload.sizeBytes / 1024).toFixed(0) + ' KB' : ''}</span>`;
+        const check = document.createElement('span');
+        check.style.color = '#16a34a';
+        check.innerHTML = '&#10003;';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'wdoc-name-input';
+        input.dataset.idx = String(idx);
+        input.value = defaultName;
+        input.placeholder = 'Document name';
+        input.style.cssText = 'flex:1;min-width:0;padding:6px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:.82rem;';
+        const size = document.createElement('span');
+        size.style.cssText = 'color:#9ca3af;white-space:nowrap;';
+        size.textContent = payload.sizeBytes ? (payload.sizeBytes / 1024).toFixed(0) + ' KB' : '';
+        item.appendChild(check);
+        item.appendChild(input);
+        item.appendChild(size);
         receivedList.appendChild(item);
+        doneBtn.textContent = `Done (${receivedDocs.length})`;
     });
 
     doneBtn.addEventListener('click', async () => {
-        doneBtn.disabled = true;
-        cancelBtn.disabled = true;
-        doneBtn.textContent = 'Saving\u2026';
-
-        await stopImport();
-
         if (receivedDocs.length === 0) {
+            await stopImport();
             modal.remove();
             showNotification('No documents were received.', true);
             return;
         }
 
-        // Save each received document to the project
-        for (const doc of receivedDocs) {
+        doneBtn.disabled = true;
+        cancelBtn.disabled = true;
+        doneBtn.textContent = 'Saving\u2026';
+
+        // Read the (possibly edited) names BEFORE removing the modal.
+        const nameInputs = Array.from(modal.querySelectorAll('.wdoc-name-input'));
+        const nameByIdx = {};
+        nameInputs.forEach(inp => { nameByIdx[Number(inp.dataset.idx)] = inp.value.trim(); });
+
+        await stopImport();
+
+        let saved = 0;
+        for (let i = 0; i < receivedDocs.length; i++) {
+            const doc = receivedDocs[i];
             try {
-                const docNameRaw = prompt(`Name this document:\n(${doc.name || 'document'})`, (doc.name || 'document').replace(/\.[^.]+$/, ''));
-                if (docNameRaw === null) continue;
-                const docName = docNameRaw.trim() || 'Document';
+                const docName = nameByIdx[i] || (doc.name || 'Document').replace(/\.[^.]+$/, '') || 'Document';
                 const ext = (doc.name || 'document.pdf').split('.').pop().toLowerCase() || 'pdf';
                 const docId = generateId();
                 const fileId = `doc_${docId}.${ext}`;
@@ -8164,6 +8293,7 @@ async function openWirelessDocumentImportModal() {
                     addedAt: new Date().toISOString(),
                     sizeBytes: copyResult.sizeBytes || doc.sizeBytes || 0,
                 });
+                saved++;
             } catch (e) {
                 console.error('[wdoc-modal] save error:', e);
             }
@@ -8171,7 +8301,7 @@ async function openWirelessDocumentImportModal() {
 
         saveCurrentProject();
         modal.remove();
-        showNotification(`${receivedDocs.length} document${receivedDocs.length !== 1 ? 's' : ''} saved.`);
+        showNotification(`${saved} document${saved !== 1 ? 's' : ''} saved.`);
         if (window.OverShell?.renderAll) window.OverShell.renderAll();
     });
 }

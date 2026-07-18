@@ -20,6 +20,16 @@ let wirelessImportPhotoCount = 0;
 // Pre-started Wi-Fi Direct bridge so the QR modal appears immediately
 let wifiDirectPrestart = null;        // { proc, ssid, password, gatewayIp } — set when ready
 let wifiDirectPrestartPromise = null; // in-flight Promise while startup is running
+// Gateway IP of the currently active Wi-Fi Direct AP, used to detect when a
+// phone has joined the network (so the modal can reveal the upload-page QR).
+let lastWirelessGatewayIp = null;
+// Whether a wireless session (modal open) is currently active, per flow. Used by
+// the AP watchdog to auto-restart the bridge if it drops mid-session (e.g. the
+// inspector toggles Wi-Fi off) without fighting an intentional stop.
+let wirelessImportSessionActive = false;
+let wirelessDocSessionActive = false;
+let wirelessBridgeRestarts = 0;
+const WIFI_MAX_MIDSESSION_RESTARTS = 3;
 
 function getAutoUpdater() {
   if (!app.isPackaged) return null;
@@ -117,6 +127,7 @@ function createWindow() {
       sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
+      plugins: true, // enable Chromium's built-in PDF viewer for in-app document preview
       preload: path.join(__dirname, 'preload.js')
     },
     icon: path.join(__dirname, 'assets', 'icon.png')
@@ -559,6 +570,163 @@ function startWifiDirectBridge(ssid, password) {
   });
 }
 
+// Returns the inspector's stable Wi-Fi Direct credentials. Generated once and
+// persisted to the user-data folder so the network name and password never
+// change between sessions (the inspector keeps the same QR code). Each machine
+// gets its own unique credentials. Falls back to a deterministic
+// hostname-derived value if the file cannot be read/written, so the values are
+// still stable on that machine.
+let cachedWifiCredentials = null;
+function getStableWifiCredentials() {
+  if (cachedWifiCredentials) return cachedWifiCredentials;
+  const fsSync = require('fs');
+  const alnum = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const rand = (n) => {
+    const b = require('crypto').randomBytes(n);
+    let s = '';
+    for (let i = 0; i < n; i++) s += alnum[b[i] % alnum.length];
+    return s;
+  };
+  let credPath = null;
+  try { credPath = path.join(app.getPath('userData'), 'wifi-direct-credentials.json'); } catch { /* app not ready */ }
+
+  if (credPath) {
+    try {
+      const parsed = JSON.parse(fsSync.readFileSync(credPath, 'utf8'));
+      if (parsed && parsed.ssid && parsed.password) {
+        cachedWifiCredentials = { ssid: String(parsed.ssid), password: String(parsed.password) };
+        return cachedWifiCredentials;
+      }
+    } catch { /* not created yet — fall through and generate */ }
+  }
+
+  const creds = { ssid: 'Oversight-' + rand(6), password: rand(12) };
+  let persisted = false;
+  if (credPath) {
+    try {
+      fsSync.mkdirSync(path.dirname(credPath), { recursive: true });
+      fsSync.writeFileSync(credPath, JSON.stringify(creds, null, 2));
+      persisted = true;
+    } catch { /* fall back below */ }
+  }
+  if (!persisted) {
+    try {
+      const machineKey = require('crypto').createHash('sha256').update(require('os').hostname()).digest('hex');
+      creds.ssid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
+      creds.password = machineKey.slice(6, 18);
+    } catch { /* keep the random values */ }
+  }
+  cachedWifiCredentials = creds;
+  return creds;
+}
+
+// Terminates any lingering wifi-direct-bridge PowerShell processes (e.g. from a
+// previous app run or a failed attempt) so a fresh publisher can own the adapter.
+function killOrphanedBridges() {
+  return new Promise((resolve) => {
+    require('child_process').exec(
+      'powershell -NoProfile -NonInteractive -Command "' +
+      'Get-WmiObject Win32_Process | ' +
+      'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
+      'ForEach-Object { $_.Terminate() }"',
+      { windowsHide: true, timeout: 8000 },
+      () => resolve()
+    );
+  });
+}
+
+// Starts the Wi-Fi Direct bridge with automatic retries. Wi-Fi Direct start-up
+// is flaky on Windows (adapter busy, Mobile Hotspot contention, transient WinRT
+// errors), so we retry a few times, cleaning up orphaned publishers between
+// attempts, before giving up. Resolves with { result, proc } or throws.
+async function startWifiDirectBridgeWithRetry(ssid, password, maxAttempts = 3) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { result, proc } = await startWifiDirectBridge(ssid, password);
+      if (result && result.success) return { result, proc };
+      lastErr = new Error((result && result.error) || 'Wi-Fi Direct AP failed to start');
+      try { proc.kill(); } catch { /* ignore */ }
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt < maxAttempts) {
+      console.warn(`[wifi-direct] start attempt ${attempt}/${maxAttempts} failed: ${lastErr && lastErr.message}; retrying…`);
+      await killOrphanedBridges();
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+  }
+  throw lastErr || new Error('Wi-Fi Direct AP failed to start after retries');
+}
+
+// Acquires the shared, always-on Wi-Fi Direct AP for a wireless session. Reuses
+// the background pre-started AP if it is up (so both the photo and document
+// upload flows are instant), otherwise starts one with retries. Both flows call
+// this and hand the AP back via parkSharedAp() on stop, so a single AP stays up
+// across uploads and only the per-session upload URL/QR is regenerated.
+async function acquireSharedAp() {
+  if (wifiDirectPrestartPromise) { try { await wifiDirectPrestartPromise; } catch { /* ignore */ } }
+  if (wifiDirectPrestart && wifiDirectPrestart.proc && wifiDirectPrestart.proc.exitCode !== null) {
+    wifiDirectPrestart = null; // parked AP died — start a fresh one
+  }
+  if (wifiDirectPrestart) {
+    const info = wifiDirectPrestart;
+    wifiDirectPrestart = null;
+    return info;
+  }
+  await killOrphanedBridges();
+  const { ssid, password } = getStableWifiCredentials();
+  const { result, proc } = await startWifiDirectBridgeWithRetry(ssid, password, 3);
+  if (!result || !result.success) throw new Error((result && result.error) || 'Failed to start Wi-Fi Direct AP');
+  return { proc, ssid: result.ssid, password: result.password, gatewayIp: result.gatewayIp };
+}
+
+// Parks the AP back into the shared prestart slot (kept alive) so the next
+// upload — photo or document — reuses it instead of restarting the adapter.
+function parkSharedAp(info) {
+  if (info && info.proc && info.proc.exitCode === null) {
+    wifiDirectPrestart = { proc: info.proc, ssid: info.ssid, password: info.password, gatewayIp: info.gatewayIp };
+  }
+}
+
+// Watchdog: if the active session's AP process dies unexpectedly (e.g. the
+// inspector toggles Wi-Fi off mid-session, or the publisher aborts), transparently
+// restart it with the SAME stable credentials so the QR the inspector already
+// scanned stays valid. Guarded so it never fights an intentional stop and never
+// loops forever.
+function attachBridgeWatchdog(tag) {
+  const getProc = () => (tag === 'doc' ? wirelessDocBridgeProc : wirelessImportBridgeProc);
+  const isActive = () => (tag === 'doc' ? wirelessDocSessionActive : wirelessImportSessionActive);
+  const proc = getProc();
+  if (!proc || proc.__oversightWatchdog) return;
+  proc.__oversightWatchdog = true;
+  proc.once('exit', async () => {
+    if (!isActive() || getProc() !== proc) return; // intentional stop / handed to prestart
+    if (wirelessBridgeRestarts >= WIFI_MAX_MIDSESSION_RESTARTS) {
+      console.warn('[wifi-direct] AP dropped mid-session; restart limit reached.');
+      return;
+    }
+    wirelessBridgeRestarts += 1;
+    console.warn(`[wifi-direct] AP dropped mid-session; auto-restart ${wirelessBridgeRestarts}/${WIFI_MAX_MIDSESSION_RESTARTS}…`);
+    try {
+      const { ssid, password } = getStableWifiCredentials();
+      await killOrphanedBridges();
+      const { result, proc: newProc } = await startWifiDirectBridgeWithRetry(ssid, password, 2);
+      if (!result || !result.success) return;
+      lastWirelessGatewayIp = result.gatewayIp;
+      if (tag === 'doc') {
+        wirelessDocBridgeProc = newProc;
+      } else {
+        wirelessImportBridgeProc = newProc;
+        wirelessImportBridgeInfo = { ssid: result.ssid, password: result.password, gatewayIp: result.gatewayIp };
+      }
+      attachBridgeWatchdog(tag);
+    } catch (e) {
+      console.warn('[wifi-direct] mid-session AP restart failed:', e.message);
+    }
+  });
+}
+
 // Pre-starts the Wi-Fi Direct AP in the background so the first button press
 // shows QR codes immediately instead of waiting 5-15 s for the AP to come up.
 // Stores an in-flight Promise so a concurrent start-wireless-import call can
@@ -567,11 +735,8 @@ function preStartWifiDirect(attempt = 0) {
   if (wifiDirectPrestart || wifiDirectPrestartPromise) return;
   wifiDirectPrestartPromise = (async () => {
     try {
-      const { createHash } = require('crypto');
-      const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
-      const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
-      const stablePass = machineKey.slice(6, 18);
-      const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
+      const { ssid: stableSsid, password: stablePass } = getStableWifiCredentials();
+      const { result, proc } = await startWifiDirectBridgeWithRetry(stableSsid, stablePass, 2);
       if (result.success) {
         wifiDirectPrestart = { proc, ssid: result.ssid, password: result.password, gatewayIp: result.gatewayIp };
         console.log('[wifi-direct-prestart] AP ready:', result.ssid);
@@ -2242,52 +2407,19 @@ ipcMain.handle('start-wireless-import', async (event) => {
       wirelessImportBridgeProc = null;
     }
 
-    // If the pre-start is still in flight, wait for it rather than spawning a
-    // second conflicting bridge process (two publishers fight over the adapter).
-    if (wifiDirectPrestartPromise) {
-      await wifiDirectPrestartPromise;
-    }
-
-    // Discard a parked prestart whose process has already exited — the publisher
-    // stopped internally and the AP is no longer broadcasting.
-    if (wifiDirectPrestart && wifiDirectPrestart.proc.exitCode !== null) {
-      console.log('[wifi-direct-prestart] process exited (publisher stopped), will restart');
-      wifiDirectPrestart = null;
-    }
-
-    // Use the pre-started bridge if it's already up, otherwise start one now.
-    let bridgeProc, bridgeSsid, bridgePassword, bridgeGatewayIp;
-    if (wifiDirectPrestart) {
-      ({ proc: bridgeProc, ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp } = wifiDirectPrestart);
-      wifiDirectPrestart = null;
-    } else {
-      // Kill any orphaned bridge processes left over from a previous app restart.
-      await new Promise((resolve) => {
-        require('child_process').exec(
-          'powershell -NoProfile -NonInteractive -Command "' +
-          'Get-WmiObject Win32_Process | ' +
-          'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
-          'ForEach-Object { $_.Terminate() }"',
-          { windowsHide: true, timeout: 8000 },
-          () => resolve()
-        );
-      });
-
-      const { createHash } = require('crypto');
-      const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
-      const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
-      const stablePass = machineKey.slice(6, 18);
-      const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
-      if (!result.success) {
-        return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
-      }
-      bridgeProc = proc;
-      bridgeSsid = result.ssid;
-      bridgePassword = result.password;
-      bridgeGatewayIp = result.gatewayIp;
-    }
+    // Reuse the shared always-on AP (started when the app launched) if it's up,
+    // otherwise start it with retries. Both upload flows share one AP.
+    const ap = await acquireSharedAp();
+    const bridgeProc = ap.proc;
+    const bridgeSsid = ap.ssid;
+    const bridgePassword = ap.password;
+    const bridgeGatewayIp = ap.gatewayIp;
     wirelessImportBridgeProc = bridgeProc;
     wirelessImportBridgeInfo = { ssid: bridgeSsid, password: bridgePassword, gatewayIp: bridgeGatewayIp };
+    lastWirelessGatewayIp = bridgeGatewayIp;
+    wirelessImportSessionActive = true;
+    wirelessBridgeRestarts = 0;
+    attachBridgeWatchdog('photo');
 
     // Create a fresh temp directory for this session
     const tempDir = toWindowsPath(
@@ -2353,6 +2485,7 @@ let wirelessImportPort = null;
 
 ipcMain.handle('stop-wireless-import', async () => {
   try {
+    wirelessImportSessionActive = false; // stop the watchdog from restarting the AP
     if (wirelessImportServer) {
       try { wirelessImportServer.close(); } catch { /* ignore */ }
       wirelessImportServer = null;
@@ -2561,26 +2694,27 @@ function getMobileDocumentUploadHtml() {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Oversight — Upload Document</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;min-height:100vh;display:flex;flex-direction:column}
-.hdr{background:#1e3a5f;color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}
+.hdr{background:#1e3a5f;color:#fff;padding:12px 16px;padding-top:max(12px,env(safe-area-inset-top));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));display:flex;align-items:center;gap:10px;flex-shrink:0}
 .hdr svg{width:28px;height:28px;flex-shrink:0}
 .hdr h1{font-size:1.05rem;font-weight:700;letter-spacing:.01em}
 .hdr .sub{font-size:.72rem;opacity:.75}
-.main{flex:1;padding:16px;display:flex;flex-direction:column;gap:16px;max-width:480px;width:100%;margin:0 auto}
+.main{flex:1;padding:16px;padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));padding-bottom:max(16px,env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:16px;max-width:480px;width:100%;margin:0 auto}
 .mode-tabs{display:flex;gap:0;border-radius:8px;overflow:hidden;border:1.5px solid #d1d5db;background:#fff}
-.mode-tab{flex:1;padding:9px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#6b7280;cursor:pointer;border:none;background:transparent;transition:.15s}
+.mode-tab{flex:1;padding:9px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#6b7280;cursor:pointer;border:none;background:transparent;transition:.15s;-webkit-tap-highlight-color:transparent}
 .mode-tab.active{background:#1e3a5f;color:#fff}
 .mode-panel{display:none}
 .mode-panel.active{display:flex;flex-direction:column;gap:12px}
 .card{background:#fff;border-radius:12px;border:1.5px solid #e5e7eb;padding:16px;display:flex;flex-direction:column;gap:12px}
 .lbl{font-size:.8rem;font-weight:600;color:#374151}
 .hint{font-size:.75rem;color:#6b7280}
-.pick-area{border:2px dashed #d1d5db;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fafafa}
-.pick-area:hover,.pick-area.drag{border-color:#1e3a5f;background:#eff6ff}
+.pick-area{border:2px dashed #d1d5db;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fafafa;-webkit-tap-highlight-color:transparent}
+.pick-area.drag,.pick-area:active{border-color:#1e3a5f;background:#eff6ff}
+@media (hover:hover){.pick-area:hover{border-color:#1e3a5f;background:#eff6ff}}
 .pick-area input{display:none}
 .pick-ico{font-size:2rem;margin-bottom:8px}
 .pick-area p{font-size:.82rem;color:#6b7280}
@@ -2596,9 +2730,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .cam-wrap canvas.overlay{position:absolute;inset:0;pointer-events:none}
 .cam-btns{display:flex;gap:10px;justify-content:center}
 .cam-handle{position:absolute;width:44px;height:44px;border-radius:50%;background:#4A90D9;border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45);transform:translate(-50%,-50%);touch-action:none;cursor:grab;-webkit-tap-highlight-color:transparent}
-.btn{padding:11px 22px;border-radius:8px;font-size:.9rem;font-weight:600;border:none;cursor:pointer;transition:.15s}
+.btn{padding:11px 22px;border-radius:8px;font-size:.9rem;font-weight:600;border:none;cursor:pointer;transition:.15s;-webkit-tap-highlight-color:transparent}
 .btn-primary{background:#1e3a5f;color:#fff}
-.btn-primary:hover:not(:disabled){background:#152c49}
+@media (hover:hover){.btn-primary:hover:not(:disabled){background:#152c49}}
 .btn-secondary{background:#f3f4f6;color:#374151;border:1.5px solid #d1d5db}
 .btn-danger{background:#ef4444;color:#fff}
 .btn:disabled{opacity:.5;cursor:not-allowed}
@@ -2611,7 +2745,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .succ-card h2{color:#166534;font-size:1rem}
 .name-inp{width:100%;border:1.5px solid #d1d5db;border-radius:8px;padding:9px 12px;font-size:.9rem;background:#fff}
 .name-inp:focus{outline:none;border-color:#1e3a5f}
+.crop-loupe{position:fixed;width:132px;height:132px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 12px rgba(0,0,0,.55);pointer-events:none;display:none;z-index:120;background:#000;overflow:hidden}
 </style>
+<!-- Self-hosted OpenCV.js + jscanify for automatic document (paper) detection. -->
+<!-- Served locally by the Oversight PC so the phone needs no internet access. -->
+<script src="/opencv.js" async></script>
+<script src="/jscanify.min.js"></script>
 </head>
 <body>
 <header class="hdr">
@@ -2696,8 +2835,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 
 <div class="crop-overlay" id="crop-overlay" style="display:none">
-  <div style="color:#fff;font-size:.9rem;text-align:center">Drag the corners to align with the document edges</div>
+  <div id="crop-hint" style="color:#fff;font-size:.9rem;text-align:center">Drag the corners to align with the document edges</div>
   <canvas id="crop-canvas" width="400" height="530"></canvas>
+  <canvas class="crop-loupe" id="crop-loupe" width="132" height="132"></canvas>
   <div class="crop-btns">
     <button class="btn btn-secondary btn-sm" id="crop-skip-btn">Skip Crop</button>
     <button class="btn btn-primary btn-sm" id="crop-confirm-btn">Crop &amp; Add</button>
@@ -2708,12 +2848,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 (function(){
 'use strict';
 var tk=new URLSearchParams(location.search).get('token')||'';
-
-// #region agent log
-var _dbgBase=location.origin;
-function _dbgLog(payload){fetch(_dbgBase+'/dbg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(function(){});}
-_dbgLog({sessionId:'32be09',location:'mobile-upload.html:load',message:'page loaded - context info',data:{protocol:location.protocol,host:location.host,isSecureContext:window.isSecureContext,mediaDevicesType:typeof navigator.mediaDevices,hasGetUserMedia:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),userAgent:navigator.userAgent.substring(0,120)},timestamp:Date.now(),hypothesisId:'A'});
-// #endregion
 
 // ---- Tab switching ----
 ['library','camera','files'].forEach(function(name){
@@ -2755,7 +2889,7 @@ function buildPdf(jpegPages){
     var pageNum=nextObj++;
     pageObjNums.push(pageNum);
     imgObjNums.push(imgNum);
-    pageData.push({wPt:wPt,hPt:hPt,imgNum:imgNum,pageNum:pageNum,jpeg:pg.data});
+    pageData.push({wPt:wPt,hPt:hPt,wPx:pg.w,hPx:pg.h,imgNum:imgNum,pageNum:pageNum,jpeg:pg.data});
   }
 
   // Rebuild from scratch using a byte array approach for binary safety
@@ -2791,8 +2925,8 @@ function buildPdf(jpegPages){
     // image XObject
     xrefOffsets[pd.imgNum]=byteOffset;
     var jpegLen=pd.jpeg.byteLength;
-    addPart(pd.imgNum+' 0 obj\\n<< /Type /XObject /Subtype /Image /Width '+pd.wPt+
-      ' /Height '+pd.hPt+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+jpegLen+' >>\\nstream\\n');
+    addPart(pd.imgNum+' 0 obj\\n<< /Type /XObject /Subtype /Image /Width '+pd.wPx+
+      ' /Height '+pd.hPx+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+jpegLen+' >>\\nstream\\n');
     addPart(pd.jpeg);
     addPart('\\nendstream\\nendobj\\n');
     // page
@@ -2903,10 +3037,78 @@ function detectDocQuad(canvas){
   return [{x:minX,y:minY},{x:maxX,y:minY},{x:maxX,y:maxY},{x:minX,y:maxY}];
 }
 
+// ---- OpenCV.js + jscanify document detection (self-hosted, offline) ----
+// Uses OpenCV contour detection for a real "auto-detect the page" quad, and
+// gracefully falls back to the lightweight Sobel detector above when OpenCV
+// has not finished loading or fails to find paper.
+var _jscanner=null;
+function cvIsReady(){
+  return !!(window.cv && window.cv.Mat && typeof window.cv.imread==='function' && typeof window.cv.Canny==='function');
+}
+function getScanner(){
+  if(!_jscanner && window.jscanify){ try{ _jscanner=new window.jscanify(); }catch(e){ _jscanner=null; } }
+  return _jscanner;
+}
+function quadArea(q){
+  var a=0;
+  for(var i=0;i<q.length;i++){ var p1=q[i],p2=q[(i+1)%q.length]; a+=(p1.x*p2.y-p2.x*p1.y); }
+  return Math.abs(a/2);
+}
+function detectWithJscanify(canvas){
+  if(!cvIsReady()) return null;
+  var scanner=getScanner();
+  if(!scanner) return null;
+  var img=null;
+  try{
+    img=window.cv.imread(canvas);
+    var contour=scanner.findPaperContour(img);
+    if(!contour){ img.delete(); return null; }
+    var c=scanner.getCornerPoints(contour,img);
+    img.delete(); img=null;
+    if(!c||!c.topLeftCorner||!c.topRightCorner||!c.bottomRightCorner||!c.bottomLeftCorner) return null;
+    var quad=[
+      {x:c.topLeftCorner.x,y:c.topLeftCorner.y},
+      {x:c.topRightCorner.x,y:c.topRightCorner.y},
+      {x:c.bottomRightCorner.x,y:c.bottomRightCorner.y},
+      {x:c.bottomLeftCorner.x,y:c.bottomLeftCorner.y}
+    ];
+    // Reject implausible detections (too small = probably noise, not the page).
+    if(quadArea(quad) < (canvas.width*canvas.height)*0.05) return null;
+    return quad;
+  }catch(e){
+    try{ if(img) img.delete(); }catch(_e){}
+    return null;
+  }
+}
+
+// ---- Magnifier loupe (iOS-style) shown while dragging a crop corner ----
+var loupeEl=document.getElementById('crop-loupe');
+function showLoupeAt(clientX,clientY,imgPt){
+  if(!loupeEl||!cropCurrentImg) return;
+  var LSIZE=132, ZOOM=1.5;
+  var lctx=loupeEl.getContext('2d');
+  var srcSpan=LSIZE/ZOOM;
+  var sx=imgPt.x-srcSpan/2, sy=imgPt.y-srcSpan/2;
+  lctx.clearRect(0,0,LSIZE,LSIZE);
+  lctx.fillStyle='#000'; lctx.fillRect(0,0,LSIZE,LSIZE);
+  try{ lctx.drawImage(cropCanvas,sx,sy,srcSpan,srcSpan,0,0,LSIZE,LSIZE); }catch(e){}
+  lctx.strokeStyle='rgba(74,144,217,0.9)'; lctx.lineWidth=1.5;
+  lctx.beginPath(); lctx.moveTo(LSIZE/2,0); lctx.lineTo(LSIZE/2,LSIZE); lctx.moveTo(0,LSIZE/2); lctx.lineTo(LSIZE,LSIZE/2); lctx.stroke();
+  lctx.beginPath(); lctx.arc(LSIZE/2,LSIZE/2,7,0,Math.PI*2); lctx.strokeStyle='#fff'; lctx.lineWidth=2; lctx.stroke();
+  var left=clientX-LSIZE/2, top=clientY-LSIZE-24;
+  if(top<8) top=clientY+24;
+  left=Math.max(8,Math.min(left,window.innerWidth-LSIZE-8));
+  top=Math.max(8,Math.min(top,window.innerHeight-LSIZE-8));
+  loupeEl.style.left=left+'px'; loupeEl.style.top=top+'px';
+  loupeEl.style.display='block';
+}
+function hideLoupe(){ if(loupeEl) loupeEl.style.display='none'; }
+
 // ---- Corner dragging ----
 function makeCornerDragger(canvas,corners,onDraw){
-  var dragging=-1,scale=1;
+  var dragging=-1;
   function getScale(){return canvas.getBoundingClientRect().width/(canvas.width||1);}
+  function getClient(e){var cl=e.touches?e.touches[0]:e;return {x:cl.clientX,y:cl.clientY};}
   function getPos(e){
     var r=canvas.getBoundingClientRect();
     var sc=getScale();
@@ -2921,12 +3123,27 @@ function makeCornerDragger(canvas,corners,onDraw){
     }
     return -1;
   }
-  canvas.addEventListener('mousedown',function(e){dragging=hit(getPos(e));});
-  canvas.addEventListener('touchstart',function(e){e.preventDefault();dragging=hit(getPos(e));},{passive:false});
-  canvas.addEventListener('mousemove',function(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();});
-  canvas.addEventListener('touchmove',function(e){e.preventDefault();if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;onDraw();},{passive:false});
-  canvas.addEventListener('mouseup',function(){dragging=-1;});
-  canvas.addEventListener('touchend',function(){dragging=-1;});
+  // Coalesce redraws to one per animation frame so rapid touchmove events don't
+  // queue up expensive full-image redraws (which caused lag while dragging).
+  var rafPending=false,lastCX=0,lastCY=0;
+  function scheduleDraw(){
+    if(rafPending)return;
+    rafPending=true;
+    requestAnimationFrame(function(){
+      rafPending=false;
+      onDraw();
+      if(dragging>=0)showLoupeAt(lastCX,lastCY,corners[dragging]);
+    });
+  }
+  function start(e){dragging=hit(getPos(e));if(dragging>=0){var c=getClient(e);lastCX=c.x;lastCY=c.y;showLoupeAt(c.x,c.y,corners[dragging]);}}
+  function move(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;var c=getClient(e);lastCX=c.x;lastCY=c.y;scheduleDraw();}
+  function end(){dragging=-1;hideLoupe();}
+  canvas.addEventListener('mousedown',start);
+  canvas.addEventListener('touchstart',function(e){e.preventDefault();start(e);},{passive:false});
+  canvas.addEventListener('mousemove',move);
+  canvas.addEventListener('touchmove',function(e){e.preventDefault();move(e);},{passive:false});
+  canvas.addEventListener('mouseup',end);
+  canvas.addEventListener('touchend',end);
 }
 
 // ---- Draw corners overlay ----
@@ -2976,11 +3193,18 @@ function showCropOverlay(imgEl){
     var w=cropCanvas.width,h=cropCanvas.height;
     var pad=Math.min(w,h)*0.05;
     cropCorners=[{x:pad,y:pad},{x:w-pad,y:pad},{x:w-pad,y:h-pad},{x:pad,y:h-pad}];
-    // Try auto-detect
+    // Try auto-detect: OpenCV/jscanify first (real page detection), then Sobel fallback.
     var tmpCanvas=document.createElement('canvas');
     tmpCanvas.width=w; tmpCanvas.height=h;
     tmpCanvas.getContext('2d').drawImage(imgEl,0,0,w,h);
-    var detected=detectDocQuad(tmpCanvas);
+    var detected=detectWithJscanify(tmpCanvas);
+    var autoHint=document.getElementById('crop-hint');
+    if(detected){
+      if(autoHint) autoHint.textContent='Page detected \u2014 drag the corners to fine-tune';
+    } else {
+      detected=detectDocQuad(tmpCanvas);
+      if(autoHint) autoHint.textContent='Drag the corners to align with the document edges';
+    }
     cropCorners=detected;
     drawCornersOverlay(cropCanvas,imgEl,cropCorners);
     makeCornerDragger(cropCanvas,cropCorners,function(){drawCornersOverlay(cropCanvas,imgEl,cropCorners);});
@@ -3336,27 +3560,18 @@ function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
       return;
     }
 
-    if (req.method === 'GET' && urlObj.pathname === '/cropperjs.js') {
+    // Self-hosted document-detection assets (served locally so the phone,
+    // connected over the offline Wi-Fi Direct network, needs no internet).
+    if (req.method === 'GET' && (urlObj.pathname === '/opencv.js' || urlObj.pathname === '/jscanify.min.js')) {
       try {
-        const cropperPath = require('path').join(__dirname, 'node_modules', 'cropperjs', 'dist', 'cropper.min.js');
-        const content = fsSync.readFileSync(cropperPath);
+        const fileName = urlObj.pathname === '/opencv.js' ? 'opencv.js' : 'jscanify.js';
+        const assetPath = require('path').join(__dirname, 'node_modules', 'jscanify', 'src', fileName);
+        const content = fsSync.readFileSync(assetPath);
         res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'max-age=3600' });
         res.end(content);
       } catch (e) { res.writeHead(404); res.end('Not found'); }
       return;
     }
-
-    // #region agent log
-    if (req.method === 'POST' && urlObj.pathname === '/dbg') {
-      let dbgBody = '';
-      req.on('data', function(d){ dbgBody += d; });
-      req.on('end', function(){
-        try { fsSync.appendFileSync('debug-32be09.log', dbgBody + '\n'); } catch(e){}
-        res.writeHead(200); res.end('ok');
-      });
-      return;
-    }
-    // #endregion
 
     if (req.method === 'POST' && urlObj.pathname === '/upload') {
       const token = urlObj.searchParams.get('token');
@@ -3431,33 +3646,49 @@ function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
 
 let wirelessDocServer = null;
 let wirelessDocBridgeProc = null;
+let wirelessDocBridgeInfo = null;
 let wirelessDocSender = null;
 let wirelessDocTempDir = null;
+
+// Best-effort detection of a phone that has joined the Wi-Fi Direct AP.
+// Reads the ARP table and looks for any host in the AP's /24 subnet other than
+// the gateway itself. Windows-only in practice; returns { connected:false } on
+// any error or when no AP gateway is known, so the renderer can safely fall
+// back to revealing the upload QR after a short timeout.
+ipcMain.handle('check-wireless-client-connected', async () => {
+  try {
+    const gw = lastWirelessGatewayIp;
+    if (!gw) return { connected: false };
+    const prefix = gw.split('.').slice(0, 3).join('.') + '.';
+    const out = await new Promise((resolve) => {
+      require('child_process').exec('arp -a', { windowsHide: true, timeout: 6000 }, (err, stdout) => resolve(err ? '' : String(stdout || '')));
+    });
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})/);
+      if (!m) continue;
+      const ip = m[1];
+      if (!ip.startsWith(prefix) || ip === gw || ip.endsWith('.255')) continue;
+      return { connected: true, ip };
+    }
+    return { connected: false };
+  } catch (e) {
+    return { connected: false };
+  }
+});
 
 ipcMain.handle('start-wireless-document-import', async (event) => {
   try {
     if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
-    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
 
-    await new Promise((resolve) => {
-      require('child_process').exec(
-        'powershell -NoProfile -NonInteractive -Command "' +
-        'Get-WmiObject Win32_Process | ' +
-        'Where-Object { $_.Name -eq \'powershell.exe\' -and $_.CommandLine -like \'*wifi-direct-bridge*\' } | ' +
-        'ForEach-Object { $_.Terminate() }"',
-        { windowsHide: true, timeout: 8000 },
-        () => resolve()
-      );
-    });
-
-    const { createHash } = require('crypto');
-    const machineKey = createHash('sha256').update(require('os').hostname()).digest('hex');
-    const stableSsid = 'Oversight-' + machineKey.slice(0, 6).toUpperCase();
-    const stablePass = machineKey.slice(6, 18);
-
-    const { result, proc } = await startWifiDirectBridge(stableSsid, stablePass);
-    if (!result.success) return { success: false, error: result.error || 'Failed to start Wi-Fi Direct AP' };
-    wirelessDocBridgeProc = proc;
+    // Reuse the shared always-on AP (same one the photo flow uses); only the
+    // per-session upload URL/QR is regenerated below.
+    const ap = await acquireSharedAp();
+    wirelessDocBridgeProc = ap.proc;
+    wirelessDocBridgeInfo = { ssid: ap.ssid, password: ap.password, gatewayIp: ap.gatewayIp };
+    wirelessDocSessionActive = true;
+    wirelessBridgeRestarts = 0;
+    attachBridgeWatchdog('doc');
+    const result = { success: true, ssid: ap.ssid, password: ap.password, gatewayIp: ap.gatewayIp };
 
     const tempDir = toWindowsPath(
       path.join(app.getPath('temp'), 'oversight-wireless-docs', Date.now().toString())
@@ -3469,10 +3700,7 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
     const port = await findFreePort();
     const sessionToken = require('crypto').randomBytes(16).toString('hex');
     const uploadUrl = `http://${result.gatewayIp}:${port}/upload?token=${sessionToken}`;
-
-    // #region agent log
-    try { require('fs').appendFileSync('debug-32be09.log', JSON.stringify({sessionId:'32be09',location:'main.js:uploadUrl',message:'document-upload server URL generated',data:{protocol:uploadUrl.split(':')[0],host:`${result.gatewayIp}:${port}`,isHttps:uploadUrl.startsWith('https')},timestamp:Date.now(),hypothesisId:'A'}) + '\n'); } catch(e){}
-    // #endregion
+    lastWirelessGatewayIp = result.gatewayIp;
 
     await ensureWirelessFirewallRule().catch(() => {});
 
@@ -3492,15 +3720,23 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
     return { success: true, ssid: result.ssid, password: result.password, uploadUrl, wifiQr, urlQr };
   } catch (err) {
     console.error('[start-wireless-document-import] error:', err);
-    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
+    // Keep the shared AP alive for the next attempt instead of tearing it down.
+    wirelessDocSessionActive = false;
+    parkSharedAp(wirelessDocBridgeInfo && wirelessDocBridgeProc ? { proc: wirelessDocBridgeProc, ...wirelessDocBridgeInfo } : null);
+    wirelessDocBridgeProc = null;
+    wirelessDocBridgeInfo = null;
     return { success: false, error: err.message };
   }
 });
 
 ipcMain.handle('stop-wireless-document-import', async () => {
   try {
+    wirelessDocSessionActive = false; // stop the watchdog from restarting the AP
     if (wirelessDocServer) { try { wirelessDocServer.close(); } catch { /* ignore */ } wirelessDocServer = null; }
-    if (wirelessDocBridgeProc) { try { wirelessDocBridgeProc.kill(); } catch { /* ignore */ } wirelessDocBridgeProc = null; }
+    // Park the AP back into the shared slot (kept alive) so the next upload reuses it.
+    parkSharedAp(wirelessDocBridgeInfo && wirelessDocBridgeProc ? { proc: wirelessDocBridgeProc, ...wirelessDocBridgeInfo } : null);
+    wirelessDocBridgeProc = null;
+    wirelessDocBridgeInfo = null;
     wirelessDocSender = null;
     return { success: true };
   } catch (err) {

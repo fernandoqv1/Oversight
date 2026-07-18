@@ -418,9 +418,6 @@ function importProjectFromExcel(fileBuffer) {
         if (jsonStr) {
           try {
             const projectData = JSON.parse(jsonStr);
-            // #region agent log
-            fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/excel.js:importProjectFromExcel',message:'import path',data:{path:'_FullData',hasDailyLogPhotosSheet:workbook.SheetNames.includes('_DailyLogPhotos')},timestamp:Date.now(),hypothesisId:'H-B'})}).catch(()=>{});
-            // #endregion
             // Preserve stable Oversight Project ID so re-import updates instead of duplicating
             if (!projectData.id) {
               projectData.id = _genId('prj');
@@ -734,9 +731,6 @@ function _mergeDailyLogPhotosFromWorkbook(projectData, workbook) {
     merged++;
   });
 
-  // #region agent log
-  fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/excel.js:_mergeDailyLogPhotosFromWorkbook',message:'photos merged from excel sheet',data:{merged,chunkKeys:photoChunks.size,projectId:projectData.id},timestamp:Date.now(),hypothesisId:'H-B',runId:'post-fix'})}).catch(()=>{});
-  // #endregion
   return merged;
 }
 
@@ -753,18 +747,6 @@ function _finalizeImportedProject(projectData, workbook) {
   // _FullData import skips the fallback sheet reconstruction; always merge photos here.
   _mergeDailyLogPhotosFromWorkbook(projectData, workbook);
 
-  // #region agent log
-  let photoTotal = 0, withBase64 = 0, withFileId = 0, withNeither = 0;
-  (projectData.dailyLogs || []).forEach(log => (log.entries || []).forEach(e => (e.photos || []).forEach(p => {
-    photoTotal++;
-    const hasB64 = !!(p.base64 && String(p.base64).trim());
-    const hasFid = !!p.fileId;
-    if (hasB64) withBase64++;
-    if (hasFid) withFileId++;
-    if (!hasB64 && !hasFid) withNeither++;
-  })));
-  fetch('http://127.0.0.1:7450/ingest/17289360-d3d5-4846-a1eb-264da60df995',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f61b37'},body:JSON.stringify({sessionId:'f61b37',location:'js/excel.js:_finalizeImportedProject',message:'import photo stats after merge',data:{projectId:projectData.id,photoTotal,withBase64,withFileId,withNeither,hasDailyLogPhotosSheet:workbook.SheetNames.includes('_DailyLogPhotos')},timestamp:Date.now(),hypothesisId:'H-B',runId:'post-fix'})}).catch(()=>{});
-  // #endregion
   return projectData;
 }
 
