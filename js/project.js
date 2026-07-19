@@ -1179,7 +1179,7 @@ function buildMaterialHazardSelectorHtml(namePrefix, selected = 'asbestos') {
                 `${namePrefix}-hazard-pb`,
                 radioName,
                 'lead',
-                '<span class="modal-check-title">Lead (Pb)</span><span class="modal-check-subtitle">Lead-based material</span>',
+                '<span class="modal-check-title">Lead (Pb)</span><span class="modal-check-subtitle">Lead-containing material</span>',
                 ht === 'lead',
                 'material-hazard-option'
             )}
