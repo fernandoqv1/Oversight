@@ -453,7 +453,7 @@ function renderMaterials() {
                 <div class="flex justify-between items-start gap-3">
                     <div class="flex-1 min-w-0">
                         <span class="font-medium text-gray-800">${escapeHtml(material.name)}</span>
-                        ${hazardTypeBadgeHtml(material.hazardType)}
+                        ${hazardTypeBadgeHtml(material)}
                         <div class="text-sm mt-1 space-x-3">
                             <span class="text-gray-500">Total: <strong>${material.totalQuantity || 0}</strong> ${displayUnit(material.unit, 'units')}</span>
                             <span class="text-blue-600">Assigned: <strong>${assigned}</strong></span>
@@ -494,8 +494,8 @@ function getAssignedQuantity(materialId) {
 }
 
 /** Find an existing site material by name, or create one for tracking in the Materials list.
- *  hazardType is applied only when creating a new material; existing records are never changed. */
-function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0, hazardType = 'asbestos') {
+ *  hazard input is applied only when creating a new material; existing records are never changed. */
+function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0, hazardInput = 'asbestos') {
     const trimmed = String(name || '').trim();
     if (!trimmed) return null;
     if (!currentProject.materials) currentProject.materials = [];
@@ -508,8 +508,10 @@ function findOrCreateSiteMaterial(name, unit = 'SF', quantityHint = 0, hazardTyp
             totalQuantity: 0,
             unit: unit || 'SF',
             friable: false,
-            hazardType: normalizeHazardType(hazardType)
+            hazardTypes: ['asbestos'],
+            hazardType: 'asbestos'
         };
+        applyMaterialHazards(material, hazardInput);
         currentProject.materials.push(material);
     }
     const hint = Number(quantityHint) || 0;
@@ -772,6 +774,44 @@ function normalizeHazardType(value) {
     return 'asbestos';
 }
 
+function getMaterialHazardTypes(material) {
+    if (!material) return ['asbestos'];
+    if (Array.isArray(material.hazardTypes) && material.hazardTypes.length) {
+        const types = material.hazardTypes.map(normalizeHazardType);
+        return [...new Set(types)];
+    }
+    const legacy = String(material.hazardType || 'asbestos').toLowerCase();
+    if (legacy === 'both') return ['asbestos', 'lead'];
+    return [normalizeHazardType(legacy)];
+}
+
+function syncMaterialHazardFields(material) {
+    if (!material) return;
+    const types = getMaterialHazardTypes(material);
+    material.hazardTypes = types;
+    material.hazardType = types.length > 1 ? 'both' : types[0];
+}
+
+function materialHasBothHazards(material) {
+    const types = getMaterialHazardTypes(material);
+    return types.includes('asbestos') && types.includes('lead');
+}
+
+function applyMaterialHazards(material, hazardInput) {
+    if (!material) return;
+    const types = Array.isArray(hazardInput)
+        ? [...new Set(hazardInput.map(normalizeHazardType))]
+        : [normalizeHazardType(hazardInput)];
+    material.hazardTypes = types.length ? types : ['asbestos'];
+    syncMaterialHazardFields(material);
+}
+
+function getBulkSampleHazardType(sample, material) {
+    if (sample?.hazardType) return normalizeHazardType(sample.hazardType);
+    const types = getMaterialHazardTypes(material);
+    return types[0] || 'asbestos';
+}
+
 function isLeadHazard(hazardType) {
     return normalizeHazardType(hazardType) === 'lead';
 }
@@ -785,25 +825,24 @@ function getAirSampleHazardType(sample) {
     return 'asbestos';
 }
 
-function resolveSiteMaterialHazard(materialId, materialName) {
+function resolveSiteMaterialHazard(materialId, materialName, sampleHazardType = '') {
+    if (sampleHazardType) return normalizeHazardType(sampleHazardType);
     const materials = currentProject?.materials || [];
-    if (materialId) {
-        const byId = materials.find(m => m.id === materialId);
-        if (byId) return normalizeHazardType(byId.hazardType);
+    let material = null;
+    if (materialId) material = materials.find(m => m.id === materialId) || null;
+    if (!material && materialName) {
+        const norm = (materialName || '').trim().toLowerCase();
+        material = materials.find(m => (m.name || '').trim().toLowerCase() === norm) || null;
     }
-    const norm = (materialName || '').trim().toLowerCase();
-    if (norm) {
-        const byName = materials.find(m => (m.name || '').trim().toLowerCase() === norm);
-        if (byName) return normalizeHazardType(byName.hazardType);
-    }
-    return 'asbestos';
+    const types = getMaterialHazardTypes(material);
+    return types[0] || 'asbestos';
 }
 
 function getProjectHazardSummary(project) {
     const p = project || currentProject;
     const materials = p?.materials || [];
-    const hasAsbestos = materials.some(m => normalizeHazardType(m.hazardType) !== 'lead');
-    const hasLead = materials.some(m => normalizeHazardType(m.hazardType) === 'lead');
+    const hasAsbestos = materials.some(m => getMaterialHazardTypes(m).includes('asbestos'));
+    const hasLead = materials.some(m => getMaterialHazardTypes(m).includes('lead'));
     return {
         hasAsbestos,
         hasLead,
@@ -821,9 +860,13 @@ function getContainmentMaterialHazards(containment) {
         const key = materialId || (name || '').trim().toLowerCase();
         if (!key || seen.has(key)) return;
         seen.add(key);
-        const ht = resolveSiteMaterialHazard(materialId, name);
-        if (ht === 'lead') hasLead = true;
-        else hasAsbestos = true;
+        getMaterialHazardTypes(
+            (currentProject?.materials || []).find(m => m.id === materialId)
+            || (currentProject?.materials || []).find(m => (m.name || '').trim().toLowerCase() === (name || '').trim().toLowerCase())
+        ).forEach(ht => {
+            if (ht === 'lead') hasLead = true;
+            else hasAsbestos = true;
+        });
     };
     (containment?.materials || []).forEach(m => consider(m.materialId, m.materialName || m.name));
     (containment?.spaces || []).forEach(sp => {
@@ -1130,10 +1173,36 @@ const LEAD_ANALYSIS_OPTIONS = [
     'Lead by NIOSH 7082 (Flame AAS)'
 ];
 
+const ASBESTOS_BULK_ANALYSIS_OPTIONS = [
+    'PLM - Standard',
+    'PCM: NIOSH 7400',
+    'TEM: NIOSH 7402'
+];
+
+function defaultBulkAnalysisType(hazardType) {
+    return isLeadHazard(hazardType) ? LEAD_ANALYSIS_OPTIONS[0] : ASBESTOS_BULK_ANALYSIS_OPTIONS[0];
+}
+
+function buildAsbestosBulkAnalysisOptionsHtml(selectedValue) {
+    return ASBESTOS_BULK_ANALYSIS_OPTIONS.map(opt =>
+        `<option value="${escapeHtml(opt)}"${opt === selectedValue ? ' selected' : ''}>${escapeHtml(opt)}</option>`
+    ).join('');
+}
+
 function migrateProjectHazardData(project) {
     if (!project) return;
     (project.materials || []).forEach(m => {
-        if (!m.hazardType) m.hazardType = 'asbestos';
+        syncMaterialHazardFields(m);
+    });
+    (project.bulkSamples || []).forEach(s => {
+        if (!s.hazardType && s.materialId) {
+            const mat = (project.materials || []).find(m => m.id === s.materialId);
+            const types = getMaterialHazardTypes(mat);
+            if (types.length === 1) s.hazardType = types[0];
+        }
+        if (s.hazardType && !s.analysisType) {
+            s.analysisType = defaultBulkAnalysisType(s.hazardType);
+        }
     });
     (project.airSamples || []).forEach(s => {
         if (String(s.type || '').toLowerCase() === 'lead') {
@@ -1151,45 +1220,124 @@ function migrateProjectHazardData(project) {
     });
 }
 
-function hazardTypeLabel(hazardType) {
-    return isLeadHazard(hazardType) ? 'Pb' : 'Asb';
+function hazardTypesLabel(materialOrTypes) {
+    const types = Array.isArray(materialOrTypes)
+        ? materialOrTypes.map(normalizeHazardType)
+        : getMaterialHazardTypes(materialOrTypes);
+    const hasAsb = types.includes('asbestos');
+    const hasPb = types.includes('lead');
+    if (hasAsb && hasPb) return 'Asb+Pb';
+    if (hasPb) return 'Pb';
+    return 'Asb';
 }
 
-function hazardTypeBadgeHtml(hazardType) {
-    const label = hazardTypeLabel(hazardType);
-    const cls = isLeadHazard(hazardType) ? 'bg-orange-100 text-orange-800' : 'bg-yellow-100 text-yellow-800';
-    return `<span class="ml-1 px-2 py-0.5 text-xs ${cls} rounded">${label}</span>`;
+function hazardTypeLabel(hazardTypeOrMaterial) {
+    if (hazardTypeOrMaterial && typeof hazardTypeOrMaterial === 'object') {
+        return hazardTypesLabel(hazardTypeOrMaterial);
+    }
+    const v = String(hazardTypeOrMaterial || '').toLowerCase();
+    if (v === 'both') return 'Asb+Pb';
+    return isLeadHazard(hazardTypeOrMaterial) ? 'Pb' : 'Asb';
+}
+
+function hazardTypeBadgeHtml(hazardTypeOrMaterial) {
+    const types = (hazardTypeOrMaterial && typeof hazardTypeOrMaterial === 'object')
+        ? getMaterialHazardTypes(hazardTypeOrMaterial)
+        : (String(hazardTypeOrMaterial || '').toLowerCase() === 'both'
+            ? ['asbestos', 'lead']
+            : [normalizeHazardType(hazardTypeOrMaterial)]);
+    return types.map(ht => {
+        const label = ht === 'lead' ? 'Pb' : 'Asb';
+        const cls = ht === 'lead' ? 'bg-orange-100 text-orange-800' : 'bg-yellow-100 text-yellow-800';
+        return `<span class="ml-1 px-2 py-0.5 text-xs ${cls} rounded">${label}</span>`;
+    }).join('');
 }
 
 function buildMaterialHazardSelectorHtml(namePrefix, selected = 'asbestos') {
-    const ht = normalizeHazardType(selected);
-    const radioName = `${namePrefix}-hazard`;
+    const types = Array.isArray(selected) ? selected.map(normalizeHazardType) : getMaterialHazardTypes({ hazardType: selected });
+    const hasAsb = types.includes('asbestos');
+    const hasPb = types.includes('lead');
     return `<div class="material-hazard-field">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Hazard Type *</label>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Hazards *</label>
+        <p class="text-xs text-gray-500 mb-2">Select one or both. If both are selected, choose Asbestos or Lead when adding each sample.</p>
         <div class="material-hazard-options">
-            ${buildModalRadioRow(
+            ${buildModalCheckboxRow(
                 `${namePrefix}-hazard-asb`,
-                radioName,
-                'asbestos',
+                `${namePrefix}-hazard-checkbox`,
+                `data-hazard="asbestos"${hasAsb ? ' checked' : ''}`,
                 '<span class="modal-check-title">Asbestos (ASB)</span><span class="modal-check-subtitle">Asbestos-containing material</span>',
-                ht !== 'lead',
                 'material-hazard-option'
             )}
-            ${buildModalRadioRow(
+            ${buildModalCheckboxRow(
                 `${namePrefix}-hazard-pb`,
-                radioName,
-                'lead',
+                `${namePrefix}-hazard-checkbox`,
+                `data-hazard="lead"${hasPb ? ' checked' : ''}`,
                 '<span class="modal-check-title">Lead (Pb)</span><span class="modal-check-subtitle">Lead-containing material</span>',
-                ht === 'lead',
                 'material-hazard-option'
             )}
         </div>
     </div>`;
 }
 
-function readMaterialHazardFromForm(namePrefix) {
-    const checked = document.querySelector(`input[name="${namePrefix}-hazard"]:checked`);
-    return normalizeHazardType(checked?.value);
+function readMaterialHazardsFromForm(namePrefix) {
+    const types = [];
+    document.querySelectorAll(`#${namePrefix}-hazard-asb, #${namePrefix}-hazard-pb`).forEach(el => {
+        if (!el.checked) return;
+        types.push(normalizeHazardType(el.dataset.hazard));
+    });
+    return types.length ? [...new Set(types)] : ['asbestos'];
+}
+
+function buildSampleHazardSelectorHtml(idPrefix, allowedTypes, selected = '') {
+    const types = (allowedTypes || []).map(normalizeHazardType);
+    if (types.length <= 1) return '';
+    const defaultVal = selected ? normalizeHazardType(selected) : '';
+    return `<div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="${idPrefix}-hazard">Sample hazard *</label>
+        <p class="text-xs text-gray-500 mb-2">This material contains both asbestos and lead. Choose which hazard this sample is for — it sets the analysis method.</p>
+        <select id="${idPrefix}-hazard" class="w-full p-3 border rounded-lg bg-white">
+            ${!defaultVal ? '<option value="" selected>— Select Asbestos or Lead —</option>' : ''}
+            ${types.includes('asbestos') ? `<option value="asbestos" ${defaultVal === 'asbestos' ? 'selected' : ''}>Asbestos (PLM / PCM / TEM)</option>` : ''}
+            ${types.includes('lead') ? `<option value="lead" ${defaultVal === 'lead' ? 'selected' : ''}>Lead (NIOSH 7300 / 7303 / 7082)</option>` : ''}
+        </select>
+    </div>`;
+}
+
+function readSampleHazardFromForm(idPrefix, allowedTypes) {
+    const types = (allowedTypes || []).map(normalizeHazardType);
+    if (types.length <= 1) return types[0] || 'asbestos';
+    const raw = document.getElementById(`${idPrefix}-hazard`)?.value || '';
+    const chosen = normalizeHazardType(raw);
+    return types.includes(chosen) ? chosen : '';
+}
+
+function buildBulkAnalysisSelectHtml(samples, material, selectedValue = '') {
+    const hazards = [...new Set((samples || []).map(s => getBulkSampleHazardType(s, material)))];
+    if (hazards.length === 1 && isLeadHazard(hazards[0])) {
+        return buildLeadAnalysisOptionsHtml(selectedValue || LEAD_ANALYSIS_OPTIONS[0]);
+    }
+    return buildAsbestosBulkAnalysisOptionsHtml(selectedValue || ASBESTOS_BULK_ANALYSIS_OPTIONS[0]);
+}
+
+function updateBulkPrintAnalysisOptions(samples, material, selectedValue = '') {
+    const select = document.getElementById('print-bulk-analysis');
+    const note = document.getElementById('print-bulk-analysis-note');
+    if (!select) return;
+    const hazards = [...new Set((samples || []).map(s => getBulkSampleHazardType(s, material)))];
+    const prev = selectedValue || select.value;
+    if (hazards.length > 1) {
+        select.innerHTML = '<option value="">— Select samples with the same hazard —</option>';
+        select.disabled = true;
+        if (note) note.textContent = 'Selected samples include both asbestos and lead. Print asbestos and lead samples separately.';
+        return;
+    }
+    select.disabled = false;
+    select.innerHTML = buildBulkAnalysisSelectHtml(samples, material, prev);
+    if (note) {
+        note.textContent = isLeadHazard(hazards[0])
+            ? 'Lead samples use NIOSH lead analysis methods.'
+            : 'Asbestos samples use PLM / PCM / TEM analysis methods.';
+    }
 }
 
 const NEW_MATERIAL_SELECT_VALUE = '__new__';
@@ -1226,7 +1374,7 @@ function buildSiteMaterialSelectOptionsHtml(materials, { newLabel = 'New Site Ma
     const list = materials || [];
     const newSelected = !selectedId || selectedId === NEW_MATERIAL_SELECT_VALUE;
     const options = list.map(m => {
-        const hazard = hazardTypeLabel(m.hazardType);
+        const hazard = hazardTypeLabel(m);
         const selected = !newSelected && m.id === selectedId ? ' selected' : '';
         return `<option value="${escapeHtml(m.id)}"${selected}>${escapeHtml(m.name)} · ${hazard} (${displayUnit(m.unit, 'units')})</option>`;
     });
@@ -1234,12 +1382,12 @@ function buildSiteMaterialSelectOptionsHtml(materials, { newLabel = 'New Site Ma
     return options.join('');
 }
 
-function setMaterialHazardRadios(namePrefix, hazardType) {
-    const ht = normalizeHazardType(hazardType);
+function setMaterialHazardCheckboxes(namePrefix, hazardInput) {
+    const types = Array.isArray(hazardInput) ? hazardInput.map(normalizeHazardType) : getMaterialHazardTypes({ hazardType: hazardInput });
     const asb = document.getElementById(`${namePrefix}-hazard-asb`);
     const pb = document.getElementById(`${namePrefix}-hazard-pb`);
-    if (asb) asb.checked = ht !== 'lead';
-    if (pb) pb.checked = ht === 'lead';
+    if (asb) asb.checked = types.includes('asbestos');
+    if (pb) pb.checked = types.includes('lead');
 }
 
 /**
@@ -1279,7 +1427,7 @@ function wireMaterialSelectToggle(modal, {
                     const unitSelect = modal.querySelector(`#${unitId}`);
                     if (unitSelect) unitSelect.value = material.unit || 'SF';
                 }
-                if (hazardPrefix) setMaterialHazardRadios(hazardPrefix, material.hazardType);
+                if (hazardPrefix) setMaterialHazardCheckboxes(hazardPrefix, getMaterialHazardTypes(material));
             }
         } else if (isNew && nameInputId) {
             const nameInput = modal.querySelector(`#${nameInputId}`);
@@ -1709,7 +1857,7 @@ function openSpaceMaterialModal(building, existingSpace) {
                     <input type="checkbox" id="mat-check-${pm.id}" class="h-4 w-4 rounded border-gray-300 text-indigo-600"
                            ${assigned ? 'checked' : ''} onchange="toggleMaterialRow('${pm.id}')">
                     <label for="mat-check-${pm.id}" class="modal-check-label" style="flex:1;">
-                        <span class="modal-check-title">${escapeHtml(pm.name)} ${hazardTypeLabel(pm.hazardType)}</span>
+                        <span class="modal-check-title">${escapeHtml(pm.name)} ${hazardTypeBadgeHtml(pm)}</span>
                         <span class="modal-check-subtitle">(${remaining > 0 ? remaining : 0} ${displayUnit(pm.unit)} remaining)</span>
                     </label>
                     <div class="flex items-center gap-2" id="mat-qty-row-${pm.id}" style="${assigned ? '' : 'opacity: 0.4'}">
@@ -1840,8 +1988,10 @@ function openSpaceMaterialModal(building, existingSpace) {
             if (!newName) return;
             const newQty = parseFloat(row.querySelector('.new-mat-qty')?.value) || 0;
             const newUnit = row.querySelector('.new-mat-unit')?.value || 'SF';
-            const rowHazard = row.querySelector('input[name$="-hazard"]:checked')?.value || 'asbestos';
-            const siteMat = findOrCreateSiteMaterial(newName, newUnit, newQty, rowHazard);
+            const rowHazards = [];
+            if (row.querySelector(`#${rowId}-hazard-asb`)?.checked) rowHazards.push('asbestos');
+            if (row.querySelector(`#${rowId}-hazard-pb`)?.checked) rowHazards.push('lead');
+            const siteMat = findOrCreateSiteMaterial(newName, newUnit, newQty, rowHazards.length ? rowHazards : ['asbestos']);
             if (!siteMat) return;
 
             if (newQty > 0) {
@@ -1885,8 +2035,8 @@ function openSpaceMaterialModal(building, existingSpace) {
             <button type="button" class="new-mat-remove" style="background:transparent;border:none;cursor:pointer;color:var(--text-muted);font-size:18px;line-height:1;padding:0;width:1.25rem;" title="Remove">&times;</button>
             <input type="text" class="new-mat-name" style="flex:1;min-width:120px;width:auto !important;" placeholder="Material Name">
             <div style="display:flex;gap:10px;align-items:center;">
-                ${buildModalRadioRow(`${rowId}-hazard-asb`, `${rowId}-hazard`, 'asbestos', 'Asb', true, 'style="padding:0;margin:0;"')}
-                ${buildModalRadioRow(`${rowId}-hazard-pb`, `${rowId}-hazard`, 'lead', 'Pb', false, 'style="padding:0;margin:0;"')}
+                ${buildModalCheckboxRow(`${rowId}-hazard-asb`, `${rowId}-hazard-checkbox`, 'data-hazard="asbestos" checked', 'Asb', 'style="padding:0;margin:0;"')}
+                ${buildModalCheckboxRow(`${rowId}-hazard-pb`, `${rowId}-hazard-checkbox`, 'data-hazard="lead"', 'Pb', 'style="padding:0;margin:0;"')}
             </div>
             <input type="number" class="new-mat-qty" style="width:5.5rem !important;flex-shrink:0;" min="0" step="any" placeholder="Qty">
             <select class="new-mat-unit" style="width:auto !important;flex-shrink:0;padding:7px 8px;">
@@ -1960,13 +2110,17 @@ function openAddMaterialModal() {
                 selectedUnit: defaultMaterial?.unit || 'SF'
             })}
             <div id="site-material-hazard-wrap">
-                ${buildMaterialHazardSelectorHtml('new-material', defaultMaterial?.hazardType || 'asbestos')}
+                ${buildMaterialHazardSelectorHtml('new-material', getMaterialHazardTypes(defaultMaterial))}
             </div>
         </div>
     `, () => {
         const selectedId = document.getElementById('site-material-select')?.value;
         const isNew = selectedId === NEW_MATERIAL_SELECT_VALUE;
-        const hazardType = readMaterialHazardFromForm('new-material');
+        const hazardTypes = readMaterialHazardsFromForm('new-material');
+        if (!hazardTypes.length) {
+            alert('Select at least one hazard (Asbestos and/or Lead).');
+            return false;
+        }
         const totalQuantity = parseFloat(document.getElementById('new-material-quantity').value) || 0;
         const unit = document.getElementById('new-material-unit').value || 'SF';
 
@@ -1978,7 +2132,7 @@ function openAddMaterialModal() {
             }
             material.totalQuantity = totalQuantity;
             material.unit = unit;
-            material.hazardType = hazardType;
+            applyMaterialHazards(material, hazardTypes);
             saveCurrentProject();
             renderProject();
             return;
@@ -1996,7 +2150,8 @@ function openAddMaterialModal() {
             name,
             totalQuantity,
             unit,
-            hazardType
+            hazardTypes,
+            hazardType: hazardTypes.length > 1 ? 'both' : hazardTypes[0]
         });
         saveCurrentProject();
         renderProject();
@@ -2036,7 +2191,7 @@ function openEditMaterialModal(materialId) {
                 <label class="block text-sm font-medium text-gray-700 mb-1" for="edit-material-hmr">HMR# (optional)</label>
                 <input type="text" id="edit-material-hmr" class="w-full p-3 border rounded-lg" placeholder="e.g., 01" value="${escapeHtml(material.hmrNumber || '')}">
             </div>
-            ${buildMaterialHazardSelectorHtml('edit-material', material.hazardType)}
+            ${buildMaterialHazardSelectorHtml('edit-material', getMaterialHazardTypes(material))}
         </div>
     `, () => {
         const name = document.getElementById('edit-material-name').value.trim();
@@ -2057,7 +2212,12 @@ function openEditMaterialModal(materialId) {
         material.totalQuantity = parseFloat(document.getElementById('edit-material-quantity').value) || 0;
         material.unit = newUnit;
         material.hmrNumber = (document.getElementById('edit-material-hmr').value || '').trim() || undefined;
-        material.hazardType = readMaterialHazardFromForm('edit-material');
+        const hazardTypes = readMaterialHazardsFromForm('edit-material');
+        if (!hazardTypes.length) {
+            alert('Select at least one hazard (Asbestos and/or Lead).');
+            return false;
+        }
+        applyMaterialHazards(material, hazardTypes);
         saveCurrentProject();
         renderProject();
     });
@@ -2129,10 +2289,12 @@ function openBulkSampleModal(materialId) {
         return existing?.hmrNumber || (existing?.sampleId ? String(existing.sampleId).replace(/[A-Z]$/i, '') : '') || '';
     })();
     const hmrValue = escapeHtml(existingHmr);
+    const materialHazards = getMaterialHazardTypes(material);
 
     const modal = createModal('Add Bulk Sample', `
-        <p class="text-sm text-gray-600 mb-4">Material: <strong>${escapeHtml(material.name)}</strong></p>
+        <p class="text-sm text-gray-600 mb-4">Material: <strong>${escapeHtml(material.name)}</strong> ${hazardTypeBadgeHtml(material)}</p>
         <div class="space-y-4">
+            ${buildSampleHazardSelectorHtml('bulk-sample', materialHazards)}
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Date Sampled</label>
                 <input type="date" id="bulk-sample-date" class="w-full p-3 border rounded-lg" value="${getTodayLocal()}">
@@ -2167,6 +2329,12 @@ function openBulkSampleModal(materialId) {
             return false;
         }
 
+        const hazardType = readSampleHazardFromForm('bulk-sample', materialHazards);
+        if (!hazardType) {
+            alert('Please select whether this sample is for Asbestos or Lead.');
+            return false;
+        }
+
         const letter = getNextBulkSampleLetter(materialId, hmrNumber);
         const sampleId = hmrNumber + letter;
 
@@ -2178,6 +2346,8 @@ function openBulkSampleModal(materialId) {
             hmrNumber,
             location,
             sampleId,
+            hazardType,
+            analysisType: defaultBulkAnalysisType(hazardType),
             date: document.getElementById('bulk-sample-date').value || getTodayLocal(),
             inspectorName: typeof getInspectorProfile === 'function' ? (getInspectorProfile().name || '') : '',
             comments
@@ -2248,14 +2418,17 @@ function openPrintBulkSamplesModal(materialId) {
     const inspectorName = primarySample.inspectorName || (typeof getInspectorProfile === 'function' ? getInspectorProfile().name : '') || '';
     const inspectorEmail = (typeof getInspectorProfile === 'function' ? getInspectorProfile().email : '') || '';
 
-    const sampleCheckboxesHtml = bulkSamples.map(sample => buildModalSelectionOption(
+    const sampleCheckboxesHtml = bulkSamples.map(sample => {
+        const hz = getBulkSampleHazardType(sample, material);
+        return buildModalSelectionOption(
         `print-bulk-sample-${sample.id}`,
         'print-bulk-sample-checkbox',
         sample.id,
         true,
         escapeHtml(sample.sampleId || sample.id || 'No ID'),
-        `Bulk Asbestos · ${escapeHtml(sample.location || '')}`
-    )).join('');
+        `Bulk ${hazardTypeLabel(hz)} · ${escapeHtml(sample.location || '')}`
+    );
+    }).join('');
 
     const modal = createModal('Print Bulk Sample Chain of Custody', `
         <p class="text-sm text-gray-600 mb-4">Material: <strong>${escapeHtml(material.name)}</strong>. Select samples and complete the form to generate the lab submission.</p>
@@ -2301,10 +2474,9 @@ function openPrintBulkSamplesModal(materialId) {
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Type of Analysis</label>
                     <select id="print-bulk-analysis" class="w-full p-2.5 border rounded-lg bg-white">
-                        <option value="PLM - Standard" selected>PLM - Standard</option>
-                        <option value="PCM: NIOSH 7400">PCM: NIOSH 7400</option>
-                        <option value="TEM: NIOSH 7402">TEM: NIOSH 7402</option>
+                        ${buildBulkAnalysisSelectHtml(bulkSamples, material)}
                     </select>
+                    <p id="print-bulk-analysis-note" class="text-xs text-gray-500 mt-1"></p>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Turn Around Time</label>
@@ -2324,12 +2496,17 @@ function openPrintBulkSamplesModal(materialId) {
             return false;
         }
         const selectedSamples = bulkSamples.filter(s => selectedSampleIds.includes(s.id));
+        const analysisType = document.getElementById('print-bulk-analysis').value;
+        if (!analysisType) {
+            showNotification('Select samples with the same hazard (asbestos or lead) before printing.', true);
+            return false;
+        }
         const formData = {
             inspectorName: document.getElementById('print-bulk-inspector').value.trim(),
             inspectorEmail: document.getElementById('print-bulk-email').value.trim(),
             labNumber: document.getElementById('print-bulk-lab-number').value.trim(),
             lab: document.getElementById('print-bulk-lab').value.trim(),
-            analysisType: document.getElementById('print-bulk-analysis').value,
+            analysisType,
             turnAroundTime: document.getElementById('print-bulk-turnaround').value.trim(),
             specialInstructions: document.getElementById('print-bulk-instructions').value.trim()
         };
@@ -2344,10 +2521,14 @@ function openPrintBulkSamplesModal(materialId) {
         const updateSampleCount = () => {
             const checkedCount = document.querySelectorAll('.print-bulk-sample-checkbox:checked').length;
             if (sampleCountEl) sampleCountEl.innerHTML = `<strong>${checkedCount}</strong> sample${checkedCount !== 1 ? 's' : ''} selected`;
+            const selectedIds = Array.from(document.querySelectorAll('.print-bulk-sample-checkbox:checked')).map(cb => cb.value);
+            const selected = bulkSamples.filter(s => selectedIds.includes(s.id));
+            updateBulkPrintAnalysisOptions(selected, material);
         };
         sampleCheckboxes.forEach(cb => cb.addEventListener('change', updateSampleCount));
         selectAllBtn?.addEventListener('click', () => { sampleCheckboxes.forEach(cb => cb.checked = true); updateSampleCount(); });
         selectNoneBtn?.addEventListener('click', () => { sampleCheckboxes.forEach(cb => cb.checked = false); updateSampleCount(); });
+        updateBulkPrintAnalysisOptions(bulkSamples, material);
     }, 50);
 }
 
@@ -2922,7 +3103,7 @@ function openAddMaterialToSpaceModal(buildingId, spaceId) {
                 unit = siteMaterial.unit || unit;
             }
         } else if (name) {
-            const customHazard = readMaterialHazardFromForm('space-custom');
+            const customHazard = readMaterialHazardsFromForm('space-custom');
             siteMaterial = findOrCreateSiteMaterial(name, unit, quantity, customHazard);
             if (siteMaterial) {
                 name = siteMaterial.name;

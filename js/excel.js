@@ -90,7 +90,7 @@ async function exportProjectToExcel(projectData) {
     if (projectData.materials && projectData.materials.length > 0) {
       const materialsListData = [['Material ID', 'Material Name', 'Total Quantity', 'Unit', 'Hazard']];
       projectData.materials.forEach(material => {
-        const hazard = (material.hazardType || 'asbestos').toLowerCase() === 'lead' ? 'Pb' : 'Asb';
+        const hazard = typeof window.hazardTypeLabel === 'function' ? window.hazardTypeLabel(material) : 'Asb';
         materialsListData.push([
           material.id || '',
           material.name || material.materialName || '',
@@ -500,14 +500,18 @@ function importProjectFromExcel(fileBuffer) {
       materials.slice(1).forEach(row => {
         if (row.length >= 2) {
           const hazardRaw = (row[4] || 'Asb').toString().trim().toLowerCase();
-          const hazardType = hazardRaw === 'pb' || hazardRaw === 'lead' ? 'lead' : 'asbestos';
+          const hazardTypes = [];
+          if (/asb|asbestos/.test(hazardRaw) || (!/pb|lead/.test(hazardRaw) && !/both|\+/.test(hazardRaw))) hazardTypes.push('asbestos');
+          if (/pb|lead/.test(hazardRaw) || /both|\+/.test(hazardRaw)) hazardTypes.push('lead');
+          const uniqueTypes = [...new Set(hazardTypes.length ? hazardTypes : ['asbestos'])];
           projectData.materials.push({
             id: row[0] || _genId('mat'),
             name: row[1] || '',
             materialName: row[1] || '',
             totalQuantity: parseFloat(row[2]) || 0,
             unit: importUnit(row[3]),
-            hazardType
+            hazardTypes: uniqueTypes,
+            hazardType: uniqueTypes.length > 1 ? 'both' : uniqueTypes[0]
           });
         }
       });
@@ -702,7 +706,13 @@ function importProjectFromExcel(fileBuffer) {
     projectData.bulkSamples = projectData.bulkSamples || [];
     projectData.wipeSamples = projectData.wipeSamples || [];
     (projectData.materials || []).forEach(m => {
-      if (!m.hazardType) m.hazardType = 'asbestos';
+      (projectData.materials || []).forEach(m => {
+        if (!Array.isArray(m.hazardTypes) || !m.hazardTypes.length) {
+          const legacy = String(m.hazardType || 'asbestos').toLowerCase();
+          m.hazardTypes = legacy === 'both' ? ['asbestos', 'lead'] : [legacy === 'lead' || legacy === 'pb' ? 'lead' : 'asbestos'];
+        }
+        m.hazardType = m.hazardTypes.length > 1 ? 'both' : m.hazardTypes[0];
+      });
     });
     return _finalizeImportedProject(projectData, workbook);
   } catch (error) {

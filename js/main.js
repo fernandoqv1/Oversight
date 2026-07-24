@@ -145,7 +145,7 @@ const INDEX_KEY = 'oversight_project_index';
 // version to the new one. Migrations MUST be additive — never delete
 // inspector data; fall back to safe defaults if a field is missing.
 // =====================================================================
-const DATA_SCHEMA_VERSION = 2;
+const DATA_SCHEMA_VERSION = 3;
 const SCHEMA_VERSION_KEY = 'oversight_data_schema_version';
 
 const PROJECT_MIGRATIONS = {
@@ -167,6 +167,28 @@ const PROJECT_MIGRATIONS = {
                 leadMedExpiration: worker.leadMedExpiration || '',
                 respiratorTypes: Array.isArray(worker.respiratorTypes) ? worker.respiratorTypes : []
             };
+        });
+        return p;
+    },
+    // 2 -> 3: Materials can list both asbestos and lead hazards; bulk samples store
+    // per-sample hazardType for analysis routing.
+    3: (p) => {
+        (p.materials || []).forEach(m => {
+            if (!Array.isArray(m.hazardTypes) || !m.hazardTypes.length) {
+                const legacy = String(m.hazardType || 'asbestos').toLowerCase();
+                if (legacy === 'both') m.hazardTypes = ['asbestos', 'lead'];
+                else m.hazardTypes = [legacy === 'lead' || legacy === 'pb' ? 'lead' : 'asbestos'];
+            }
+            m.hazardType = m.hazardTypes.length > 1 ? 'both' : m.hazardTypes[0];
+        });
+        (p.bulkSamples || []).forEach(s => {
+            if (!s.hazardType && s.materialId) {
+                const mat = (p.materials || []).find(x => x.id === s.materialId);
+                const types = Array.isArray(mat?.hazardTypes) && mat.hazardTypes.length
+                    ? mat.hazardTypes
+                    : [String(mat?.hazardType || 'asbestos').toLowerCase() === 'lead' ? 'lead' : 'asbestos'];
+                if (types.length === 1) s.hazardType = types[0];
+            }
         });
         return p;
     },
@@ -199,7 +221,12 @@ function migrateProject(project) {
     if (!Array.isArray(project.workerRoster)) project.workerRoster = [];
     if (!Array.isArray(project.documents)) project.documents = [];
     (project.materials || []).forEach(m => {
-        if (!m.hazardType) m.hazardType = 'asbestos';
+        if (!Array.isArray(m.hazardTypes) || !m.hazardTypes.length) {
+            const legacy = String(m.hazardType || 'asbestos').toLowerCase();
+            if (legacy === 'both') m.hazardTypes = ['asbestos', 'lead'];
+            else m.hazardTypes = [legacy === 'lead' || legacy === 'pb' ? 'lead' : 'asbestos'];
+        }
+        m.hazardType = m.hazardTypes.length > 1 ? 'both' : m.hazardTypes[0];
     });
     (project.airSamples || []).forEach(s => {
         if (String(s.type || '').toLowerCase() === 'lead') {
