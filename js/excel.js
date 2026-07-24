@@ -706,13 +706,11 @@ function importProjectFromExcel(fileBuffer) {
     projectData.bulkSamples = projectData.bulkSamples || [];
     projectData.wipeSamples = projectData.wipeSamples || [];
     (projectData.materials || []).forEach(m => {
-      (projectData.materials || []).forEach(m => {
-        if (!Array.isArray(m.hazardTypes) || !m.hazardTypes.length) {
-          const legacy = String(m.hazardType || 'asbestos').toLowerCase();
-          m.hazardTypes = legacy === 'both' ? ['asbestos', 'lead'] : [legacy === 'lead' || legacy === 'pb' ? 'lead' : 'asbestos'];
-        }
-        m.hazardType = m.hazardTypes.length > 1 ? 'both' : m.hazardTypes[0];
-      });
+      if (!Array.isArray(m.hazardTypes) || !m.hazardTypes.length) {
+        const legacy = String(m.hazardType || 'asbestos').toLowerCase();
+        m.hazardTypes = legacy === 'both' ? ['asbestos', 'lead'] : [legacy === 'lead' || legacy === 'pb' ? 'lead' : 'asbestos'];
+      }
+      m.hazardType = m.hazardTypes.length > 1 ? 'both' : m.hazardTypes[0];
     });
     return _finalizeImportedProject(projectData, workbook);
   } catch (error) {

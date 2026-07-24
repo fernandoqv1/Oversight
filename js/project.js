@@ -1168,10 +1168,23 @@ function applyWorkerRosterExpiredRed(zip, rosterRows) {
 }
 
 const LEAD_ANALYSIS_OPTIONS = [
-    'Lead by NIOSH 7300 (ICP)',
-    'Lead by NIOSH 7303 (ICP-MS)',
-    'Lead by NIOSH 7082 (Flame AAS)'
+    'Flame AA',
+    'ICP',
+    'ICP M/S'
 ];
+
+const LEAD_ANALYSIS_ALIASES = {
+    'Lead by NIOSH 7300 (ICP)': 'ICP',
+    'Lead by NIOSH 7303 (ICP-MS)': 'ICP M/S',
+    'Lead by NIOSH 7082 (Flame AAS)': 'Flame AA',
+    'Lead by Flame AAS NIOSH 7082': 'Flame AA'
+};
+
+function normalizeLeadAnalysisType(value) {
+    const raw = String(value || '').trim();
+    if (LEAD_ANALYSIS_ALIASES[raw]) return LEAD_ANALYSIS_ALIASES[raw];
+    return LEAD_ANALYSIS_OPTIONS.includes(raw) ? raw : LEAD_ANALYSIS_OPTIONS[0];
+}
 
 const ASBESTOS_BULK_ANALYSIS_OPTIONS = [
     'PLM - Standard',
@@ -1298,7 +1311,7 @@ function buildSampleHazardSelectorHtml(idPrefix, allowedTypes, selected = '') {
         <select id="${idPrefix}-hazard" class="w-full p-3 border rounded-lg bg-white">
             ${!defaultVal ? '<option value="" selected>— Select Asbestos or Lead —</option>' : ''}
             ${types.includes('asbestos') ? `<option value="asbestos" ${defaultVal === 'asbestos' ? 'selected' : ''}>Asbestos (PLM / PCM / TEM)</option>` : ''}
-            ${types.includes('lead') ? `<option value="lead" ${defaultVal === 'lead' ? 'selected' : ''}>Lead (NIOSH 7300 / 7303 / 7082)</option>` : ''}
+            ${types.includes('lead') ? `<option value="lead" ${defaultVal === 'lead' ? 'selected' : ''}>Lead (Flame AA / ICP / ICP M/S)</option>` : ''}
         </select>
     </div>`;
 }
@@ -1333,9 +1346,9 @@ function updateBulkPrintAnalysisOptions(samples, material, selectedValue = '') {
     }
     select.disabled = false;
     select.innerHTML = buildBulkAnalysisSelectHtml(samples, material, prev);
-    if (note) {
+        if (note) {
         note.textContent = isLeadHazard(hazards[0])
-            ? 'Lead samples use NIOSH lead analysis methods.'
+            ? 'Lead samples: choose Flame AA, ICP, or ICP M/S.'
             : 'Asbestos samples use PLM / PCM / TEM analysis methods.';
     }
 }
@@ -1515,9 +1528,7 @@ function getWipeContextFromContainment(containment) {
 }
 
 function buildLeadAnalysisOptionsHtml(selectedValue) {
-    const normalized = selectedValue === 'Lead by Flame AAS NIOSH 7082'
-        ? 'Lead by NIOSH 7082 (Flame AAS)'
-        : selectedValue;
+    const normalized = normalizeLeadAnalysisType(selectedValue);
     return LEAD_ANALYSIS_OPTIONS.map(opt =>
         `<option value="${escapeHtml(opt)}"${opt === normalized ? ' selected' : ''}>${escapeHtml(opt)}</option>`
     ).join('');
