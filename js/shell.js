@@ -2159,12 +2159,19 @@
   }
 
   // Public API for legacy renderers to call after a save
+  function syncProjTabsHeight() {
+    const tabs = document.getElementById('proj-tabs');
+    if (!tabs) return;
+    document.documentElement.style.setProperty('--proj-tabs-height', `${tabs.offsetHeight}px`);
+  }
+
   function renderAll() {
     const p = getCurrentProject();
     if (!p) return;
     renderProjectHead(p);
     switchTab(currentTab);
     renderSidebarProjects(p.id);
+    syncProjTabsHeight();
   }
 
   function initProjectPage() {
@@ -2184,6 +2191,12 @@
     if (tab) currentTab = tab;
     document.querySelectorAll('.proj-tab[data-tab]').forEach(b => {
       b.addEventListener('click', () => switchTab(b.dataset.tab));
+    });
+    syncProjTabsHeight();
+    let tabsResizeTimer;
+    window.addEventListener('resize', () => {
+      clearTimeout(tabsResizeTimer);
+      tabsResizeTimer = setTimeout(syncProjTabsHeight, 100);
     });
     document.getElementById('header-edit-project-btn')?.addEventListener('click', () => {
       if (typeof window.openEditProjectModal === 'function') window.openEditProjectModal();
