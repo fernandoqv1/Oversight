@@ -54,8 +54,8 @@
   --shadow:0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
   --shadow-lg:0 12px 32px -8px rgba(0,0,0,0.6);
 }
-[data-density="compact"] { --tab-pad:8px 12px; }
-[data-density="comfortable"], :root { --tab-pad:10px 14px; --proj-tabs-height:44px; }
+[data-density="compact"] { --tab-pad:10px 14px; }
+[data-density="comfortable"], :root { --tab-pad:12px 16px; --proj-tabs-height:48px; }
 
 *,*::before,*::after { box-sizing:border-box; }
 html, body { margin:0; padding:0; height:100%; }
@@ -187,8 +187,8 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
 .kpi-val { font-size:13px; font-weight:600; }
 
 /* TABS */
-.proj-tabs { display:flex; gap:2px; padding:0 24px; border-bottom:1px solid var(--border); background:var(--surface); overflow-x:auto; position:sticky; top:0; z-index:20; }
-.proj-tab { display:flex; align-items:center; gap:8px; padding:var(--tab-pad); font-size:13px; color:var(--text-muted); border-bottom:2px solid transparent; margin-bottom:-1px; white-space:nowrap; font-weight:500; }
+.proj-tabs { display:flex; flex-wrap:wrap; align-items:stretch; gap:2px 6px; padding:6px 24px 0; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:20; }
+.proj-tab { display:flex; align-items:center; gap:8px; padding:var(--tab-pad); font-size:13px; color:var(--text-muted); border-bottom:2px solid transparent; margin-bottom:-1px; white-space:nowrap; font-weight:500; flex-shrink:0; }
 .proj-tab:hover { color:var(--text); }
 .proj-tab[data-active="true"] { color:var(--text); border-bottom-color:var(--accent); }
 .tab-count { font-size:11px; padding:1px 6px; border-radius:999px; background:var(--bg-sunken); color:var(--text-muted); font-family:ui-monospace,'IBM Plex Mono',monospace; }
