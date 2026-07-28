@@ -57,6 +57,9 @@ const ACTIVE_CONTAINMENT_STAGES = [
     STAGE_CONTAINMENT_CLEARANCE
 ];
 
+const MODAL_ICON_PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+const MODAL_ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
+
 const respiratorOptions = ['Half-Face', 'Full-Face', 'PAPR'];
 
 function containmentNameHasContainmentWord(name) {
@@ -2981,13 +2984,23 @@ function deleteMaterialFromSpace(buildingId, spaceId, materialId) {
  * Opens a Visual Inspection Modal for Pre-Start or Final inspections
  * @param {string} inspectionType - 'Pre-Start' or 'Final'
  * @param {string} containmentName - Name of the containment
- * @returns {Promise<{passed: boolean, comments: string, inspectorName: string, regulatedArea?: boolean}|null>}
+ * @param {object|null} existingInspection - When set, opens in edit mode with fields pre-filled
+ * @returns {Promise<{passed: boolean, comments: string, inspectorName: string, regulatedArea?: boolean, date?: string}|null>}
  */
-function openVisualInspectionModal(inspectionType, containmentName) {
+function openVisualInspectionModal(inspectionType, containmentName, existingInspection = null) {
     const isPreStartInspection = inspectionType === 'Pre-Start';
-    const inspectionTitle = inspectionType === 'Pre-Start'
-        ? 'Pre-Start Visual Inspection'
-        : 'Final Visual Inspection';
+    const isEdit = !!existingInspection;
+    const inspectionTitle = isEdit
+        ? `Edit ${inspectionType} Visual Inspection`
+        : (inspectionType === 'Pre-Start'
+            ? 'Pre-Start Visual Inspection'
+            : 'Final Visual Inspection');
+    const existingFailed = existingInspection && existingInspection.passed === false;
+    const existingDate = existingInspection?.date || (typeof getTodayLocal === 'function' ? getTodayLocal() : '');
+    const existingInspector = existingInspection?.inspectorName
+        || ((typeof getInspectorProfile === 'function' ? getInspectorProfile() : {}).name || '');
+    const existingComments = existingInspection?.comments || '';
+    const existingRegulated = !!existingInspection?.regulatedArea;
 
     return new Promise((resolve) => {
         closeAllModals();
@@ -3001,17 +3014,17 @@ function openVisualInspectionModal(inspectionType, containmentName) {
                     <p class="text-sm text-gray-600" style="margin-top:0;">Containment: ${escapeHtml(getContainmentDisplayName(containmentName || 'Containment'))}</p>
                     <div>
                         <label for="visual-inspection-inspector" class="block text-sm font-medium text-gray-700 mb-1">Inspector Name</label>
-                        <input type="text" id="visual-inspection-inspector" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspector name" value="${escapeHtml((typeof getInspectorProfile === 'function' ? getInspectorProfile() : {}).name || '')}" required>
+                        <input type="text" id="visual-inspection-inspector" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspector name" value="${escapeHtml(existingInspector)}" required>
                     </div>
                     <div>
                         <label for="visual-inspection-date" class="block text-sm font-medium text-gray-700 mb-1">Inspection Date</label>
-                        <input type="date" id="visual-inspection-date" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" value="${typeof getTodayLocal === 'function' ? getTodayLocal() : ''}">
+                        <input type="date" id="visual-inspection-date" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" value="${escapeHtml(existingDate)}">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Findings</label>
                         <div class="space-y-2 mt-2">
-                            ${buildModalRadioRow('visual-inspection-pass', 'visual-inspection-finding', 'pass', '<span class="text-sm font-medium text-green-700">Pass</span>')}
-                            ${buildModalRadioRow('visual-inspection-fail', 'visual-inspection-finding', 'fail', '<span class="text-sm font-medium text-red-700">Fail</span>')}
+                            ${buildModalRadioRow('visual-inspection-pass', 'visual-inspection-finding', 'pass', '<span class="text-sm font-medium text-green-700">Pass</span>', !existingFailed)}
+                            ${buildModalRadioRow('visual-inspection-fail', 'visual-inspection-finding', 'fail', '<span class="text-sm font-medium text-red-700">Fail</span>', existingFailed)}
                         </div>
                     </div>
                     ${isPreStartInspection ? `
@@ -3019,19 +3032,19 @@ function openVisualInspectionModal(inspectionType, containmentName) {
                         ${buildModalCheckboxRow(
                             'visual-inspection-regulated-area',
                             '',
-                            '',
+                            existingRegulated ? 'checked' : '',
                             '<span class="modal-check-title">Regulated Area</span><span class="modal-check-subtitle">Check this if the containment is a regulated area. Negative pressure readings will not be required for daily logs, and clearance air samples will not be automatically created.</span>'
                         )}
                     </div>
                     ` : ''}
                     <div>
                         <label for="visual-inspection-comments" class="block text-sm font-medium text-gray-700 mb-1">Comments</label>
-                        <textarea id="visual-inspection-comments" rows="4" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspection comments..."></textarea>
+                        <textarea id="visual-inspection-comments" rows="4" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500" placeholder="Enter inspection comments...">${escapeHtml(existingComments)}</textarea>
                     </div>
                 </form>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary modal-cancel-btn" id="visual-inspection-cancel-btn">Cancel</button>
-                    <button type="submit" form="visual-inspection-form" class="btn btn-primary modal-save-btn">Save Inspection</button>
+                    <button type="submit" form="visual-inspection-form" class="btn btn-primary modal-save-btn">${isEdit ? 'Save Changes' : 'Save Inspection'}</button>
                 </div>
             </div>
         `;
@@ -3488,7 +3501,7 @@ function openAddContainmentModal() {
     ).join('');
     
     const modalContent = `
-        <div class="space-y-4">
+        <div class="space-y-4${hasInspections ? ' containment-edit-body--wide' : ''}">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
                 <div class="containment-name-wrap">
@@ -3643,6 +3656,147 @@ function openAddContainmentModal() {
     }, 100);
 }
 
+// ============================================
+// CONTAINMENT VISUAL INSPECTION HELPERS
+// ============================================
+
+function getStageAfterPassedInspection(inspectionType) {
+    if (inspectionType === 'Pre-Start') return STAGE_ACTIVE_ABATEMENT;
+    if (inspectionType === 'Final') return STAGE_CONTAINMENT_CLEARANCE;
+    return null;
+}
+
+function getStageBeforePassedInspection(inspectionType) {
+    if (inspectionType === 'Pre-Start') return STAGE_CONTAINMENT_PREPARATION;
+    if (inspectionType === 'Final') return STAGE_ACTIVE_ABATEMENT;
+    return null;
+}
+
+function formatVisualInspectionDateDisplay(dateStr) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr + (String(dateStr).includes('T') ? '' : 'T00:00:00'));
+    if (Number.isNaN(d.getTime())) return dateStr;
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function buildContainmentVisualInspectionsHtml(visualInspections) {
+    if (!visualInspections || visualInspections.length === 0) return '';
+    return `<div class="containment-vi-history">
+            <label class="block font-medium text-gray-500 uppercase tracking-wide containment-vi-history-label">Visual Inspections</label>
+            <div class="containment-vi-grid">
+            ${visualInspections.map((vi, idx) => {
+                const passClass = vi.passed ? 'containment-vi-card--pass' : 'containment-vi-card--fail';
+                const passText = vi.passed ? 'Pass' : 'Fail';
+                const dateLabel = formatVisualInspectionDateDisplay(vi.date || '');
+                return `<div class="containment-vi-card ${passClass}">
+                    <div class="containment-vi-card-head">
+                        <div class="containment-vi-card-title">
+                            <span class="font-medium">${escapeHtml(vi.type || '')} Visual</span>
+                            <span class="containment-vi-card-result">${passText}</span>
+                        </div>
+                        <div class="containment-vi-card-actions">
+                            <button type="button" class="btn-ghost small containment-vi-edit-btn" data-vi-edit data-vi-index="${idx}" title="Edit visual inspection">${MODAL_ICON_PENCIL}<span>Edit</span></button>
+                            <button type="button" class="btn-ghost small danger containment-vi-delete-btn" data-vi-delete data-vi-index="${idx}" title="Delete visual inspection">${MODAL_ICON_TRASH}<span>Delete</span></button>
+                        </div>
+                    </div>
+                    <div class="containment-vi-card-meta">
+                        ${dateLabel ? `<span>${escapeHtml(dateLabel)}</span>` : ''}
+                        ${vi.inspectorName ? `<span>${escapeHtml(vi.inspectorName)}</span>` : ''}
+                    </div>
+                    ${vi.comments ? `<p class="containment-vi-card-comments">${escapeHtml(vi.comments)}</p>` : ''}
+                </div>`;
+            }).join('')}
+            </div>
+        </div>`;
+}
+
+function revertContainmentStageAfterInspectionDelete(containment, removedInspection) {
+    if (!containment || !removedInspection?.passed) return false;
+    const afterStage = getStageAfterPassedInspection(removedInspection.type);
+    const beforeStage = getStageBeforePassedInspection(removedInspection.type);
+    if (!afterStage || !beforeStage) return false;
+
+    const current = normalizeStage(containment.stage);
+    const currentIdx = ALL_STAGES.indexOf(current);
+    const afterIdx = ALL_STAGES.indexOf(afterStage);
+    if (currentIdx < afterIdx) return false;
+
+    containment.stage = beforeStage;
+    const hist = [...(containment.stageHistory || [])];
+    for (let i = hist.length - 1; i >= 0; i--) {
+        if (normalizeStage(hist[i].stage) === afterStage) {
+            hist.splice(i, 1);
+            break;
+        }
+    }
+    containment.stageHistory = hist;
+    return true;
+}
+
+function wireContainmentVisualInspectionActions(containmentId) {
+    document.querySelectorAll('[data-vi-edit]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const idx = parseInt(btn.dataset.viIndex, 10);
+            const containment = currentProject.containments?.find(c => c.id === containmentId);
+            const vi = containment?.visualInspections?.[idx];
+            if (!containment || !vi) return;
+
+            const result = await openVisualInspectionModal(vi.type, containment.name, vi);
+            if (!result) {
+                openEditContainmentModal(containmentId);
+                return;
+            }
+
+            containment.visualInspections[idx] = {
+                ...vi,
+                passed: result.passed,
+                comments: result.comments || '',
+                inspectorName: result.inspectorName || '',
+                date: result.date || vi.date || getTodayLocal()
+            };
+            if (vi.type === 'Pre-Start' && result.regulatedArea !== undefined) {
+                containment.regulatedArea = !!result.regulatedArea;
+            }
+            containment.updatedAt = Date.now();
+            saveCurrentProject();
+            renderProject();
+            openEditContainmentModal(containmentId);
+        });
+    });
+
+    document.querySelectorAll('[data-vi-delete]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const idx = parseInt(btn.dataset.viIndex, 10);
+            const containment = currentProject.containments?.find(c => c.id === containmentId);
+            const removed = containment?.visualInspections?.[idx];
+            if (!containment || !removed) return;
+
+            const label = `${removed.type || 'Visual'} inspection`;
+            if (!confirm(`Delete this ${label}? The containment stage will be reverted if this inspection advanced it.`)) {
+                return;
+            }
+
+            const inspections = [...(containment.visualInspections || [])];
+            inspections.splice(idx, 1);
+            containment.visualInspections = inspections;
+            const reverted = revertContainmentStageAfterInspectionDelete(containment, removed);
+            containment.updatedAt = Date.now();
+            saveCurrentProject();
+            renderProject();
+            if (reverted) {
+                showNotification(`Visual inspection deleted. Stage reverted to ${containment.stage}.`, false);
+            } else {
+                showNotification('Visual inspection deleted.', false);
+            }
+            openEditContainmentModal(containmentId);
+        });
+    });
+}
+
 function openEditContainmentModal(containmentId) {
     const containment = currentProject.containments?.find(c => c.id === containmentId);
     if (!containment) return;
@@ -3679,29 +3833,11 @@ function openEditContainmentModal(containmentId) {
             )}
         </div>`;
     
-    // Show visual inspection history with editable dates
-    const inspectionsHtml = (containment.visualInspections || []).length > 0
-        ? `<div class="containment-vi-history" style="margin-top:0.5rem;">
-            <label class="block font-medium text-gray-500 uppercase tracking-wide" style="font-size:10px;margin-bottom:0.25rem;">Visual Inspections</label>
-            <div style="display:flex;flex-direction:column;gap:0.25rem;">
-            ${(containment.visualInspections || []).map((vi, idx) => {
-                const passClass = vi.passed ? 'text-green-700 bg-green-50 border-green-200' : 'text-red-700 bg-red-50 border-red-200';
-                const borderColor = vi.passed ? '#bbf7d0' : '#fecaca';
-                const passText = vi.passed ? 'Pass' : 'Fail';
-                return `<div class="border rounded ${passClass}" style="font-size:0.6875rem;line-height:1.35;padding:0.3rem 0.45rem;">
-                    <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;flex-wrap:wrap;">
-                        <span><span class="font-medium">${escapeHtml(vi.type || '')} Visual:</span> ${passText}${vi.inspectorName ? ` — ${escapeHtml(vi.inspectorName)}` : ''}</span>
-                        <input type="date" id="vi-date-${idx}" value="${escapeHtml(vi.date || '')}" style="font-size:0.6875rem;padding:0.1rem 0.3rem;border:1px solid ${borderColor};border-radius:4px;background:transparent;" title="Edit inspection date">
-                    </div>
-                    ${vi.comments ? `<span class="italic" style="font-size:0.625rem;line-height:1.3;">${escapeHtml(vi.comments)}</span>` : ''}
-                </div>`;
-            }).join('')}
-            </div>
-        </div>`
-        : '';
+    const inspectionsHtml = buildContainmentVisualInspectionsHtml(containment.visualInspections);
+    const hasInspections = (containment.visualInspections || []).length > 0;
     
     const modalContent = `
-        <div class="space-y-4">
+        <div class="space-y-4${hasInspections ? ' containment-edit-body--wide' : ''}">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
                 <div class="containment-name-wrap">
@@ -3740,8 +3876,6 @@ function openEditContainmentModal(containmentId) {
     
     // We use createModal but override the save to handle async visual inspection flow
     // createModal's onSave returning false keeps modal open
-    let modalElement = null;
-    
     const modal = createModal('Edit Containment', modalContent, async () => {
         // This save callback handles the complex async stage-change + inspection flow
         const name = document.getElementById('edit-containment-name')?.value.trim();
@@ -3858,12 +3992,7 @@ function openEditContainmentModal(containmentId) {
             });
         }
         
-        // Apply any date edits made inline in the history rows
         let visualInspections = containment.visualInspections ? [...containment.visualInspections] : [];
-        visualInspections = visualInspections.map((vi, idx) => {
-            const dateInput = document.getElementById(`vi-date-${idx}`);
-            return dateInput && dateInput.value ? { ...vi, date: dateInput.value } : vi;
-        });
 
         // Save visual inspection if inspection was required and passed
         if (requiresInspection && visualInspectionData && visualInspectionData.passed) {
@@ -3934,6 +4063,12 @@ function openEditContainmentModal(containmentId) {
             // Return true so createModal closes the modal
         }
     });
+    
+    const modalContentEl = modal.querySelector('.modal-content');
+    if (hasInspections && modalContentEl) {
+        modalContentEl.classList.add('containment-edit-modal-wide');
+        modalContentEl.style.maxWidth = 'min(920px, calc(100vw - 32px))';
+    }
     
     // Helper to show status messages inside the modal
     function showEditContainmentStatus(message, isError) {
@@ -4020,6 +4155,7 @@ function openEditContainmentModal(containmentId) {
                 applyLastBuildingSelection(buildingSelect);
             }
         }
+        wireContainmentVisualInspectionActions(containmentId);
     }, 100);
 }
 
