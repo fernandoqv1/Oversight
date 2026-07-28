@@ -800,6 +800,53 @@ button.pill-num.pill-num-link:focus-visible { outline:2px solid var(--accent); o
   }
 }
 
+.modal-content.containment-edit-modal-wide {
+  max-width: min(920px, calc(100vw - 32px)) !important;
+}
+.containment-vi-history { margin-top: 0.5rem; }
+.containment-vi-history-label { font-size: 10px; margin-bottom: 0.35rem; }
+.containment-vi-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.containment-vi-card {
+  flex: 1 1 260px;
+  min-width: 240px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 0.65rem;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+.containment-vi-card--pass { background: #f0fdf4; border-color: #bbf7d0; }
+.containment-vi-card--fail { background: #fef2f2; border-color: #fecaca; }
+.containment-vi-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
+.containment-vi-card-title { display: flex; flex-direction: column; gap: 0.15rem; }
+.containment-vi-card-result { font-size: 0.6875rem; font-weight: 600; }
+.containment-vi-card--pass .containment-vi-card-result { color: #15803d; }
+.containment-vi-card--fail .containment-vi-card-result { color: #b91c1c; }
+.containment-vi-card-actions { display: flex; gap: 0.25rem; flex-shrink: 0; }
+.containment-vi-edit-btn,
+.containment-vi-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px !important;
+  min-height: auto !important;
+  font-size: 11px !important;
+}
+.containment-vi-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.6rem;
+  margin-top: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+}
+.containment-vi-card-comments {
+  margin: 0.35rem 0 0;
+  font-size: 0.6875rem;
+  color: var(--text-2);
+  font-style: italic;
+}
+
 /* NOTIFICATIONS */
 #notification-area { position:fixed; top:16px; right:16px; z-index:10010; display:flex; flex-direction:column; gap:8px; max-width:360px; }
 #notification-area > div { padding:10px 14px; border-radius:8px; box-shadow:var(--shadow-lg); color:#fff; font-size:13px; font-weight:500; }
