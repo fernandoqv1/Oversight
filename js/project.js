@@ -3693,7 +3693,7 @@ function openAddContainmentModal() {
     ).join('');
     
     const modalContent = `
-        <div class="space-y-4${hasInspections ? ' containment-edit-body--wide' : ''}">
+        <div class="space-y-4">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Containment Name</label>
                 <div class="containment-name-wrap">
