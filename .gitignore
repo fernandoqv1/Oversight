@@ -20,3 +20,11 @@ templates/~$*.docx
 oversight_example/
 backup/
 templates/_*
+
+# Xcode / Swift
+ios/Oversight/.build/
+ios/Oversight/DerivedData/
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+ios/**/.swiftpm/
+

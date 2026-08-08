@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oversight iOS — Prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="oversight-ios.css">
+<style>
+  html, body { margin:0; height:100%; }
+  body { background:#1a1a1c; font-family:'Inter',-apple-system,system-ui,sans-serif; overflow:hidden; }
+  .stage { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; }
+  .pbar { position:fixed; top:0; left:0; right:0; z-index:50; display:flex; align-items:center; gap:14px; padding:12px 18px; color:#e9e7df; }
+  .pbar .brand { display:flex; align-items:center; gap:9px; font-weight:600; font-size:14px; letter-spacing:-0.01em; }
+  .pbar .bmark { width:24px; height:24px; border-radius:6px; background:linear-gradient(135deg,#015dab,#013a6b); display:grid; place-items:center; }
+  .pbar .spacer { flex:1; }
+  .pbar .ctl { display:flex; align-items:center; gap:6px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); border-radius:9px; padding:3px; }
+  .pbar .ctl button { padding:5px 11px; border-radius:6px; font-size:12.5px; font-weight:600; color:#a9a69c; background:none; border:none; cursor:pointer; }
+  .pbar .ctl button[data-active="true"] { background:rgba(255,255,255,0.12); color:#fff; }
+  .pbar .lbl { font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:#6f6c64; font-weight:600; }
+  .pbar .sw { width:22px; height:22px; border-radius:6px; border:2px solid transparent; cursor:pointer; padding:0; }
+  .pbar .sw[data-active="true"] { border-color:#fff; }
+  .device-wrap { flex:1; display:flex; align-items:center; justify-content:center; width:100%; min-height:0; }
+  .device-scale { transform-origin:center center; }
+  .hint { position:fixed; bottom:12px; left:0; right:0; text-align:center; color:#6f6c64; font-size:12px; pointer-events:none; padding:0 20px; }
+  .view-stack { position:relative; height:100%; }
+  .view-layer { position:absolute; inset:0; }
+  .slide-enter { animation:slideIn 300ms cubic-bezier(.32,.72,0,1); }
+  @keyframes slideIn { from { transform:translateX(100%); } to { transform:translateX(0); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="oversight-store.jsx"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="oversight-ui.jsx"></script>
+<script type="text/babel" src="oversight-sheets.jsx"></script>
+<script type="text/babel" src="oversight-screens.jsx"></script>
+<script type="text/babel" src="oversight-app.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+ReactDOM.createRoot(document.getElementById('root')).render(<OversightApp />);
+</script>
+</body>
+</html>

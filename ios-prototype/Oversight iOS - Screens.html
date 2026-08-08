@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oversight iOS — Screens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="oversight-ios.css">
+<style>
+  html, body { margin:0; }
+  body { background:#EAE8E2; font-family:'Inter',-apple-system,system-ui,sans-serif; color:#14130F; }
+  .page { max-width:1500px; margin:0 auto; padding:48px 40px 80px; }
+  .page-head { margin-bottom:8px; }
+  .page-kicker { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:600; color:#8A887E; letter-spacing:0.02em; }
+  .page-kicker .bm { width:26px; height:26px; border-radius:7px; background:linear-gradient(135deg,#015dab,#013a6b); display:grid; place-items:center; }
+  .page-title { font-size:30px; font-weight:700; letter-spacing:-0.02em; margin:14px 0 6px; }
+  .page-sub { font-size:15px; color:#6c6a62; max-width:680px; line-height:1.5; margin:0; }
+  .legend { display:flex; flex-wrap:wrap; gap:8px 10px; margin-top:18px; }
+  .legend .chip { display:inline-flex; align-items:center; gap:7px; font-size:12px; font-weight:600; padding:5px 11px; border-radius:999px; background:#fff; border:1px solid #E1DED6; color:#4A4943; }
+  .legend .d { width:8px; height:8px; border-radius:50%; }
+  section.grp { margin-top:48px; }
+  .grp-head { display:flex; align-items:baseline; gap:12px; margin-bottom:22px; padding-bottom:12px; border-bottom:1px solid #D9D6CE; }
+  .grp-num { font-family:'IBM Plex Mono',monospace; font-size:13px; color:#015dab; font-weight:600; }
+  .grp-title { font-size:19px; font-weight:700; letter-spacing:-0.01em; }
+  .grp-sub { font-size:14px; color:#7c7a72; }
+  .frames { display:flex; flex-wrap:wrap; gap:40px 48px; }
+  .frame-card { display:flex; flex-direction:column; gap:14px; }
+  .frame-label { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color:#4A4943; }
+  .frame-label .pill { font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:600; padding:2px 8px; border-radius:6px; background:#fff; border:1px solid #E1DED6; color:#8A887E; }
+  .frame-label .pill.dark { background:#1B1A17; color:#E9E7DF; border-color:#2F2D28; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-head">
+    <div class="page-kicker"><span class="bm"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>OVERSIGHT · AsbTrack</div>
+    <h1 class="page-title">Oversight for iOS — screen previews</h1>
+    <p class="page-sub">The desktop oversight app adapted to iPhone with native patterns — large titles, grouped inset cards, a bottom tab bar and bottom sheets — while keeping the exact Oversight design system: accent blue, warm surfaces, Inter type, the stage &amp; status badges and monospace numerals. Light and dark shown for each screen.</p>
+    <div class="legend">
+      <span class="chip"><span class="d" style="background:#1E3A8A"></span>Containment Prep</span>
+      <span class="chip"><span class="d" style="background:#92400E"></span>Active Abatement</span>
+      <span class="chip"><span class="d" style="background:#5B21B6"></span>Clearance</span>
+      <span class="chip"><span class="d" style="background:#9A3412"></span>Teardown</span>
+      <span class="chip"><span class="d" style="background:#14532D"></span>Completed</span>
+    </div>
+  </div>
+
+  <div id="root"></div>
+</div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="oversight-store.jsx"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="oversight-ui.jsx"></script>
+<script type="text/babel" src="oversight-screens.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+const SEED = window.OvsStore.seed();
+const noop = () => {};
+const mkApp = (extra) => ({
+  state: SEED, tab: 'today', route: null,
+  setTab: noop, open: noop, back: noop, sheet: noop, menu: noop, toast: noop,
+  actions: { setStage: noop, generateDoc: noop, resetDemo: noop, toggleComplete: noop, addSample: noop },
+  ...extra,
+});
+
+function Phone({ screen, dark }) {
+  return (
+    <IOSDevice dark={dark}>
+      <div className="ovs" data-theme={dark ? 'dark' : 'light'} style={{ height: '100%', position: 'relative' }}>
+        {screen}
+      </div>
+    </IOSDevice>
+  );
+}
+
+function FrameCard({ dark, screen }) {
+  return (
+    <div className="frame-card">
+      <div className="frame-label"><span className={'pill' + (dark ? ' dark' : '')}>{dark ? 'Dark' : 'Light'}</span></div>
+      <Phone dark={dark} screen={screen} />
+    </div>
+  );
+}
+
+function Group({ num, title, sub, render }) {
+  return (
+    <section className="grp">
+      <div className="grp-head"><span className="grp-num">{num}</span><span className="grp-title">{title}</span><span className="grp-sub">{sub}</span></div>
+      <div className="frames">
+        <FrameCard dark={false} screen={render()} />
+        <FrameCard dark={true} screen={render()} />
+      </div>
+    </section>
+  );
+}
+
+function App() {
+  return (
+    <React.Fragment>
+      <Group num="01" title="Today" sub="Field dashboard — attention, running air samples, snapshot, active projects"
+        render={() => <TodayScreen app={mkApp()} />} />
+      <Group num="02" title="All Projects" sub="Searchable, segmented list of job sites with stage + progress"
+        render={() => <ProjectsScreen app={mkApp({ tab: 'projects' })} />} />
+      <Group num="03" title="Project Workspace" sub="KPIs, containment lifecycle, section nav, recent activity"
+        render={() => <ProjectScreen app={mkApp({ tab: 'projects' })} project={SEED.projects[0]} />} />
+      <Group num="04" title="Air Samples" sub="Sub-screen — summary, filter, running vs. complete with flow/volume"
+        render={() => <SamplesScreen app={mkApp({ tab: 'projects' })} project={SEED.projects[0]} />} />
+      <Group num="05" title="Team" sub="Crew roster with certification expirations (expired flagged red)"
+        render={() => <TeamScreen app={mkApp({ tab: 'projects' })} project={SEED.projects[0]} />} />
+    </React.Fragment>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
