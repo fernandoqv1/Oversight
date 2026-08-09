@@ -406,9 +406,12 @@ function _splitSignatureDataUrl(value) {
  * @param {string} dataUrl
  * @param {number} maxW
  * @param {number} maxH
- * @returns {Promise<string>} data:image/png;base64,... or ''
+ * @param {{ mime?: 'image/png'|'image/jpeg', quality?: number }} [opts]
+ * @returns {Promise<string>} data:image/...;base64,... or ''
  */
-function compressSignatureForShare(dataUrl, maxW = 240, maxH = 80) {
+function compressSignatureForShare(dataUrl, maxW = 240, maxH = 80, opts = {}) {
+    const mime = opts.mime === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    const quality = typeof opts.quality === 'number' ? opts.quality : 0.55;
     return new Promise((resolve) => {
         if (!dataUrl || typeof dataUrl !== 'string') {
             resolve('');
@@ -426,9 +429,15 @@ function compressSignatureForShare(dataUrl, maxW = 240, maxH = 80) {
                 canvas.width = w;
                 canvas.height = h;
                 const ctx = canvas.getContext('2d');
-                ctx.clearRect(0, 0, w, h);
+                if (mime === 'image/jpeg') {
+                    // JPEG has no alpha — flatten onto white so ink stays visible.
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, w, h);
+                } else {
+                    ctx.clearRect(0, 0, w, h);
+                }
                 ctx.drawImage(img, 0, 0, w, h);
-                resolve(canvas.toDataURL('image/png'));
+                resolve(mime === 'image/jpeg' ? canvas.toDataURL('image/jpeg', quality) : canvas.toDataURL('image/png'));
             } catch (e) {
                 resolve('');
             }
@@ -479,40 +488,50 @@ async function buildInspectorProfileSharePayload(profile, options = {}) {
         ? options.signatureDataUrl
         : (profile?.signatureBase64 || '');
 
-    const sizes = [
-        [240, 80],
-        [200, 64],
-        [160, 48],
-        [120, 36],
-        [96, 28],
+    // Prefer PNG (keeps transparency for drawn ink); fall back to JPEG for bulky uploads.
+    const attempts = [
+        { maxW: 240, maxH: 80, mime: 'image/png' },
+        { maxW: 200, maxH: 64, mime: 'image/png' },
+        { maxW: 160, maxH: 48, mime: 'image/png' },
+        { maxW: 200, maxH: 64, mime: 'image/jpeg', quality: 0.55 },
+        { maxW: 160, maxH: 48, mime: 'image/jpeg', quality: 0.45 },
+        { maxW: 120, maxH: 36, mime: 'image/jpeg', quality: 0.4 },
+        { maxW: 96, maxH: 28, mime: 'image/jpeg', quality: 0.35 },
     ];
 
     let bestJson = JSON.stringify(base);
     let bestPayload = { ...base };
-    let signatureIncluded = false;
+    /** @type {'included'|'omitted'|'none'} */
+    let signatureStatus = 'none';
 
     if (sourceSig) {
-        for (const [maxW, maxH] of sizes) {
-            const compressed = await compressSignatureForShare(sourceSig, maxW, maxH);
+        signatureStatus = 'omitted';
+        for (const attempt of attempts) {
+            const compressed = await compressSignatureForShare(
+                sourceSig,
+                attempt.maxW,
+                attempt.maxH,
+                { mime: attempt.mime, quality: attempt.quality }
+            );
             const parts = _splitSignatureDataUrl(compressed);
             if (!parts.base64) continue;
             const candidate = {
                 ...base,
-                signatureMime: parts.mime || 'image/png',
+                signatureMime: parts.mime || attempt.mime || 'image/png',
                 signatureBase64: parts.base64,
             };
             const json = JSON.stringify(candidate);
             if (_utf8ByteLength(json) <= INSPECTOR_PROFILE_QR_MAX_BYTES) {
                 bestJson = json;
                 bestPayload = candidate;
-                signatureIncluded = true;
+                signatureStatus = 'included';
                 break;
             }
         }
     }
 
-    // Text-only fallback (signature omitted) — must still fit.
-    if (!signatureIncluded) {
+    // Text-only fallback when signature is absent or would not fit.
+    if (signatureStatus !== 'included') {
         bestPayload = { ...base, signatureBase64: '', signatureMime: 'image/png' };
         bestJson = JSON.stringify(bestPayload);
     }
@@ -528,7 +547,8 @@ async function buildInspectorProfileSharePayload(profile, options = {}) {
         payload: bestPayload,
         json: bestJson,
         byteLength,
-        signatureIncluded,
+        signatureIncluded: signatureStatus === 'included',
+        signatureStatus,
     };
 }
 
@@ -595,9 +615,11 @@ async function openInspectorProfileShareModal(profile) {
         img.height = 280;
         img.style.cssText = 'width:280px;height:280px;border-radius:0.5rem;display:block;';
         wrapEl.appendChild(img);
-        const sigNote = built.signatureIncluded
+        const sigNote = built.signatureStatus === 'included'
             ? 'Includes compressed signature.'
-            : 'Signature omitted (too large for one QR) — redraw it on the phone if needed.';
+            : built.signatureStatus === 'omitted'
+                ? 'Signature omitted (too large for one QR) — redraw it on the phone if needed.'
+                : 'No signature on profile.';
         metaEl.textContent = `${built.payload.name} · ${built.byteLength} bytes · ${sigNote}`;
     } catch (err) {
         if (statusEl) {

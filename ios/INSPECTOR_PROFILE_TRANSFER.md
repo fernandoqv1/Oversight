@@ -91,7 +91,8 @@ QR capacity is limited (~2,953 bytes at version 40, ECC `L`). A full-resolution
 signature PNG often will not fit, so the desktop encoder **must**:
 
 1. Rasterize the stored signature into a small canvas (max **240×80** CSS px).
-2. Export as PNG (transparent background, dark ink).
+2. Prefer PNG (transparent background, dark ink). If the PNG still exceeds the
+   QR byte budget, retry as JPEG on a white background at reduced quality.
 3. Strip any `data:image/...;base64,` prefix — only the raw base64 goes in
    `signatureBase64`.
 4. If `JSON.stringify(payload)` still exceeds the QR byte limit, progressively
