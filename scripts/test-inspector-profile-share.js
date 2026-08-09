@@ -1,24 +1,41 @@
 #!/usr/bin/env node
 /**
- * Ad-hoc check for inspector profile QR payload + QR encoding.
- * Mirrors the contract in ios/INSPECTOR_PROFILE_TRANSFER.md.
+ * Ad-hoc check for inspector profile multipart QR packing.
+ * Mirrors ios/INSPECTOR_PROFILE_TRANSFER.md (v2).
  */
 'use strict';
 
 const assert = require('assert');
 const QRCode = require('qrcode');
 
-const TYPE = 'oversight.inspectorProfile';
-const VERSION = 1;
+const PROFILE_TYPE = 'oversight.inspectorProfile';
+const PART_TYPE = 'oversight.inspectorProfilePart';
+const VERSION = 2;
 const MAX_BYTES = 2953;
+const CHUNK_BYTES = 2200;
 
-function buildPayload(profile, signatureBase64 = '') {
-  const name = String(profile.name || '').trim();
-  if (!name) throw new Error('name required');
+function chunkUtf8String(str, maxBytes) {
+  const bytes = Buffer.from(str, 'utf8');
+  if (bytes.length <= maxBytes) return [str];
+  const chunks = [];
+  let offset = 0;
+  while (offset < bytes.length) {
+    let end = Math.min(offset + maxBytes, bytes.length);
+    if (end < bytes.length) {
+      while (end > offset && (bytes[end] & 0xc0) === 0x80) end--;
+      if (end === offset) end = Math.min(offset + maxBytes, bytes.length);
+    }
+    chunks.push(bytes.subarray(offset, end).toString('utf8'));
+    offset = end;
+  }
+  return chunks;
+}
+
+function buildParts(profile, signatureBase64 = '') {
   const payload = {
     v: VERSION,
-    type: TYPE,
-    name,
+    type: PROFILE_TYPE,
+    name: String(profile.name || '').trim(),
     initials: String(profile.initials || '').trim().slice(0, 4),
     company: String(profile.company || '').trim(),
     phone: String(profile.phone || '').trim(),
@@ -29,16 +46,25 @@ function buildPayload(profile, signatureBase64 = '') {
     signatureBase64: signatureBase64 || '',
     exportedAt: new Date().toISOString(),
   };
-  const json = JSON.stringify(payload);
-  const byteLength = Buffer.byteLength(json, 'utf8');
-  return { payload, json, byteLength };
+  if (!payload.name) throw new Error('name required');
+  const profileJson = JSON.stringify(payload);
+  const transferId = 'testhash';
+  const chunks = chunkUtf8String(profileJson, CHUNK_BYTES);
+  const parts = chunks.map((c, i) => JSON.stringify({
+    v: VERSION,
+    type: PART_TYPE,
+    id: transferId,
+    i,
+    n: chunks.length,
+    c,
+  }));
+  return { payload, profileJson, parts };
 }
 
 async function main() {
-  const tinyPng =
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-
-  const { payload, json, byteLength } = buildPayload(
+  // ~3KB of signature-like base64 so multipart is forced
+  const bigSig = Buffer.alloc(2400, 1).toString('base64');
+  const { payload, profileJson, parts } = buildParts(
     {
       name: 'Jordan Lee',
       initials: 'JL',
@@ -48,32 +74,36 @@ async function main() {
       certificationNumber: 'AI-12345',
       license: 'NJ DEP Licensed',
     },
-    tinyPng
+    bigSig
   );
 
-  assert.strictEqual(payload.type, TYPE);
+  assert.strictEqual(payload.type, PROFILE_TYPE);
   assert.strictEqual(payload.v, VERSION);
-  assert.ok(payload.signatureBase64.length > 0);
-  assert.ok(byteLength <= MAX_BYTES, `payload ${byteLength} exceeds ${MAX_BYTES}`);
+  assert.ok(parts.length >= 2, 'expected multiple QR parts for large signature');
 
-  const parsed = JSON.parse(json);
-  assert.strictEqual(parsed.name, 'Jordan Lee');
-  assert.strictEqual(parsed.certificationNumber, 'AI-12345');
+  const rebuilt = parts
+    .map((p) => JSON.parse(p))
+    .sort((a, b) => a.i - b.i)
+    .map((p) => p.c)
+    .join('');
+  assert.strictEqual(rebuilt, profileJson);
+  const parsed = JSON.parse(rebuilt);
+  assert.strictEqual(parsed.signatureBase64, bigSig);
 
-  const dataUrl = await QRCode.toDataURL(json, {
-    errorCorrectionLevel: 'L',
-    width: 280,
-    margin: 2,
-  });
-  assert.ok(dataUrl.startsWith('data:image/png;base64,'));
+  for (const part of parts) {
+    const byteLength = Buffer.byteLength(part, 'utf8');
+    assert.ok(byteLength <= MAX_BYTES, `part ${byteLength} exceeds ${MAX_BYTES}`);
+    const dataUrl = await QRCode.toDataURL(part, {
+      errorCorrectionLevel: 'L',
+      width: 720,
+      margin: 4,
+    });
+    assert.ok(dataUrl.startsWith('data:image/png;base64,'));
+  }
 
-  // Oversized signature must be detectable before encode
-  const huge = 'A'.repeat(4000);
-  const oversized = buildPayload({ name: 'Too Big' }, huge);
-  assert.ok(oversized.byteLength > MAX_BYTES);
-
-  console.log('ok — inspector profile share payload + QR encode');
-  console.log(`  sample payload: ${byteLength} bytes`);
+  console.log('ok — multipart inspector profile share');
+  console.log(`  profile bytes: ${Buffer.byteLength(profileJson, 'utf8')}`);
+  console.log(`  QR parts: ${parts.length}`);
 }
 
 main().catch((err) => {

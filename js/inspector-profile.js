@@ -377,9 +377,16 @@ function updateProfileButton() {
 
 /** Contract version + type discriminator — keep in sync with ios/INSPECTOR_PROFILE_TRANSFER.md */
 const INSPECTOR_PROFILE_SHARE_TYPE = 'oversight.inspectorProfile';
-const INSPECTOR_PROFILE_SHARE_VERSION = 1;
+const INSPECTOR_PROFILE_SHARE_PART_TYPE = 'oversight.inspectorProfilePart';
+/** Profile document version (reassembled payload). Part envelopes also use this major. */
+const INSPECTOR_PROFILE_SHARE_VERSION = 2;
 /** QR version 40 + ECC L hard limit (bytes). */
 const INSPECTOR_PROFILE_QR_MAX_BYTES = 2953;
+/** Leave headroom for the multipart envelope JSON around each chunk. */
+const INSPECTOR_PROFILE_QR_CHUNK_BYTES = 2200;
+/** Soft cap so huge photo-uploads don't create dozens of parts — still sharp for ink. */
+const INSPECTOR_PROFILE_SIG_MAX_W = 1000;
+const INSPECTOR_PROFILE_SIG_MAX_H = 320;
 
 /**
  * Strip a data-URL prefix and return raw base64, or '' if invalid.
@@ -402,47 +409,67 @@ function _splitSignatureDataUrl(value) {
 }
 
 /**
- * Downscale a signature data URL so the share QR stays under capacity.
+ * Prepare a signature for share transfer without crushing quality.
+ * Only downscales when larger than INSPECTOR_PROFILE_SIG_MAX_* — keeps PNG otherwise.
  * @param {string} dataUrl
- * @param {number} maxW
- * @param {number} maxH
- * @param {{ mime?: 'image/png'|'image/jpeg', quality?: number }} [opts]
- * @returns {Promise<string>} data:image/...;base64,... or ''
+ * @returns {Promise<{ base64: string, mime: string, dataUrl: string }>}
  */
-function compressSignatureForShare(dataUrl, maxW = 240, maxH = 80, opts = {}) {
-    const mime = opts.mime === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-    const quality = typeof opts.quality === 'number' ? opts.quality : 0.55;
+function prepareSignatureForShare(dataUrl) {
     return new Promise((resolve) => {
         if (!dataUrl || typeof dataUrl !== 'string') {
-            resolve('');
+            resolve({ base64: '', mime: 'image/png', dataUrl: '' });
             return;
         }
+        const existing = _splitSignatureDataUrl(dataUrl);
         const img = new Image();
         img.onload = () => {
             try {
                 const srcW = img.naturalWidth || img.width || 1;
                 const srcH = img.naturalHeight || img.height || 1;
-                const scale = Math.min(maxW / srcW, maxH / srcH, 1);
+                const needsScale = srcW > INSPECTOR_PROFILE_SIG_MAX_W || srcH > INSPECTOR_PROFILE_SIG_MAX_H;
+                if (!needsScale && existing.base64) {
+                    resolve({
+                        base64: existing.base64,
+                        mime: existing.mime || 'image/png',
+                        dataUrl: dataUrl.startsWith('data:') ? dataUrl : `data:${existing.mime};base64,${existing.base64}`,
+                    });
+                    return;
+                }
+                const scale = Math.min(
+                    INSPECTOR_PROFILE_SIG_MAX_W / srcW,
+                    INSPECTOR_PROFILE_SIG_MAX_H / srcH,
+                    1
+                );
                 const w = Math.max(1, Math.round(srcW * scale));
                 const h = Math.max(1, Math.round(srcH * scale));
                 const canvas = document.createElement('canvas');
                 canvas.width = w;
                 canvas.height = h;
                 const ctx = canvas.getContext('2d');
-                if (mime === 'image/jpeg') {
-                    // JPEG has no alpha — flatten onto white so ink stays visible.
-                    ctx.fillStyle = '#ffffff';
-                    ctx.fillRect(0, 0, w, h);
-                } else {
-                    ctx.clearRect(0, 0, w, h);
-                }
+                ctx.clearRect(0, 0, w, h);
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
                 ctx.drawImage(img, 0, 0, w, h);
-                resolve(mime === 'image/jpeg' ? canvas.toDataURL('image/jpeg', quality) : canvas.toDataURL('image/png'));
+                const out = canvas.toDataURL('image/png');
+                const parts = _splitSignatureDataUrl(out);
+                resolve({
+                    base64: parts.base64,
+                    mime: 'image/png',
+                    dataUrl: out,
+                });
             } catch (e) {
-                resolve('');
+                resolve({
+                    base64: existing.base64,
+                    mime: existing.mime || 'image/png',
+                    dataUrl: existing.base64 ? `data:${existing.mime || 'image/png'};base64,${existing.base64}` : '',
+                });
             }
         };
-        img.onerror = () => resolve('');
+        img.onerror = () => resolve({
+            base64: existing.base64,
+            mime: existing.mime || 'image/png',
+            dataUrl: existing.base64 ? `data:${existing.mime || 'image/png'};base64,${existing.base64}` : '',
+        });
         img.src = _safeImageSrc(dataUrl);
     });
 }
@@ -451,17 +478,60 @@ function _utf8ByteLength(str) {
     if (typeof TextEncoder !== 'undefined') {
         return new TextEncoder().encode(str).length;
     }
-    // Fallback for exotic environments
     return unescape(encodeURIComponent(str)).length;
 }
 
+function _randomTransferId() {
+    const bytes = new Uint8Array(4);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+        crypto.getRandomValues(bytes);
+    } else {
+        for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /**
- * Build the QR JSON payload for an inspector profile.
- * Spec: ios/INSPECTOR_PROFILE_TRANSFER.md
+ * Split a UTF-8 string into chunks that stay under maxBytes (no mid-codepoint splits).
+ * @param {string} str
+ * @param {number} maxBytes
+ * @returns {string[]}
+ */
+function chunkUtf8String(str, maxBytes) {
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const bytes = encoder.encode(str);
+    if (bytes.length <= maxBytes) return [str];
+    const chunks = [];
+    let offset = 0;
+    while (offset < bytes.length) {
+        let end = Math.min(offset + maxBytes, bytes.length);
+        if (end < bytes.length) {
+            while (end > offset && (bytes[end] & 0xc0) === 0x80) end--;
+            if (end === offset) end = Math.min(offset + maxBytes, bytes.length);
+        }
+        chunks.push(decoder.decode(bytes.subarray(offset, end)));
+        offset = end;
+    }
+    return chunks;
+}
+
+/**
+ * Build high-quality profile JSON and split it across one or more QR payloads.
+ * Spec: ios/INSPECTOR_PROFILE_TRANSFER.md (v2 multipart)
  *
  * @param {Object} profile
- * @param {{ signatureDataUrl?: string, maxSignatureBytes?: number }} [options]
- * @returns {Promise<{ payload: Object, json: string, byteLength: number, signatureIncluded: boolean }>}
+ * @param {{ signatureDataUrl?: string }} [options]
+ * @returns {Promise<{
+ *   payload: Object,
+ *   profileJson: string,
+ *   byteLength: number,
+ *   signatureIncluded: boolean,
+ *   signatureStatus: 'included'|'none',
+ *   signaturePreviewUrl: string,
+ *   transferId: string,
+ *   parts: string[],
+ * }>}
  */
 async function buildInspectorProfileSharePayload(profile, options = {}) {
     const name = String(profile?.name || '').trim();
@@ -469,7 +539,27 @@ async function buildInspectorProfileSharePayload(profile, options = {}) {
         throw new Error('Enter your name before sharing the inspector profile.');
     }
 
-    const base = {
+    const sourceSig = options.signatureDataUrl != null
+        ? options.signatureDataUrl
+        : (profile?.signatureBase64 || '');
+
+    let signatureMime = 'image/png';
+    let signatureBase64 = '';
+    let signaturePreviewUrl = '';
+    /** @type {'included'|'none'} */
+    let signatureStatus = 'none';
+
+    if (sourceSig) {
+        const prepared = await prepareSignatureForShare(sourceSig);
+        if (prepared.base64) {
+            signatureBase64 = prepared.base64;
+            signatureMime = prepared.mime || 'image/png';
+            signaturePreviewUrl = prepared.dataUrl || `data:${signatureMime};base64,${signatureBase64}`;
+            signatureStatus = 'included';
+        }
+    }
+
+    const payload = {
         v: INSPECTOR_PROFILE_SHARE_VERSION,
         type: INSPECTOR_PROFILE_SHARE_TYPE,
         name,
@@ -479,105 +569,85 @@ async function buildInspectorProfileSharePayload(profile, options = {}) {
         email: String(profile?.email || '').trim(),
         certificationNumber: String(profile?.certificationNumber || '').trim(),
         license: String(profile?.license || '').trim(),
-        signatureMime: 'image/png',
-        signatureBase64: '',
+        signatureMime,
+        signatureBase64,
         exportedAt: new Date().toISOString(),
     };
 
-    const sourceSig = options.signatureDataUrl != null
-        ? options.signatureDataUrl
-        : (profile?.signatureBase64 || '');
+    const profileJson = JSON.stringify(payload);
+    const byteLength = _utf8ByteLength(profileJson);
+    const transferId = _randomTransferId();
 
-    // Prefer PNG (keeps transparency for drawn ink); fall back to JPEG for bulky uploads.
-    const attempts = [
-        { maxW: 240, maxH: 80, mime: 'image/png' },
-        { maxW: 200, maxH: 64, mime: 'image/png' },
-        { maxW: 160, maxH: 48, mime: 'image/png' },
-        { maxW: 200, maxH: 64, mime: 'image/jpeg', quality: 0.55 },
-        { maxW: 160, maxH: 48, mime: 'image/jpeg', quality: 0.45 },
-        { maxW: 120, maxH: 36, mime: 'image/jpeg', quality: 0.4 },
-        { maxW: 96, maxH: 28, mime: 'image/jpeg', quality: 0.35 },
-    ];
-
-    let bestJson = JSON.stringify(base);
-    let bestPayload = { ...base };
-    /** @type {'included'|'omitted'|'none'} */
-    let signatureStatus = 'none';
-
-    if (sourceSig) {
-        signatureStatus = 'omitted';
-        for (const attempt of attempts) {
-            const compressed = await compressSignatureForShare(
-                sourceSig,
-                attempt.maxW,
-                attempt.maxH,
-                { mime: attempt.mime, quality: attempt.quality }
-            );
-            const parts = _splitSignatureDataUrl(compressed);
-            if (!parts.base64) continue;
-            const candidate = {
-                ...base,
-                signatureMime: parts.mime || attempt.mime || 'image/png',
-                signatureBase64: parts.base64,
-            };
-            const json = JSON.stringify(candidate);
-            if (_utf8ByteLength(json) <= INSPECTOR_PROFILE_QR_MAX_BYTES) {
-                bestJson = json;
-                bestPayload = candidate;
-                signatureStatus = 'included';
-                break;
-            }
-        }
+    // Pack into multipart envelopes so a crisp signature can span several large QR frames.
+    let chunkBudget = INSPECTOR_PROFILE_QR_CHUNK_BYTES;
+    let parts = [];
+    for (let attempt = 0; attempt < 8; attempt++) {
+        const chunks = chunkUtf8String(profileJson, chunkBudget);
+        const count = chunks.length;
+        parts = chunks.map((chunk, index) => JSON.stringify({
+            v: INSPECTOR_PROFILE_SHARE_VERSION,
+            type: INSPECTOR_PROFILE_SHARE_PART_TYPE,
+            id: transferId,
+            i: index,
+            n: count,
+            c: chunk,
+        }));
+        const oversized = parts.some((p) => _utf8ByteLength(p) > INSPECTOR_PROFILE_QR_MAX_BYTES);
+        if (!oversized) break;
+        chunkBudget = Math.max(800, Math.floor(chunkBudget * 0.75));
+        parts = [];
     }
 
-    // Text-only fallback when signature is absent or would not fit.
-    if (signatureStatus !== 'included') {
-        bestPayload = { ...base, signatureBase64: '', signatureMime: 'image/png' };
-        bestJson = JSON.stringify(bestPayload);
-    }
-
-    const byteLength = _utf8ByteLength(bestJson);
-    if (byteLength > INSPECTOR_PROFILE_QR_MAX_BYTES) {
-        throw new Error(
-            `Inspector profile is too large to fit in a QR code (${byteLength} bytes). Shorten text fields and try again.`
-        );
+    if (!parts.length || parts.some((p) => _utf8ByteLength(p) > INSPECTOR_PROFILE_QR_MAX_BYTES)) {
+        throw new Error('Could not pack the inspector profile into scannable QR parts. Try a simpler signature drawing.');
     }
 
     return {
-        payload: bestPayload,
-        json: bestJson,
+        payload,
+        profileJson,
         byteLength,
         signatureIncluded: signatureStatus === 'included',
         signatureStatus,
+        signaturePreviewUrl,
+        transferId,
+        parts,
     };
 }
 
 /**
- * Show a modal with the inspector-profile QR for the iOS app to scan.
+ * Show a modal with large cycling QR parts for the iOS app to scan.
  * @param {Object} profile - Profile fields to encode (usually current form values).
  */
 async function openInspectorProfileShareModal(profile) {
     document.querySelector('.inspector-profile-share-modal')?.remove();
 
-    // Dense profile payloads (esp. with signature) use a high QR version — render large
-    // with a generous quiet zone so phone cameras can resolve the modules.
-    const qrDisplayPx = Math.min(640, Math.max(420, Math.floor(window.innerHeight * 0.62)));
-    const qrRenderPx = Math.max(720, qrDisplayPx);
+    // Large on-screen QR — dense multipart frames need big modules for phone cameras.
+    const qrDisplayPx = Math.min(720, Math.max(520, Math.floor(Math.min(window.innerHeight * 0.68, window.innerWidth * 0.72))));
+    const qrRenderPx = Math.max(800, qrDisplayPx);
 
     const modal = document.createElement('div');
     modal.className = 'modal active inspector-profile-modal inspector-profile-share-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
     modal.innerHTML = `
-        <div class="modal-content" style="background:white;border-radius:1rem;padding:1.5rem 1.75rem;max-width:min(720px,94vw);width:auto;max-height:96vh;overflow-y:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);">
-            <div style="margin-bottom:0.75rem;">
+        <div class="modal-content" style="background:white;border-radius:1rem;padding:1.25rem 1.5rem;max-width:min(820px,96vw);width:auto;max-height:98vh;overflow-y:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);">
+            <div style="margin-bottom:0.65rem;">
                 <h3 style="font-size:1.25rem;font-weight:600;color:#111827;margin:0;">Share Inspector Profile</h3>
             </div>
             <div style="display:flex;flex-direction:column;gap:0.65rem;align-items:center;text-align:center;">
-                <p class="profile-hint" style="font-size:0.85rem;color:#6b7280;margin:0;line-height:1.45;max-width:36rem;">
-                    Hold your iPhone close and fill the camera with this QR code to copy your inspector details and signature.
+                <p class="profile-hint" id="profile-share-instructions" style="font-size:0.85rem;color:#6b7280;margin:0;line-height:1.45;max-width:40rem;">
+                    Preparing a high-quality transfer…
                 </p>
-                <div id="profile-share-qr-wrap" style="width:${qrDisplayPx}px;height:${qrDisplayPx}px;display:flex;align-items:center;justify-content:center;border:1px solid #e5e7eb;border-radius:0.75rem;background:#ffffff;padding:12px;box-sizing:border-box;">
+                <div id="profile-share-sig-preview" style="display:none;width:min(420px,80%);padding:0.5rem 0.75rem;border:1px solid #e5e7eb;border-radius:0.5rem;background:#fafafa;">
+                    <p class="profile-hint" style="font-size:0.7rem;color:#6b7280;margin:0 0 0.35rem;">Signature included (full quality)</p>
+                    <img id="profile-share-sig-img" alt="Signature preview" style="max-width:100%;max-height:72px;display:block;margin:0 auto;">
+                </div>
+                <div id="profile-share-qr-wrap" style="width:${qrDisplayPx}px;height:${qrDisplayPx}px;display:flex;align-items:center;justify-content:center;border:1px solid #e5e7eb;border-radius:0.75rem;background:#ffffff;padding:16px;box-sizing:border-box;">
                     <span id="profile-share-status" style="font-size:0.85rem;color:#6b7280;">Generating QR…</span>
+                </div>
+                <div id="profile-share-pager" style="display:none;align-items:center;gap:0.75rem;">
+                    <button type="button" id="profile-share-prev" class="profile-cancel-btn" style="padding:0.4rem 0.9rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.8rem;cursor:pointer;">Previous</button>
+                    <span id="profile-share-part-label" style="font-size:0.85rem;font-weight:600;color:#111827;min-width:7rem;"></span>
+                    <button type="button" id="profile-share-next" class="profile-cancel-btn" style="padding:0.4rem 0.9rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.8rem;cursor:pointer;">Next</button>
                 </div>
                 <p id="profile-share-meta" class="profile-hint" style="font-size:0.75rem;color:#6b7280;margin:0;"></p>
             </div>
@@ -588,19 +658,38 @@ async function openInspectorProfileShareModal(profile) {
     `;
 
     let mouseDownOnBackdrop = false;
+    let cycleTimer = null;
+    const stopCycle = () => {
+        if (cycleTimer) {
+            clearInterval(cycleTimer);
+            cycleTimer = null;
+        }
+    };
+
     modal.addEventListener('mousedown', (e) => {
         mouseDownOnBackdrop = (e.target === modal);
     });
     modal.addEventListener('click', (e) => {
-        if (e.target === modal && mouseDownOnBackdrop) modal.remove();
+        if (e.target === modal && mouseDownOnBackdrop) {
+            stopCycle();
+            modal.remove();
+        }
         mouseDownOnBackdrop = false;
     });
-    modal.querySelector('.profile-share-close-btn').addEventListener('click', () => modal.remove());
+    modal.querySelector('.profile-share-close-btn').addEventListener('click', () => {
+        stopCycle();
+        modal.remove();
+    });
     document.body.appendChild(modal);
 
     const statusEl = modal.querySelector('#profile-share-status');
     const wrapEl = modal.querySelector('#profile-share-qr-wrap');
     const metaEl = modal.querySelector('#profile-share-meta');
+    const instructionsEl = modal.querySelector('#profile-share-instructions');
+    const pagerEl = modal.querySelector('#profile-share-pager');
+    const partLabelEl = modal.querySelector('#profile-share-part-label');
+    const sigPreviewEl = modal.querySelector('#profile-share-sig-preview');
+    const sigImgEl = modal.querySelector('#profile-share-sig-img');
 
     try {
         const built = await buildInspectorProfileSharePayload(profile);
@@ -608,26 +697,64 @@ async function openInspectorProfileShareModal(profile) {
         if (!api || typeof api.generateQrDataUrl !== 'function') {
             throw new Error('QR generation is only available in the Oversight desktop app.');
         }
-        // margin 4 = wider quiet zone (helps phone cameras lock onto dense codes)
-        const result = await api.generateQrDataUrl(built.json, { width: qrRenderPx, margin: 4 });
-        if (!result?.success || !result.dataUrl) {
-            throw new Error(result?.error || 'Could not generate QR code.');
+
+        if (built.signaturePreviewUrl && sigPreviewEl && sigImgEl) {
+            sigImgEl.src = _safeImageSrc(built.signaturePreviewUrl);
+            sigPreviewEl.style.display = 'block';
         }
+
+        const qrDataUrls = [];
+        for (let i = 0; i < built.parts.length; i++) {
+            if (statusEl) {
+                statusEl.textContent = `Generating QR ${i + 1} of ${built.parts.length}…`;
+            }
+            const result = await api.generateQrDataUrl(built.parts[i], { width: qrRenderPx, margin: 4 });
+            if (!result?.success || !result.dataUrl) {
+                throw new Error(result?.error || `Could not generate QR part ${i + 1}.`);
+            }
+            qrDataUrls.push(result.dataUrl);
+        }
+
         wrapEl.innerHTML = '';
         const img = document.createElement('img');
-        img.src = result.dataUrl;
         img.alt = 'Inspector profile QR code';
         img.width = qrDisplayPx;
         img.height = qrDisplayPx;
-        img.style.cssText = `width:100%;height:100%;object-fit:contain;image-rendering:pixelated;display:block;background:#fff;`;
+        img.style.cssText = 'width:100%;height:100%;object-fit:contain;image-rendering:pixelated;display:block;background:#fff;';
         wrapEl.appendChild(img);
+
+        let partIndex = 0;
+        const showPart = (index) => {
+            partIndex = (index + qrDataUrls.length) % qrDataUrls.length;
+            img.src = qrDataUrls[partIndex];
+            if (partLabelEl) {
+                partLabelEl.textContent = `Part ${partIndex + 1} of ${qrDataUrls.length}`;
+            }
+        };
+        showPart(0);
+
+        if (qrDataUrls.length > 1) {
+            pagerEl.style.display = 'flex';
+            instructionsEl.textContent =
+                'Keep the Oversight iOS camera on this code — it auto-advances through every part so your full signature transfers without pixelation.';
+            modal.querySelector('#profile-share-prev').addEventListener('click', () => {
+                showPart(partIndex - 1);
+            });
+            modal.querySelector('#profile-share-next').addEventListener('click', () => {
+                showPart(partIndex + 1);
+            });
+            cycleTimer = setInterval(() => showPart(partIndex + 1), 1600);
+        } else {
+            instructionsEl.textContent =
+                'Hold your iPhone close and fill the camera with this QR code to copy your inspector details and signature.';
+        }
+
         const sigNote = built.signatureStatus === 'included'
-            ? 'Includes compressed signature.'
-            : built.signatureStatus === 'omitted'
-                ? 'Signature omitted (too large for one QR) — redraw it on the phone if needed.'
-                : 'No signature on profile.';
-        metaEl.textContent = `${built.payload.name} · ${built.byteLength} bytes · ${sigNote}`;
+            ? 'Full-quality signature included.'
+            : 'No signature on profile.';
+        metaEl.textContent = `${built.payload.name} · ${built.byteLength} bytes · ${qrDataUrls.length} QR part${qrDataUrls.length === 1 ? '' : 's'} · ${sigNote}`;
     } catch (err) {
+        stopCycle();
         if (statusEl) {
             statusEl.textContent = err?.message || 'Failed to build share QR.';
             statusEl.style.color = '#b91c1c';

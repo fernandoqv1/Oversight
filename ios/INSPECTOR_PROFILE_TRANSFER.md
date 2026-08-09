@@ -1,7 +1,7 @@
 # Inspector Profile Transfer (Desktop → iOS)
 
 This document is the contract for packing an inspector profile on the Oversight
-**desktop** app into a single QR code, and unpacking it on first launch of the
+**desktop** app into QR code(s), and unpacking them on first launch of the
 Oversight **iOS** app.
 
 Desktop implements the encoder today (`Share` on the Inspector Profile modal).
@@ -10,116 +10,134 @@ format.
 
 ---
 
+## Why multipart?
+
+A single QR code holds at most ~2,953 bytes (version 40, ECC `L`). A crisp
+signature PNG is often larger than that. Shrinking the signature to fit one
+code makes it pixelated.
+
+**v2** keeps the signature at high quality and splits the full profile JSON
+across **one or more large QR frames** that auto-cycle on the desktop. iOS
+scans until every part for a transfer id is collected, then reassembles.
+
+---
+
 ## User flow
 
 1. On Windows, the inspector opens **Inspector Profile**, fills in their
    details (and optional signature), then clicks **Share**.
-2. Desktop builds one QR code whose payload contains every profile field plus
-   the signature as base64.
+2. Desktop builds the full profile JSON (high-quality signature as base64) and
+   shows a **large** QR. If more than one part is needed, the code
+   auto-advances (Previous / Next also available).
 3. On first open of the iOS app (no inspector profile saved yet), iOS prompts
-   the inspector to **scan the inspector profile QR**.
-4. After a successful scan, iOS writes the fields into the local `Inspector`
-   SwiftData record (and signature image data) and continues into the normal
-   app shell.
-
-The same QR may also be re-scanned later from Profile if iOS adds a
-“Replace profile from desktop” action; first-launch is the required path.
+   the inspector to **scan the inspector profile QR** and keep the camera on
+   the code until all parts are received.
+4. iOS writes the fields into the local `Inspector` SwiftData record (and
+   signature image data) and continues into the normal app shell.
 
 ---
 
 ## Wire format
 
-The QR payload is a **UTF-8 JSON object** (byte mode, error correction `L`).
-There is no URL wrapper and no extra envelope — the scanned string *is* the
-JSON.
+### A. Reassembled profile document
 
-### Top-level object
+After all parts are concatenated (in index order), the result is a UTF-8 JSON
+object:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `v` | number | yes | Schema version. Current: `1`. Reject unknown major versions. |
-| `type` | string | yes | Always `"oversight.inspectorProfile"`. Use this to reject unrelated QR codes. |
+| `v` | number | yes | Schema version. Current: `2`. Also accept legacy `1`. |
+| `type` | string | yes | Always `"oversight.inspectorProfile"`. |
 | `name` | string | yes | Full name. Must be non-empty after trim. |
-| `initials` | string | no | Up to 4 characters. iOS may recompute from `name` if missing. |
-| `company` | string | no | Employer / firm. |
-| `phone` | string | no | Display-formatted or raw digits; store as received. |
+| `initials` | string | no | Up to 4 characters. |
+| `company` | string | no | |
+| `phone` | string | no | |
 | `email` | string | no | |
-| `certificationNumber` | string | no | e.g. `AI-12345`. Map into iOS certifications / identity fields. |
-| `license` | string | no | Free-text license / state / date line (desktop label: “License/State”). |
-| `signatureBase64` | string | no | PNG (preferred) or JPEG image as a **raw** base64 string — **no** `data:` URL prefix. Empty / omitted means no signature. |
-| `signatureMime` | string | no | `"image/png"` (default) or `"image/jpeg"`. Only meaningful when `signatureBase64` is present. |
-| `exportedAt` | string | no | ISO-8601 timestamp from the desktop when the QR was generated. |
+| `certificationNumber` | string | no | |
+| `license` | string | no | Free-text license / state / date. |
+| `signatureBase64` | string | no | PNG (preferred) or JPEG as **raw** base64 — **no** `data:` prefix. |
+| `signatureMime` | string | no | `"image/png"` (default) or `"image/jpeg"`. |
+| `exportedAt` | string | no | ISO-8601 timestamp. |
 
-### Example (signature truncated)
+### B. QR part envelope (what each scanned frame contains)
+
+Each QR payload is UTF-8 JSON (byte mode, ECC `L`):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `v` | number | yes | `2` |
+| `type` | string | yes | `"oversight.inspectorProfilePart"` |
+| `id` | string | yes | Transfer id shared by all parts of one Share session |
+| `i` | number | yes | Zero-based part index |
+| `n` | number | yes | Total part count (`n >= 1`) |
+| `c` | string | yes | UTF-8 chunk of the reassembled profile JSON |
+
+#### Example part
 
 ```json
 {
-  "v": 1,
-  "type": "oversight.inspectorProfile",
-  "name": "Jordan Lee",
-  "initials": "JL",
-  "company": "Acme Environmental",
-  "phone": "(555) 123-4567",
-  "email": "jordan@acme.example",
-  "certificationNumber": "AI-12345",
-  "license": "NJ DEP Licensed",
-  "signatureMime": "image/png",
-  "signatureBase64": "iVBORw0KGgoAAAANSUhEUgAA...",
-  "exportedAt": "2026-08-09T00:00:00.000Z"
+  "v": 2,
+  "type": "oversight.inspectorProfilePart",
+  "id": "a1b2c3d4",
+  "i": 0,
+  "n": 3,
+  "c": "{\"v\":2,\"type\":\"oversight.inspectorProfile\",\"name\":\"Jordan Lee\","
 }
 ```
 
-### Field mapping → iOS `Inspector` model
+### Legacy v1 (optional)
 
-| QR field | iOS destination |
+Older desktop builds may emit a single QR whose payload *is* the profile
+document with `v: 1` and `type: "oversight.inspectorProfile"` (often with a
+heavily compressed signature). iOS should still accept that for compatibility.
+
+---
+
+## Field mapping → iOS `Inspector` model
+
+| Profile field | iOS destination |
 |---|---|
 | `name` | `Inspector.name` |
-| `initials` | Derived `Inspector.initials` (computed from name today; may store later) |
+| `initials` | Derived `Inspector.initials` (computed from name today) |
 | `license` | `Inspector.license` |
-| `certificationNumber` + optional free-text | Fold into `Inspector.certifications` (e.g. prefix `Cert #: AI-12345`) until the iOS model gains a dedicated cert-number field |
-| `company`, `phone`, `email` | Not on `Inspector` yet — add additive SwiftData properties when implementing the scanner (do not drop them) |
+| `certificationNumber` | Fold into `Inspector.certifications` until a dedicated field exists |
+| `company`, `phone`, `email` | Add additive SwiftData properties when implementing the scanner |
 | `signatureBase64` + `signatureMime` | Decode to `Data` → `Inspector.signatureData` |
-
-Additive schema only: when iOS grows company/phone/email fields, keep reading
-the same QR keys.
 
 ---
 
 ## Signature packaging rules (desktop encoder)
 
-QR capacity is limited (~2,953 bytes at version 40, ECC `L`). A full-resolution
-signature PNG often will not fit, so the desktop encoder **must**:
-
-1. Rasterize the stored signature into a small canvas (max **240×80** CSS px).
-2. Prefer PNG (transparent background, dark ink). If the PNG still exceeds the
-   QR byte budget, retry as JPEG on a white background at reduced quality.
-3. Strip any `data:image/...;base64,` prefix — only the raw base64 goes in
+1. Prefer the original drawn/uploaded signature PNG.
+2. Only downscale if larger than **1000×320** (high-quality resample, stay PNG).
+3. Strip any `data:image/...;base64,` prefix — raw base64 goes in
    `signatureBase64`.
-4. If `JSON.stringify(payload)` still exceeds the QR byte limit, progressively
-   shrink the signature (and finally omit it) rather than failing silently.
-   When the signature is omitted, still encode the text fields and leave
-   `signatureBase64` empty.
-
-iOS must tolerate a missing signature and let the inspector redraw one in the
-Signature sheet.
+4. Do **not** crush the signature to fit one QR. Split into multipart frames
+   instead.
+5. Render each QR large on screen (≈520–720 px) with margin ≥ 4 modules.
 
 ---
 
 ## iOS decoder checklist
 
-1. Read the scanned string; parse as JSON. On failure → show “Not an Oversight
-   inspector profile.”
-2. Require `type === "oversight.inspectorProfile"` and `v === 1` (or a version
-   you explicitly support).
-3. Require non-empty `name`.
-4. Trim all string fields; treat missing keys as `""`.
-5. If `signatureBase64` is non-empty:
+1. Parse the scanned string as JSON.
+2. If `type === "oversight.inspectorProfile"` (v1 or single-frame legacy):
+   import that object directly (step 6).
+3. If `type === "oversight.inspectorProfilePart"`:
+   - Require `v === 2`, non-empty `id`, valid `i`/`n`, string `c`.
+   - Store chunks in a map keyed by `id` → index → `c`.
+   - Ignore duplicate indexes; reject conflicting `n` for the same `id`.
+   - When all indexes `0..n-1` are present, concatenate `c` values in order.
+   - Parse the concatenation as the profile document JSON.
+4. Require profile `type === "oversight.inspectorProfile"` and `v` in `{1,2}`.
+5. Require non-empty `name`. Trim strings; missing keys → `""`.
+6. If `signatureBase64` is non-empty:
    - Decode with `Data(base64Encoded:)`.
-   - Validate it is an image (PNG/JPEG magic bytes). Reject malformed blobs
-     without aborting the rest of the profile import.
+   - Validate PNG/JPEG magic bytes; reject bad blobs without aborting the rest.
    - Store on `Inspector.signatureData`.
-6. Persist via SwiftData, mark onboarding complete, dismiss the scan prompt.
-7. Never send the payload to a network — offline only, same as the rest of the app.
+7. Persist via SwiftData, mark onboarding complete, dismiss the scan UI.
+8. Show progress while multipart scanning (“3 of 5 parts…”).
+9. Offline only — never upload the payload to a network.
 
 ---
 
@@ -127,16 +145,15 @@ Signature sheet.
 
 | Piece | Location |
 |---|---|
-| Profile UI + Share button | `js/inspector-profile.js` → `openInspectorProfileModal` / `openInspectorProfileShareModal` |
-| Payload builder | `buildInspectorProfileSharePayload()` in `js/inspector-profile.js` |
-| QR PNG generation | IPC `generate-qr-data-url` in `main.js` (uses npm `qrcode`, ECC `L`) |
+| Profile UI + Share | `js/inspector-profile.js` → `openInspectorProfileModal` / `openInspectorProfileShareModal` |
+| Payload + chunking | `buildInspectorProfileSharePayload()` in `js/inspector-profile.js` |
+| QR PNG generation | IPC `generate-qr-data-url` in `main.js` |
 | Preload bridge | `window.electronAPI.generateQrDataUrl(text)` in `preload.js` |
 
 ---
 
 ## Versioning
 
-- Bump `v` when a breaking key rename or semantic change is required.
-- Additive optional fields do **not** require a version bump; iOS should ignore
-  unknown keys.
-- Keep this markdown updated in the same PR as any encoder or decoder change.
+- `v: 2` introduces multipart envelopes (`oversight.inspectorProfilePart`).
+- Additive optional fields on the profile document do not require a bump.
+- Keep this markdown updated in the same PR as encoder/decoder changes.
