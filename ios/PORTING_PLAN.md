@@ -39,7 +39,9 @@ sheet, and business rule already exists there and should be matched.
    daily logs, materials. Inline volume calculation while typing.
 6. **Team & certifications** — worker cards, cert badges, expired flagged red.
 7. **Profile** — inspector details, signature capture (Canvas drawing),
-   default templates, appearance settings.
+   default templates, appearance settings. First-launch onboarding should
+   offer scanning the desktop inspector-profile QR (see
+   `INSPECTOR_PROFILE_TRANSFER.md`) before falling back to manual entry.
 8. **Documents** — generate from templates (see desktop `DOCUMENT_GENERATION.md`).
 9. **Archive** — completed projects.
 10. **macOS pass** — `NavigationSplitView` sidebar layout on Mac, keyboard
