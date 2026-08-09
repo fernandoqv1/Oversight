@@ -559,24 +559,29 @@ async function buildInspectorProfileSharePayload(profile, options = {}) {
 async function openInspectorProfileShareModal(profile) {
     document.querySelector('.inspector-profile-share-modal')?.remove();
 
+    // Dense profile payloads (esp. with signature) use a high QR version — render large
+    // with a generous quiet zone so phone cameras can resolve the modules.
+    const qrDisplayPx = Math.min(640, Math.max(420, Math.floor(window.innerHeight * 0.62)));
+    const qrRenderPx = Math.max(720, qrDisplayPx);
+
     const modal = document.createElement('div');
     modal.className = 'modal active inspector-profile-modal inspector-profile-share-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
     modal.innerHTML = `
-        <div class="modal-content" style="background:white;border-radius:1rem;padding:2rem;max-width:420px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);">
-            <div style="margin-bottom:1rem;">
+        <div class="modal-content" style="background:white;border-radius:1rem;padding:1.5rem 1.75rem;max-width:min(720px,94vw);width:auto;max-height:96vh;overflow-y:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);">
+            <div style="margin-bottom:0.75rem;">
                 <h3 style="font-size:1.25rem;font-weight:600;color:#111827;margin:0;">Share Inspector Profile</h3>
             </div>
-            <div style="display:flex;flex-direction:column;gap:0.75rem;align-items:center;text-align:center;">
-                <p class="profile-hint" style="font-size:0.85rem;color:#6b7280;margin:0;line-height:1.45;">
-                    Scan this QR code in the Oversight iOS app to copy your inspector details and signature.
+            <div style="display:flex;flex-direction:column;gap:0.65rem;align-items:center;text-align:center;">
+                <p class="profile-hint" style="font-size:0.85rem;color:#6b7280;margin:0;line-height:1.45;max-width:36rem;">
+                    Hold your iPhone close and fill the camera with this QR code to copy your inspector details and signature.
                 </p>
-                <div id="profile-share-qr-wrap" style="width:280px;height:280px;display:flex;align-items:center;justify-content:center;border:1px solid #e5e7eb;border-radius:0.75rem;background:#fafafa;">
+                <div id="profile-share-qr-wrap" style="width:${qrDisplayPx}px;height:${qrDisplayPx}px;display:flex;align-items:center;justify-content:center;border:1px solid #e5e7eb;border-radius:0.75rem;background:#ffffff;padding:12px;box-sizing:border-box;">
                     <span id="profile-share-status" style="font-size:0.85rem;color:#6b7280;">Generating QR…</span>
                 </div>
                 <p id="profile-share-meta" class="profile-hint" style="font-size:0.75rem;color:#6b7280;margin:0;"></p>
             </div>
-            <div style="display:flex;justify-content:flex-end;gap:0.75rem;margin-top:1.25rem;padding-top:1rem;border-top:1px solid #e5e7eb;">
+            <div style="display:flex;justify-content:flex-end;gap:0.75rem;margin-top:1rem;padding-top:0.85rem;border-top:1px solid #e5e7eb;">
                 <button type="button" class="profile-share-close-btn profile-cancel-btn" style="padding:0.625rem 1.25rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.875rem;font-weight:500;cursor:pointer;">Close</button>
             </div>
         </div>
@@ -603,7 +608,8 @@ async function openInspectorProfileShareModal(profile) {
         if (!api || typeof api.generateQrDataUrl !== 'function') {
             throw new Error('QR generation is only available in the Oversight desktop app.');
         }
-        const result = await api.generateQrDataUrl(built.json, { width: 280, margin: 2 });
+        // margin 4 = wider quiet zone (helps phone cameras lock onto dense codes)
+        const result = await api.generateQrDataUrl(built.json, { width: qrRenderPx, margin: 4 });
         if (!result?.success || !result.dataUrl) {
             throw new Error(result?.error || 'Could not generate QR code.');
         }
@@ -611,9 +617,9 @@ async function openInspectorProfileShareModal(profile) {
         const img = document.createElement('img');
         img.src = result.dataUrl;
         img.alt = 'Inspector profile QR code';
-        img.width = 280;
-        img.height = 280;
-        img.style.cssText = 'width:280px;height:280px;border-radius:0.5rem;display:block;';
+        img.width = qrDisplayPx;
+        img.height = qrDisplayPx;
+        img.style.cssText = `width:100%;height:100%;object-fit:contain;image-rendering:pixelated;display:block;background:#fff;`;
         wrapEl.appendChild(img);
         const sigNote = built.signatureStatus === 'included'
             ? 'Includes compressed signature.'
