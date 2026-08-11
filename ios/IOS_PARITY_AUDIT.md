@@ -795,4 +795,768 @@ Current script only registers `.swift` and `.xcassets`. To bundle templates auto
 
 ---
 
+## Part 12 — Agent build instructions (for Claude / AI implementers)
+
+This section tells a coding agent **exactly how to build** each missing feature. Read Parts 1–11 first for context. Execute phases in order unless a task says otherwise.
+
+### 12.0 Agent preamble — read before writing code
+
+**Repo layout**
+
+```
+ios/Oversight/Oversight/
+├── Models/          SwiftData @Model types
+├── Views/           Screens (List + NavigationLink)
+├── Sheets/          Modal forms (SheetScaffold pattern)
+├── Support/         DocxKit, XLSXKit, Formatting, AppState, …
+└── Templates/       ← CREATE: copy templates/*.docx here
+templates/           ← Desktop Word templates (source of truth)
+js/project.js        ← Desktop business logic + DOCX data (8788 lines)
+js/main.js           ← ZIP export + archive gate
+js/inspector-profile.js ← Signature/image sizes
+```
+
+**Mandatory constraints**
+
+1. **No third-party Swift packages** — pure Foundation + SwiftUI + SwiftData + Compression (zlib).
+2. **Keep existing UI styling** — copy patterns from neighboring views; use `SheetScaffold`, `EmptyStateView`, `.groupedListStyle()`.
+3. **Match desktop strings verbatim** for labels, toasts, filenames (see Part 3).
+4. **Additive schema only** — new model fields get defaults; never delete inspector data.
+5. After adding/removing `.swift` or `.docx` files, run:
+   ```bash
+   python3 ios/generate_pbxproj.py
+   ```
+6. **Do not edit** `project.pbxproj` by hand.
+7. **Remove** scratch COC code in `DocxKit.generateCOC` only after template-based Air COC works.
+
+**Standard patterns to copy**
+
+| Pattern | Copy from |
+|---|---|
+| Modal form | `Sheets/AirSampleFormSheet.swift` + `SheetScaffold` |
+| Share exported file | `Sheets/ExcelExportSheet.swift` → `ShareSheetView`, temp URL, cleanup on dismiss |
+| Present sheet | `AppState.present(.case)` + add case to `ActiveSheet` + `RootView.sheetView` |
+| Toast | `appState.showToast("exact desktop string")` |
+| Async build + progress | `ExcelExportSheet.buildXLSX()` — `Task.detached` then `MainActor.run` |
+| Date MM/dd/yyyy local | See §12.1 `DocumentFormatters` |
+
+**Definition of done (every phase)**
+
+- [ ] Code compiles in Xcode (agent verifies structure; human builds if no Swift on CI)
+- [ ] `python3 ios/generate_pbxproj.py` run if files added
+- [ ] One happy-path manual test step documented in commit message
+- [ ] No regression to QR import, Excel, scanner, appearance
+
+---
+
+### 12.1 Phase 1 — Bundle templates + formatters + DocxTemplater scaffold
+
+#### Step 1.1 — Copy templates
+
+```bash
+mkdir -p ios/Oversight/Oversight/Templates
+cp templates/*.docx ios/Oversight/Oversight/Templates/
+```
+
+Register in Xcode **or** extend `ios/generate_pbxproj.py`:
+
+```python
+# In the filename loop inside walk_and_register's parent (build_tree file loop):
+elif f.endswith(".docx"):
+    parent.children.append(Node(f, path=f, is_group=False))
+    # In walk_and_register else branch, before register_file:
+elif node.name.endswith(".docx"):
+    register_resource(node)  # NEW: like register_asset_catalog → build_files_resources
+```
+
+Add `register_resource` mirroring `register_asset_catalog` (file ref + resource build phase entry).
+
+Run `python3 ios/generate_pbxproj.py`.
+
+#### Step 1.2 — Create `Support/DocumentFormatters.swift`
+
+Port these functions from desktop (see `js/project.js` / `js/main.js`). Use `Calendar.current` (local timezone), never UTC `Date()` parsing for date-only strings.
+
+```swift
+enum DocumentFormatters {
+    /// MM/dd/yyyy from Date
+    static func formatDateMMDDYYYY(_ date: Date) -> String
+
+    /// Parse "yyyy-MM-dd" or Date at local midnight
+    static func formatDateMMDDYYYY(from dateString: String) -> String
+
+    /// "HH:MM" input → "HHMM" for daily log
+    static func formatTimeHHMM(_ hhmmColon: String) -> String
+
+    /// First + last initial (desktop getInitials)
+    static func initials(from name: String) -> String
+
+    /// Strip trailing " Containment" then append — js/project.js getContainmentDisplayName
+    static func containmentDisplayName(_ name: String?) -> String
+
+    /// SF→ft² etc. — mirror displayUnit in js/project.js
+    static func displayUnit(_ unit: MaterialUnit) -> String
+
+    /// today as yyyy-MM-dd
+    static func todayLocalYYYYMMDD() -> String
+
+    /// Elapsed minutes; wrap past midnight
+    static func calculateTimeElapsed(start: String, stop: String) -> Int?
+
+    /// End of calendar day passed
+    static func isDateExpired(_ date: Date?) -> Bool
+
+    /// Roster: MM-dd yyyy, MM/dd/yy, etc.
+    static func formatRosterHeaderDate(_ date: Date?) -> String
+    static func formatRosterCertDate(_ date: Date?) -> String
+}
+```
+
+#### Step 1.3 — Create `Support/DocumentTemplateFile.swift`
+
+```swift
+enum DocumentTemplateFile: String, CaseIterable {
+    case airSample = "Air Sample Template"
+    case bulkSample = "Bulk Sample Template"
+    case leadWipe = "Lead Wipe Template"
+    case dailyLog = "Daily Log Template"
+    case visualInspection = "Visual Inspection Template"
+    case containmentSummary = "Containment Summary Template"
+    case workerRoster = "Worker Roster Template"
+
+    func loadData() throws -> Data {
+        guard let url = Bundle.main.url(forResource: rawValue, withExtension: "docx", subdirectory: "Templates")
+        else { throw DocumentExportError.templateMissing(rawValue) }
+        return try Data(contentsOf: url)
+    }
+}
+```
+
+#### Step 1.4 — Create `Support/DocxZipReader.swift`
+
+Extract ZIP read from `XLSXKit.swift` private `ZipKit.read` into a shared internal enum, or duplicate minimally:
+
+- Support **method 0 (STORED)** and **method 8 (DEFLATE)** — templates from repo use DEFLATE.
+- Return `[String: Data]` keyed by normalized forward-slash paths.
+
+Reuse CRC/inflate logic from `XLSXKit.swift` lines ~347–500.
+
+#### Step 1.5 — Create `Support/DocxTemplater.swift` (scaffold)
+
+Public API:
+
+```swift
+enum DocxTemplater {
+    /// Render template with scalar + loop data. Returns finished .docx Data (STORED zip).
+    static func render(template: DocumentTemplateFile, data: DocxTemplateData) throws -> Data
+}
+
+struct DocxTemplateData {
+    var scalars: [String: String] = [:]
+    var loops: [String: [[String: String]]] = [:]   // loopName → rows of tag→value
+    var images: [String: Data] = [:]                 // tag without %% → PNG/JPEG data
+    var conditionals: [String: Bool] = [:]           // #tag present or absent
+}
+```
+
+**Render pipeline (implement in order):**
+
+1. `let entries = try DocxZipReader.read(template.loadData())`
+2. `repairPlaceholderTags(in: &entries)` — port `repairDocxPlaceholderTags` from `js/project.js:1106–1104` for parts matching `word/(document|header\d+|footer\d+).xml`
+3. For each XML part in entries, run placeholder substitution:
+   - Scalars: replace `{key}` with escaped XML text (escape `& < > "`)
+   - Loops: find `{#loopName}...{/loopName}` blocks, duplicate inner XML per row in `loops[loopName]`
+   - Images `{%%tag}`: inject drawingML + add `word/media/image_generated_N.png` + relationship entries (see §12.2)
+4. Optional post-process hooks by template name
+5. `DocxZipWriter.build(entries)` — STORED zip (reuse `DocxWriter` from `DocxKit.swift` or generalize to write `[String: Data]`)
+
+**Phase 1 acceptance:** Unit-style smoke test function (or debug button) loads Air Sample template, sets `{date}` and `{projectNumber}`, writes temp file, opens in Word without corruption.
+
+---
+
+### 12.2 Phase 2 — Loops, images, post-processing
+
+#### Step 2.1 — Loop expansion algorithm
+
+Desktop uses Docxtemplater; you must replicate loop semantics:
+
+1. Parse XML as string (templates are small enough).
+2. Regex or scan for `{#name}` … `{/name}` — handle Air Sample 3-row sample groups as one loop iteration spanning multiple `<w:tr>` rows (read template structure in Part 2 of audit / subagent template dump).
+3. For each row dictionary in `loops["samples"]`, clone the loop body and replace inner `{tag}` values.
+4. Missing keys → empty string (desktop `nullGetter: () => ''` on ZIP path).
+
+#### Step 2.2 — Image embedding
+
+Port sizes from `js/inspector-profile.js`:
+
+| partValue | Max px | Notes |
+|---|---|---|
+| `photo` | 336×336 | fit aspect, no upscale |
+| `image` (signature) | 250×80 | `{%%image}` in Daily Log / VI |
+
+Steps per image:
+
+1. Add PNG bytes to `word/media/image_generated_{n}.png`
+2. Add relationship in `word/_rels/document.xml.rels` (or header/footer rels)
+3. Replace `{%%tag}` paragraph with `w:drawing` inline anchor — generate minimal OOXML (copy structure from a rendered desktop doc once, or use known snippet)
+
+Signature input: `Inspector.signatureData` → prefix `data:image/png;base64,` if missing.
+
+Photo input: `LogEntryPhoto.imageData` → detect PNG magic (`0x89 0x50`) vs JPEG.
+
+#### Step 2.3 — Post-processors
+
+Create `Support/DocxPostProcessor.swift`:
+
+```swift
+enum DocxPostProcessor {
+    static func apply(template: DocumentTemplateFile, zip: inout [String: Data], context: DocxPostContext)
+}
+```
+
+| Template | Function | Port from |
+|---|---|---|
+| Daily Log | removeEmptyPhotoLogCells + paginatePhotoLogTable | `js/inspector-profile.js:277–348` |
+| Worker Roster | colorExpiredDates red `#EE0000` | `js/project.js:1123–1150` |
+
+#### Step 2.4 — Placeholder repair (critical)
+
+Port verbatim from `js/project.js` `repairDocxPlaceholderXml` — seven regex passes. Without this, Bulk/Lead Wipe/Containment templates throw duplicate-tag errors. Test by running desktop `scripts/scan-template-tags.js` equivalents against bundled templates.
+
+**Phase 2 acceptance:** Render Air Sample template with 2 loop rows + footer `{inspectorName}`; render Daily Log with one `{%%photo}`; open in Word.
+
+---
+
+### 12.3 Phase 3 — Air COC end-to-end
+
+#### Step 3.1 — Create `Support/DocumentExportData.swift`
+
+```swift
+enum DocumentExportData {
+    static func airSampleCOC(
+        project: Project,
+        samples: [AirSample],
+        form: ChainOfCustodyFormData,
+        inspector: Inspector?
+    ) -> DocxTemplateData
+}
+```
+
+Port logic from `js/project.js` `printAirSampleForm` (~7380–7525):
+
+- Build `datesCollected` from unique sorted sample dates → one date or range string.
+- Map each sample to loop row keys: `sampleID`, `sampleDescription`, `sampleDate`, `startTime`, `stopTime`, `startFlow`, `stopFlow`, `timeElapsed`, `averageFlow`, `sampleVolume`.
+- `sampleDescription` = comments else location display (containment + location).
+- Merge `form.templateAliases` into scalars: `labNumber`, `lab`, `spectialInstructions` (**typo**), etc.
+
+#### Step 3.2 — Create `Support/ChainOfCustodyFormData.swift`
+
+```swift
+struct ChainOfCustodyFormData {
+    var inspectorName: String
+    var labNumber: String
+    var lab: String
+    var analysisType: String
+    var turnAroundTime: String
+    var specialInstructions: String
+    var inspectorEmail: String
+
+    var templateAliases: [String: String] { /* Bill, Bill2, Laboratory, laboratory */ }
+}
+```
+
+#### Step 3.3 — Create `Sheets/AirCOCFormSheet.swift`
+
+Structure (copy `AirSampleFormSheet` + checkbox list pattern):
+
+```swift
+struct AirCOCFormSheet: View {
+    let project: Project
+    @Query private var inspectors: [Inspector]
+    @State private var selectedIds: Set<PersistentIdentifier> = []
+    @State private var form = ChainOfCustodyFormData(...)
+    @State private var isExporting = false
+    @State private var shareURL: URL?
+    // ...
+}
+```
+
+**UI sections (exact labels):**
+
+1. Navigation title: **Print Air Sample Request**
+2. Footer text: *Select samples and complete the form to generate the lab submission.*
+3. **Select Samples to Print** — `Select All` / `Select None` buttons; `Toggle` per sample; subtitle `{type} · {start}-{stop} ({min} min)`; count **N sample(s) selected**.
+4. Form fields (see Part 2 §2.7).
+5. Analysis `Picker` — rebuild when selection changes:
+   - All lead → Flame AA, ICP, ICP M/S
+   - Else → PCM: NIOSH 7400, TEM: NIOSH 7402
+6. Toolbar: **Cancel** / **Save** (use `SheetScaffold` saveLabel: **Save**)
+
+**On Save validation:**
+
+```swift
+guard !selectedSamples.isEmpty else {
+    appState.showToast("Please select at least one sample to print.")
+    return
+}
+// If mixed hazards:
+appState.showToast("Print Pb air samples separately from Asb air samples.")
+```
+
+**On success:**
+
+```swift
+appState.showToast("Loading Air Sample template...")  // before render
+let data = try DocxTemplater.render(template: .airSample, data: exportData)
+let name = "Air_Sample_Request_\(project.projectNumber)_\(dateUnderscored).docx"
+// write temp + share sheet
+appState.showToast("Air sample request document generated successfully.")
+```
+
+Default all samples **selected** on appear.
+
+#### Step 3.4 — Wire `ActiveSheet` + views
+
+**`AppState.swift`:**
+
+```swift
+case printAirCOC(Project)
+// id: "printAirCOC-\(project.persistentModelID)"
+```
+
+**`RootView.swift`:** `case .printAirCOC(let p): AirCOCFormSheet(project: p)`
+
+**`SamplesView.swift`** — add toolbar leading/secondary buttons:
+
+```swift
+ToolbarItem(placement: .topBarLeading) {
+    HStack {
+        Button("Air COC") { appState.present(.printAirCOC(project)) }
+            .disabled(project.airSamples.isEmpty)
+        // Bulk/Wipe in phases 4
+    }
+}
+```
+
+**`DocumentsView.swift`** — replace single COC row with three rows (Part 3.2). Remove `generateCOC()` scratch path.
+
+#### Step 3.5 — Delete scratch COC
+
+Remove `DocxGenerator.generateCOC` body and helpers used only by it (`buildDocumentXml`, `sampleTable`, etc.) from `DocxKit.swift`. Keep `DocxWriter` ZIP utilities.
+
+**Phase 3 acceptance:** Samples tab **Air COC** → modal → select 1 sample → Share → open in Word → matches desktop field values for same project data.
+
+---
+
+### 12.4 Phase 4 — Bulk and Wipe COC
+
+#### Step 4.1 — Bulk material picker sheet
+
+If `openPrintBulkSamplesModal()` called without material and multiple materials have bulk samples, show **`Select Material`** sheet first (port `js/project.js:2392–2422`):
+
+- Title: **Select Material**
+- Text: *Select the material whose bulk samples you want to print.*
+- Picker of material names → on Save, open bulk COC with that material's samples filtered.
+
+#### Step 4.2 — `DocumentExportData.bulkSampleCOC`
+
+- Filter `project.bulkSamples` where `materialName` matches and `selectedIds` contains sample.
+- Loop `{#samplesBulk}`: `{projectNumber}-{sampleID}`, `{sampleDescription}` = `{location} — {comments}`.
+- Default `analysisType`: `PLM - Standard` (asbestos) or lead list.
+
+**Mixed hazard guard:** disable analysis + toast `Select samples with the same hazard (asbestos or lead) before printing.`
+
+#### Step 4.3 — `Sheets/BulkCOCFormSheet.swift`
+
+- Title: **Print Bulk Sample Chain of Custody**
+- Intro includes **Material: {name}**.
+- Filename: `Bulk_Sample_COC_{projectNumber}_{sanitizedMaterial}_{date}.docx`
+
+#### Step 4.4 — Wipe COC
+
+- Title: **Print Lead Wipe Chain of Custody**
+- Loop `{#samplesWipe}` two-row structure — port `formatWipeSampleTypeForCoc`, `resolveWipeContainmentName`.
+- Scalars use `dateCollected`, `Bill2`, `laboratory`, `clientName`, `siteName`.
+- Hide Wipe COC when no lead materials (`HazardSummary.projectHasLead(project)`).
+
+#### Step 4.5 — Wire buttons
+
+- `ActiveSheet.printBulkCOC(Project, materialName?)`, `printWipeCOC(Project)`
+- Samples toolbar **Bulk COC** / **Wipe COC**
+- Documents three cards tap → same sheets
+
+**Phase 4 acceptance:** Bulk and Wipe DOCX open in Word; filenames correct.
+
+---
+
+### 12.5 Phase 5 — Worker roster export
+
+#### Step 5.1 — `DocumentExportData.workerRoster`
+
+Port `buildWorkerRosterTemplateData` (`js/project.js:8245–8379`):
+
+1. Collect distinct daily log dates (sorted), take first **10** → `date1`…`date10` formatted `MM-dd yyyy`.
+2. For each worker, compute `mark1`…`mark10` = `"X"` or `""` by presence on that date (match worker id or case-insensitive name in `log.workerNames`).
+3. Paired exp/expired fields with `isDateExpired` — only one populated per cert column.
+4. Include header scalars: `{client}`, `{pjNumber}`.
+
+#### Step 5.2 — Export function
+
+```swift
+static func exportWorkerRoster(project: Project) throws -> Data {
+    var data = DocumentExportData.workerRoster(project: project)
+    var zip = try DocxTemplater.renderRaw(...) // or render + post-process
+    DocxPostProcessor.apply(template: .workerRoster, zip: &zip, context: ...)
+    return DocxZipWriter.build(zip)
+}
+```
+
+#### Step 5.3 — `TeamView.swift`
+
+Add toolbar button:
+
+```swift
+Button("Export roster") {
+    // guard !roster.isEmpty else { showToast("Add workers to the roster before exporting."); return }
+    appState.showToast("Generating worker roster…")
+    // async export → share
+    appState.showToast("Worker roster exported.")
+}
+.disabled(project.workerRoster.isEmpty)
+```
+
+Filename: `{projectNumber}_Worker_Roster.docx` with non-word chars → `_`.
+
+**Phase 5 acceptance:** Expired cert dates appear red in Word; X marks on attendance columns.
+
+---
+
+### 12.6 Phase 6 — Daily log export + log UX
+
+#### Step 6.1 — Model addition (additive)
+
+```swift
+// DailyLog.swift — add optional field with default
+var activeContainments: [String] = []  // snapshot at log save time
+```
+
+On save in `DailyLogFormSheet`, populate via `ActiveContainmentNames.forLog(project, log)` (port `getActiveContainmentNamesForLog`).
+
+#### Step 6.2 — Per-containment negative pressure (optional structured)
+
+Either:
+
+- **A)** Extend `LogEntry` with `@Relationship` child `NegativePressureReading(containmentName, pressure)`, or
+- **B)** Keep `negativePressureNotes` but build UI as dynamic fields per active containment (port `buildNegativePressureHtml`).
+
+Export aggregates to `{negativePressure}` sentence (Part 2 §2.11).
+
+#### Step 6.3 — `DocumentExportData.dailyLog`
+
+Port `printDailyLog` (`js/project.js:7531–7765`) + ZIP fixes from `js/main.js:1683` for photos:
+
+- Photos: JPEG/PNG → `data:image/jpeg;base64,...` prefix mandatory.
+- `logEntries` loop: `{time}` HHMM, `{description}`, `{photoNumber}` range logic.
+- `photoLogRows`: pair `{number}` + `{%%photo}` in col1/col2; omit `col2` key when odd count.
+- `{%%image}` from signature lookup by log inspector name.
+
+#### Step 6.4 — Photo gallery on `DailyLogDetailView`
+
+Add navigation or sheet: tap entry photo count → scroll `LogEntryPhoto` images (reuse `ScannedDocumentViewer` pattern).
+
+#### Step 6.5 — Export entry point
+
+- Optional: swipe action **Print** on log row → single log export.
+- Required for phase 8: callable from ZIP builder.
+
+Filename single: `Daily_Log_{projectNumber}_{MM_DD_YYYY}.docx`
+
+**Phase 6 acceptance:** Daily log with 3 photos exports; photo log grid paginates; signature appears.
+
+---
+
+### 12.7 Phase 7 — Visual Inspection + Containment Summary (ZIP-only builders)
+
+#### Step 7.1 — `DocumentExportData.visualInspection`
+
+Input: `Project`, `Containment`, `VisualInspection` (passed Pre-Start or Final only).
+
+Scalars: `{typeOfInspection}`, `{finding}` Pass/Fail, `{containmentLocation}`, `{comments}`, `{inspectorInitials}`, `{inspectorName}`, `{date}`, `{client}`, `{contractor}`, `{projectNumber}`, `{%%image}`.
+
+Output filenames:
+
+- `Pre-Start Visual Inspection.docx`
+- `Final Visual Inspection.docx`
+
+#### Step 7.2 — `DocumentExportData.containmentSummary`
+
+Port `js/main.js:2006–2094`:
+
+- Stage history → dates/initials for milestone columns.
+- `matRemList` from spaces/materials quantities with locale number format.
+- `totalMatList` aggregated from containment materials.
+
+**Phase 7 acceptance:** Functions return Data; tested via Phase 8 ZIP.
+
+---
+
+### 12.8 Phase 8 — Project ZIP export
+
+#### Step 8.1 — Create `Support/ProjectZipExporter.swift`
+
+```swift
+enum ProjectZipExporter {
+    static func export(project: Project, inspector: Inspector?) async throws -> (data: Data, fileCount: Int)
+}
+```
+
+Algorithm (mirror `downloadArchivedProject` in `js/main.js:1348+`):
+
+```
+filesAdded = 0
+for each dailyLog in project.dailyLogs (array order):
+    blob = dailyLogDocx(log) → add "Daily Logs/Daily_Log_{date}.docx"
+
+if !project.workerRoster.isEmpty:
+    blob = workerRosterDocx → add "Worker Roster/Worker_Roster.docx"
+
+for each containment in project.containments:
+    folder = "\(containment.name) Containment/"  // use containmentDisplayName stripping
+    if passed Pre-Start VI exists: add "Pre-Start Visual Inspection.docx"
+    if passed Final VI exists: add "Final Visual Inspection.docx"
+    always: add "Containment Summary.docx"
+
+if filesAdded == 0: throw noDocuments
+
+return STORED zip named "{projectNumber}.zip"
+```
+
+Use shared `ZipKit.write` pattern from `XLSXKit.swift`.
+
+Skip null blobs silently (desktop behavior).
+
+#### Step 8.2 — Create `Sheets/ProjectFilesExportSheet.swift`
+
+Clone structure from `ExcelExportSheet`:
+
+1. Title: **Download project files** (or navigation title matching Edit menu)
+2. States: `Preparing project files for download...` → progress → share
+3. Toasts: `Creating ZIP with N files...`, `Project files downloaded successfully (N documents).`
+4. Empty error: `No documents found to download.`
+
+#### Step 8.3 — Wire entry points
+
+**`ProjectDetailView` Edit menu:** `Button("Download project files") { appState.present(.downloadProjectFiles(project)) }`
+
+**`ArchiveView`:** swipe or context menu **Download** on each row.
+
+**`ActiveSheet`:** `case downloadProjectFiles(Project)`
+
+**Phase 8 acceptance:** Project with 1 log + 1 containment produces ZIP; extracts open in Word.
+
+---
+
+### 12.9 Phase 9 — Archive gate + unarchive + material progress
+
+#### Step 9.1 — Create `Support/ProjectArchiveGate.swift`
+
+Port:
+
+- `calculateMaterialCompletion(project)` — `js/main.js` / `js/shell.js`
+- `projectArchiveGate(project) -> Result<Void, ArchiveGateFailure>` with messages:
+  - All containments must be Abatement Completed
+  - 100% materials abated
+  - Materials assigned
+
+#### Step 9.2 — Update `ProjectDetailView` Mark completed
+
+Replace direct toggle:
+
+```swift
+Button(project.status == .completed ? "Reopen project" : "Mark completed") {
+    if project.status == .completed {
+        project.status = .active  // or use unarchive flow
+    } else {
+        switch ProjectArchiveGate.validate(project) {
+        case .success:
+            // confirmationDialog: Archive "{siteName}"? This will mark the project as completed.
+            project.status = .completed
+        case .failure(let reason):
+            appState.showToast(reason.localizedDescription)
+        }
+    }
+}
+```
+
+#### Step 9.3 — `ArchiveView` unarchive
+
+```swift
+Button("Unarchive") {
+    project.status = .active
+    try? modelContext.save()
+}
+```
+
+#### Step 9.4 — Material progress UI
+
+On `ProjectDetailView`, add `ProgressBarView(percent: materialCompletion)` using gate calculation (not only stage-based `percentComplete`).
+
+**Phase 9 acceptance:** Cannot complete project until gate passes; progress bar reflects materials.
+
+---
+
+### 12.10 Phase 10 — Regulated area + auto wipes + neg. pressure
+
+#### Step 10.1 — Model
+
+```swift
+// Containment.swift
+var regulatedArea: Bool = false
+```
+
+#### Step 10.2 — UI
+
+- `GatedStageChangeSheet`: when `viType == .preStart`, add Toggle **Regulated Area** + hint text from desktop VI modal.
+- `ContainmentFormSheet`: show read-only regulated flag or toggle if editing.
+
+#### Step 10.3 — Business logic changes
+
+**`GatedStageChangeSheet.save()`:**
+
+```swift
+if passed && targetStage == .containmentClearance && !containment.regulatedArea {
+    autoCreateClearanceSamples()  // existing
+}
+// Skip samples when regulatedArea == true
+```
+
+**Create `Support/AutoSampleCreation.swift`:**
+
+Port from `js/project.js`:
+
+- `createClearanceWipeSample(containment:project:inspection:)` — on Final VI pass + lead materials
+- `createPreAbatementWipeSample(containment:project:)` — on containment create if `isWashoeClient(project.clientName)` + lead
+
+Call pre-abatement wipe from `ContainmentFormSheet` save when stage is Preparation.
+
+**Washoe detection:** port `isWashoeClient` — match client name contains "Washoe" / "Washoe County School District" per desktop.
+
+#### Step 10.4 — Fix stage bypass
+
+In `ContainmentFormSheet`, **remove** Stage picker OR disable it with footer: *Use Set stage on the containment card to change stage.*
+
+**Phase 10 acceptance:** Regulated containment gets no auto air samples; Washoe project gets pre-start wipe; clearance wipe on Final pass.
+
+---
+
+### 12.11 Phase 11 — Polish and remaining gaps
+
+| Task | Instructions |
+|---|---|
+| Wire `newBulkSampleFromMaterial` | In `MaterialsView` context menu, call `appState.present(.newBulkSampleFromMaterial(project, name, hmr))` |
+| Wire `newVisualInspection` | Add **Add inspection** on containment card → `newVisualInspection` |
+| Fix Documents count | `ProjectDetailView` section link count = `scannedDocuments.count` |
+| Call `SeedData.populateIfNeeded` | In `OversightApp.init` or `.onAppear` in `RootView` when projects empty and first launch |
+| Due date field | Add `DatePicker` optional to `ProjectFormSheet`; bind `project.dueDate` |
+| Import workers from Excel | New sheet reads Worker Roster sheet from exported xlsx |
+| Excel import merge | If project number exists, confirm update vs create new |
+| Lead cert expiry | Extend `Worker.hasExpiredCertification` + Today attention |
+| Hide Wipe tab | In `SamplesView`, if `!HazardSummary.projectHasLead(project)` hide wipe segment |
+
+---
+
+### 12.12 Phase 12 (optional) — Default templates auto-generate
+
+In `ProjectDetailView` when archive succeeds:
+
+```swift
+let templates = inspectors.first?.defaultTemplates ?? []
+if templates.contains(.dailyLog) { /* generate all logs */ }
+// etc. — or call ProjectZipExporter directly
+```
+
+Read selections from `Inspector.defaultTemplates` (already saved by `DefaultTemplatesSheet`).
+
+---
+
+### 12.13 Hazard summary helper
+
+Create `Support/HazardSummary.swift`:
+
+```swift
+enum HazardSummary {
+    static func projectHasLead(_ project: Project) -> Bool
+    static func projectHasAsbestos(_ project: Project) -> Bool
+    static func hazardLabel(for sample: BulkSample) -> String  // Asb / Pb / Asb+Pb
+}
+```
+
+Port rules from `getProjectHazardSummary` / material hazard flags in `js/project.js`. Until material hazard fields exist, infer from wipe samples / air sample hazard types / material names heuristic (match desktop fallback).
+
+---
+
+### 12.14 Document export share helper (reuse everywhere)
+
+Add to `Support/DocumentExport.swift`:
+
+```swift
+enum DocumentExport {
+    static func writeTemporary(data: Data, fileName: String) throws -> URL
+    static func sanitizeFileName(_ s: String) -> String
+}
+
+struct DocumentShareSheet: View {
+    let url: URL
+    let onDismiss: () -> Void
+    // wraps ShareSheetView + onDisappear delete temp file
+}
+```
+
+Every COC/roster/log export uses this — never duplicate temp file logic.
+
+---
+
+### 12.15 Testing script for agents without Xcode
+
+If Swift compiler unavailable:
+
+1. Verify all new files exist under `ios/Oversight/Oversight/`.
+2. Run `python3 ios/generate_pbxproj.py` — must succeed.
+3. Grep new symbols referenced from `RootView` / `AppState`.
+4. Cross-check exported JSON field names against desktop template tag list (Part 2 §2.11 / `js/project.js`).
+5. Human tester runs Xcode build on device.
+
+---
+
+### 12.16 Commit strategy
+
+One commit per phase (§Part 9 table). PR description lists which checklist items from Part 8 are now passable.
+
+**Do not** mix phase 3 UI with phase 8 ZIP in one commit — reviewers cannot bisect failures.
+
+---
+
+### 12.17 Quick reference — desktop function → Swift home
+
+| Desktop (`js/project.js` / `js/main.js`) | Swift destination |
+|---|---|
+| `printAirSampleForm` | `DocumentExportData.airSampleCOC` + `AirCOCFormSheet` |
+| `printBulkSampleForm` | `DocumentExportData.bulkSampleCOC` + `BulkCOCFormSheet` |
+| `printWipeSampleForm` | `DocumentExportData.wipeSampleCOC` + `WipeCOCFormSheet` |
+| `printDailyLog` | `DocumentExportData.dailyLog` |
+| `exportWorkerRosterDoc` | `DocumentExportData.workerRoster` + Team export |
+| `downloadArchivedProject` | `ProjectZipExporter.export` |
+| `generateDocBlob` | `DocxTemplater.render` |
+| `repairDocxPlaceholderTags` | `DocxTemplater.repairPlaceholderTags` |
+| `buildWorkerRosterTemplateData` | `DocumentExportData.workerRoster` |
+| `getActiveContainmentNamesForLog` | `ActiveContainmentNames.forLog` |
+| `projectArchiveGate` | `ProjectArchiveGate.validate` |
+| `calculateMaterialCompletion` | `ProjectArchiveGate.materialCompletion` |
+| `createClearanceWipeSample` | `AutoSampleCreation.clearanceWipe` |
+| `createPreAbatementWipeSample` | `AutoSampleCreation.preAbatementWipe` |
+| `openPrintAirSamplesModal` | `AirCOCFormSheet` UI |
+| `createSignatureImageModule` | `DocxTemplater` image embedding sizes |
+
+---
+
 *This audit reflects the repo at `main` with iOS app under `ios/Oversight/`. Re-run gap analysis after each phase by checking off items in Parts 1, 7, and 8.*
