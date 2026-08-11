@@ -61,6 +61,8 @@ Each gap entry includes: **what desktop does**, **what iOS does today**, **what 
 
 **Daily logs + Excel logging shape:** see **[`IOS_DAILY_LOG_PARITY.md`](./IOS_DAILY_LOG_PARITY.md)** — photo viewing, edit UX, and `_FullData` / `_DailyLogPhotos` cross-platform contract.
 
+**Visual inspections + Excel:** see **[`IOS_VISUAL_INSPECTION_PARITY.md`](./IOS_VISUAL_INSPECTION_PARITY.md)** — comments vs notes, regulated area, stage revert on delete, auto samples, Excel sheet columns.
+
 ---
 
 ## Part 1 — Gap matrix by feature area
