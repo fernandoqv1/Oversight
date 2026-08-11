@@ -57,6 +57,8 @@ Each gap entry includes: **what desktop does**, **what iOS does today**, **what 
 
 **Biggest gaps:** template-based Word export (7 types + ZIP), COC modals, worker roster export, archive gate + download package, several business rules (auto wipe samples, regulated area, per-containment negative pressure UI, material completion archive gate).
 
+**For AI implementers:** jump to **[Part 12 — Agent build instructions](#part-12--agent-build-instructions-for-claude--ai-implementers)** for step-by-step recipes (files to create, code patterns, acceptance tests).
+
 ---
 
 ## Part 1 — Gap matrix by feature area

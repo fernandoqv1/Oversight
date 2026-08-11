@@ -11,3 +11,4 @@ That file includes:
 - Business rules, archive gate, and known iOS bugs
 - Exact desktop wording to match (keeping SwiftUI styling)
 - Xcode setup, file list, phases, and testing checklists
+- **Part 12: step-by-step agent build instructions** (for Claude to implement each phase)
