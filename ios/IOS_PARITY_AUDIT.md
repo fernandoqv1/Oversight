@@ -59,6 +59,8 @@ Each gap entry includes: **what desktop does**, **what iOS does today**, **what 
 
 **For AI implementers:** jump to **[Part 12 — Agent build instructions](#part-12--agent-build-instructions-for-claude--ai-implementers)** for step-by-step recipes (files to create, code patterns, acceptance tests).
 
+**Daily logs + Excel logging shape:** see **[`IOS_DAILY_LOG_PARITY.md`](./IOS_DAILY_LOG_PARITY.md)** — photo viewing, edit UX, and `_FullData` / `_DailyLogPhotos` cross-platform contract.
+
 ---
 
 ## Part 1 — Gap matrix by feature area
