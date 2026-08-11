@@ -38,13 +38,18 @@ final class Space {
 }
 
 /// Asbestos-containing material (ACM) record, scoped to a space.
-/// Field names match desktop material records: name, quantity, unit, type.
+/// Fields match desktop material records: name, quantity, unit, type,
+/// hmrNumber (lab tracking), isFriable (ACM classification).
 @Model
 final class Material {
     var name: String
     var quantity: Double
     var unitRaw: String
     var materialTypeRaw: String
+    /// HMR# — lab hazardous materials record number, optional.
+    var hmrNumber: String
+    /// Friable vs non-friable ACM classification.
+    var isFriable: Bool
     var space: Space?
 
     init(
@@ -52,12 +57,16 @@ final class Material {
         quantity: Double = 0,
         unit: MaterialUnit = .squareFeet,
         materialType: MaterialType = .surfacing,
+        hmrNumber: String = "",
+        isFriable: Bool = false,
         space: Space? = nil
     ) {
         self.name = name
         self.quantity = quantity
         self.unitRaw = unit.rawValue
         self.materialTypeRaw = materialType.rawValue
+        self.hmrNumber = hmrNumber
+        self.isFriable = isFriable
         self.space = space
     }
 

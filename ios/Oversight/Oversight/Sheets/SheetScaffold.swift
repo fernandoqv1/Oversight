@@ -12,6 +12,7 @@ struct SheetScaffold<Content: View>: View {
     let title: String
     var saveLabel: String = "Save"
     var saveDisabled: Bool = false
+    var hideCancelButton: Bool = false
     var onSave: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @ViewBuilder var content: Content
@@ -20,10 +21,12 @@ struct SheetScaffold<Content: View>: View {
         NavigationStack {
             Form { content }
                 .navigationTitle(title)
-                .navigationBarTitleDisplayMode(.inline)
+                .inlineNavTitle()
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { dismiss() }
+                    if !hideCancelButton {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { dismiss() }
+                        }
                     }
                     if let onSave {
                         ToolbarItem(placement: .confirmationAction) {

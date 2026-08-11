@@ -38,8 +38,9 @@ enum SeedData {
     private static func insert(into context: ModelContext) {
         let inspector = Inspector(
             name: "Marcus Hale",
-            license: "CAC #14-5821",
-            certifications: "AHERA Building Inspector, Contractor/Supervisor, Project Designer"
+            company: "AsbTrack Environmental",
+            certificationNumber: "AI-14-5821",
+            license: "CAC #14-5821"
         )
         context.insert(inspector)
 
@@ -74,7 +75,7 @@ enum SeedData {
         let c1c = Containment(name: "Room 104", buildingName: b1.name, stage: .containmentPreparation, spaceNames: [room104.name], project: p1)
         [c1a, c1b, c1c].forEach { context.insert($0) }
 
-        context.insert(AirSample(sampleId: "OVS-2041-AS11", sampleType: .background, location: "Outside Containment, Corridor C-1", containmentName: c1b.name, date: .now, startTime: time(0, 7, 40), startFlowRate: 4.0, project: p1))
+        context.insert(AirSample(sampleId: "OVS-2041-AS11", sampleType: .area, location: "Outside Containment, Corridor C-1", containmentName: c1b.name, date: .now, startTime: time(0, 7, 40), startFlowRate: 4.0, project: p1))
         context.insert(AirSample(sampleId: "OVS-2041-AS08", sampleType: .area, location: "Boiler Room — North", containmentName: c1a.name, date: .now, startTime: time(0, 8, 5), stopTime: time(0, 11, 35), startFlowRate: 2.0, stopFlowRate: 2.0, project: p1))
         context.insert(AirSample(sampleId: "OVS-2041-PS03", sampleType: .personal, location: "Worker — R. Mota", containmentName: c1a.name, date: days(-1), startTime: time(-1, 8, 15), stopTime: time(-1, 12, 5), startFlowRate: 2.0, stopFlowRate: 1.9, project: p1))
 
@@ -84,10 +85,10 @@ enum SeedData {
 
         let log1 = DailyLog(date: .now, project: p1)
         context.insert(log1)
-        context.insert(LogEntry(time: time(0, 9, 18), stage: .activeAbatement, note: "Gross removal of TSI in Boiler Room ongoing. Negative pressure verified at -0.04\" wc across 2 machines.", photoCount: 2, dailyLog: log1))
+        context.insert(LogEntry(time: time(0, 9, 18), note: "Gross removal of TSI in Boiler Room ongoing. Negative pressure verified at -0.04\" wc across 2 machines.", photoCount: 2, negativePressureNotes: "Boiler Room: -0.04\" wc", dailyLog: log1))
         let log1b = DailyLog(date: days(-1), project: p1)
         context.insert(log1b)
-        context.insert(LogEntry(time: time(-1, 15, 30), stage: .activeAbatement, note: "Visual inspection failed — debris remaining along east wall. Crew to re-clean.", photoCount: 4, isFailedInspection: true, dailyLog: log1b))
+        context.insert(LogEntry(time: time(-1, 15, 30), note: "Visual inspection failed — debris remaining along east wall. Crew to re-clean.", photoCount: 4, dailyLog: log1b))
 
         // Project 2 — Mercy General Hospital (clearance)
         let p2 = Project(
@@ -120,7 +121,7 @@ enum SeedData {
 
         let log2 = DailyLog(date: .now, project: p2)
         context.insert(log2)
-        context.insert(LogEntry(time: time(0, 7, 5), stage: .containmentClearance, note: "Final clearance air sampling started in OR Suite 3 after visual pass.", photoCount: 1, dailyLog: log2))
+        context.insert(LogEntry(time: time(0, 7, 5), note: "Final clearance air sampling started in OR Suite 3 after visual pass.", photoCount: 1, dailyLog: log2))
 
         // Project 3 — Pinewood Manufacturing (active abatement)
         let p3 = Project(

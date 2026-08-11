@@ -41,7 +41,7 @@ struct AppearanceFormSheet: View {
                 }
             }
             .navigationTitle("Appearance")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavTitle()
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }

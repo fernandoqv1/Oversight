@@ -43,7 +43,7 @@ struct DefaultTemplatesSheet: View {
                 }
             }
             .navigationTitle("Default Templates")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavTitle()
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { save(); dismiss() } }
             }

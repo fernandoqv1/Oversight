@@ -18,6 +18,9 @@ Asbestos abatement project oversight for field inspectors. Two apps live here:
 - Never delete or lossily migrate inspector data. Additive schema changes only.
 - Native app: SwiftUI + SwiftData, iOS 17+/macOS 14+, no third-party deps,
   offline-first (no backend).
-- Excel import/export is desktop-only; do not port it to iOS.
+- Excel import/export is supported on both desktop AND iOS. The iOS app exports
+  XLSX (STORED/uncompressed ZIP) compatible with Excel and the desktop app, and
+  imports XLSX files exported from the iOS app. Files exported by the desktop app
+  (which use DEFLATE compression) are not supported for import on iOS.
 - Commit per feature/phase with clear messages; branch `main`, remote
   `github.com/fernandoqv1/Oversight`.

@@ -27,7 +27,7 @@ struct ArchiveView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .groupedListStyle()
         .navigationTitle("Archive")
         .navigationDestination(for: Project.self) { project in
             ProjectDetailView(project: project)

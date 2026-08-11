@@ -48,7 +48,7 @@ struct ProjectsListView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .groupedListStyle()
         .searchable(text: $query, prompt: "Search projects, sites, samples…")
         .safeAreaInset(edge: .top) {
             Picker("Filter", selection: $segment) {
@@ -61,8 +61,19 @@ struct ProjectsListView: View {
         }
         .navigationTitle("Projects")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { appState.present(.newProject) } label: {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button {
+                        appState.present(.newProject)
+                    } label: {
+                        Label("New Project", systemImage: "plus")
+                    }
+                    Button {
+                        appState.present(.importExcel)
+                    } label: {
+                        Label("Import from Excel", systemImage: "square.and.arrow.down")
+                    }
+                } label: {
                     Image(systemName: "plus")
                 }
             }

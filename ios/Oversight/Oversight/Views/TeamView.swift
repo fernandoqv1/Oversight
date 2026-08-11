@@ -2,9 +2,8 @@
 //  TeamView.swift
 //  Oversight
 //
-//  Worker Roster — ported from TeamScreen in oversight-screens.jsx.
-//  Certification labels match desktop worker records: AHERA, Medical,
-//  Respirator fit, Lead.
+//  Worker Roster — tap to edit, swipe to delete.
+//  Mirrors the Workers tab in js/project.js.
 //
 
 import SwiftUI
@@ -13,12 +12,18 @@ import SwiftData
 struct TeamView: View {
     @Bindable var project: Project
     @Environment(AppState.self) private var appState
+    @Environment(\.modelContext) private var modelContext
+    @State private var deleteConfirmFor: Worker?
 
     var body: some View {
         List {
             Section("\(project.workerRoster.count) worker\(project.workerRoster.count == 1 ? "" : "s")") {
                 if project.workerRoster.isEmpty {
-                    EmptyStateView(title: "No workers", subtitle: "Add the crew roster.", actionLabel: "Add worker") {
+                    EmptyStateView(
+                        title: "No workers",
+                        subtitle: "Add the crew roster.",
+                        actionLabel: "Add worker"
+                    ) {
                         appState.present(.newWorker(project))
                     }
                 } else {
@@ -29,17 +34,50 @@ struct TeamView: View {
                             workerCard(worker)
                         }
                         .foregroundStyle(.primary)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                deleteConfirmFor = worker
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Team")
-        .navigationBarTitleDisplayMode(.inline)
+        .groupedListStyle()
+        .navigationTitle("Workers")
+        .inlineNavTitle()
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { appState.present(.newWorker(project)) } label: { Image(systemName: "plus") }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button {
+                        appState.present(.newWorker(project))
+                    } label: {
+                        Label("Add Worker", systemImage: "person.badge.plus")
+                    }
+                    Button {
+                        appState.present(.copyWorkers(project))
+                    } label: {
+                        Label("Copy from Another Project", systemImage: "person.2.badge.gearshape")
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                }
             }
+        }
+        .confirmationDialog(
+            "Delete \(deleteConfirmFor?.name ?? "") from the worker roster?",
+            isPresented: Binding(get: { deleteConfirmFor != nil }, set: { if !$0 { deleteConfirmFor = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Worker", role: .destructive) {
+                if let w = deleteConfirmFor {
+                    modelContext.delete(w)
+                    try? modelContext.save()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -56,7 +94,10 @@ struct TeamView: View {
                         Text(worker.role.label)
                             .font(.caption2.weight(.semibold))
                             .padding(.horizontal, 6).padding(.vertical, 1)
-                            .background((worker.role == .supervisor ? Color.blue : Color.secondary).opacity(0.15), in: Capsule())
+                            .background(
+                                (worker.role == .supervisor ? Color.blue : Color.secondary).opacity(0.15),
+                                in: Capsule()
+                            )
                             .foregroundStyle(worker.role == .supervisor ? .blue : .secondary)
                     }
                     Text(worker.respiratorTypes.map(\.rawValue).joined(separator: ", "))

@@ -30,6 +30,7 @@ final class Project {
     var statusRaw: String
     var dueDate: Date?
     var createdAt: Date
+    var projectFolderPath: String = ""
 
     @Relationship(deleteRule: .cascade, inverse: \Building.project)
     var buildings: [Building] = []
@@ -40,6 +41,12 @@ final class Project {
     @Relationship(deleteRule: .cascade, inverse: \AirSample.project)
     var airSamples: [AirSample] = []
 
+    @Relationship(deleteRule: .cascade, inverse: \BulkSample.project)
+    var bulkSamples: [BulkSample] = []
+
+    @Relationship(deleteRule: .cascade, inverse: \WipeSample.project)
+    var wipeSamples: [WipeSample] = []
+
     @Relationship(deleteRule: .cascade, inverse: \Worker.project)
     var workerRoster: [Worker] = []
 
@@ -48,6 +55,9 @@ final class Project {
 
     @Relationship(deleteRule: .cascade, inverse: \GeneratedDocument.project)
     var documents: [GeneratedDocument] = []
+
+    @Relationship(deleteRule: .cascade, inverse: \ScannedDocument.project)
+    var scannedDocuments: [ScannedDocument] = []
 
     init(
         projectNumber: String,
@@ -63,7 +73,8 @@ final class Project {
         foremanPhone: String = "",
         status: ProjectStatus = .active,
         dueDate: Date? = nil,
-        createdAt: Date = .now
+        createdAt: Date = .now,
+        projectFolderPath: String = ""
     ) {
         self.projectNumber = projectNumber
         self.siteName = siteName
@@ -79,12 +90,15 @@ final class Project {
         self.statusRaw = status.rawValue
         self.dueDate = dueDate
         self.createdAt = createdAt
+        self.projectFolderPath = projectFolderPath
     }
 
     var status: ProjectStatus {
         get { ProjectStatus(rawValue: statusRaw) ?? .active }
         set { statusRaw = newValue.rawValue }
     }
+
+    var totalSamplesCount: Int { airSamples.count + bulkSamples.count + wipeSamples.count }
 }
 
 /// A generated report/document record (Docs tab). Mirrors the

@@ -3,11 +3,10 @@
 //  Oversight
 //
 //  A containment work area within a building, tracked through the five
-//  abatement stages (js/project.js ALL_STAGES). Spaces are stored as a
-//  name snapshot (matching oversight-store.jsx's { id, name } snapshot
-//  approach) rather than a live relationship, since a containment's
-//  space list is fixed at creation and shouldn't drift if a space is
-//  later renamed elsewhere.
+//  abatement stages. Spaces stored as name snapshots — fixed at creation,
+//  matching oversight-store.jsx's snapshot approach. Visual inspections
+//  (Pre-Start and Final) are stored in the visualInspections relationship,
+//  mirroring containment.visualInspections[] in js/project.js.
 //
 
 import Foundation
@@ -20,6 +19,9 @@ final class Containment {
     var stageRaw: String
     var spaceNames: [String]
     var project: Project?
+
+    @Relationship(deleteRule: .cascade, inverse: \VisualInspection.containment)
+    var visualInspections: [VisualInspection] = []
 
     init(
         name: String,

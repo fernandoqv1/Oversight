@@ -9,6 +9,7 @@
 
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 struct ProjectFormSheet: View {
     let project: Project?
@@ -27,16 +28,39 @@ struct ProjectFormSheet: View {
     @State private var contractorPhone = ""
     @State private var foremanName = ""
     @State private var foremanPhone = ""
-    @State private var dueDate = Calendar.current.date(byAdding: .day, value: 14, to: .now) ?? .now
-
+    @State private var projectFolderPath = ""
+    @State private var showFolderPicker = false
     private var isEdit: Bool { project != nil }
     private var isValid: Bool { !projectNumber.trimmingCharacters(in: .whitespaces).isEmpty && !siteName.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         SheetScaffold(title: isEdit ? "Edit Project" : "New Project", saveLabel: isEdit ? "Save" : "Create", saveDisabled: !isValid, onSave: save) {
             Section("Project") {
-                LabeledContent("Number") { TextField("OVS-0000", text: $projectNumber) }
-                DatePicker("Due date", selection: $dueDate, displayedComponents: .date)
+                LabeledContent("Number") { TextField("PJ78162", text: $projectNumber) }
+                HStack {
+                    Label {
+                        if projectFolderPath.isEmpty {
+                            Text("No folder assigned").foregroundStyle(.secondary)
+                        } else {
+                            Text(URL(fileURLWithPath: projectFolderPath).lastPathComponent)
+                        }
+                    } icon: {
+                        Image(systemName: "folder.fill")
+                            .foregroundStyle(projectFolderPath.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+                    }
+                    Spacer()
+                    if !projectFolderPath.isEmpty {
+                        Button(role: .destructive) {
+                            projectFolderPath = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 6)
+                    }
+                    Button("Browse") { showFolderPicker = true }
+                        .font(.subheadline)
+                }
             }
             Section("Site") {
                 LabeledContent("Site name") { TextField("e.g. Riverside Elementary", text: $siteName) }
@@ -44,18 +68,26 @@ struct ProjectFormSheet: View {
             }
             Section("Client") {
                 LabeledContent("Client") { TextField("Client company", text: $clientName) }
-                LabeledContent("Phone") { TextField("(000) 000-0000", text: $clientPhone).keyboardType(.phonePad) }
+                LabeledContent("Phone") { TextField("(000) 000-0000", text: $clientPhone).phoneKeyboard() }
                 LabeledContent("Contact") { TextField("Site contact name", text: $clientContactName) }
-                LabeledContent("Contact ph.") { TextField("(000) 000-0000", text: $clientContactPhone).keyboardType(.phonePad) }
+                LabeledContent("Contact ph.") { TextField("(000) 000-0000", text: $clientContactPhone).phoneKeyboard() }
             }
             Section("Abatement contractor") {
                 LabeledContent("Contractor") { TextField("Contractor name", text: $contractor) }
-                LabeledContent("Phone") { TextField("(000) 000-0000", text: $contractorPhone).keyboardType(.phonePad) }
+                LabeledContent("Phone") { TextField("(000) 000-0000", text: $contractorPhone).phoneKeyboard() }
                 LabeledContent("Foreman") { TextField("Foreman name", text: $foremanName) }
-                LabeledContent("Foreman ph.") { TextField("(000) 000-0000", text: $foremanPhone).keyboardType(.phonePad) }
+                LabeledContent("Foreman ph.") { TextField("(000) 000-0000", text: $foremanPhone).phoneKeyboard() }
             }
         }
         .onAppear(perform: loadExisting)
+        .fileImporter(
+            isPresented: $showFolderPicker,
+            allowedContentTypes: [.folder]
+        ) { result in
+            if case .success(let url) = result {
+                projectFolderPath = url.path
+            }
+        }
     }
 
     private func loadExisting() {
@@ -71,7 +103,7 @@ struct ProjectFormSheet: View {
         contractorPhone = project.contractorPhone
         foremanName = project.foremanName
         foremanPhone = project.foremanPhone
-        dueDate = project.dueDate ?? dueDate
+        projectFolderPath = project.projectFolderPath
     }
 
     private func save() {
@@ -87,7 +119,7 @@ struct ProjectFormSheet: View {
             project.contractorPhone = contractorPhone
             project.foremanName = foremanName
             project.foremanPhone = foremanPhone
-            project.dueDate = dueDate
+            project.projectFolderPath = projectFolderPath
             try? modelContext.save()
             appState.showToast("Project updated")
         } else {
@@ -97,7 +129,7 @@ struct ProjectFormSheet: View {
                 clientContactName: clientContactName, clientContactPhone: clientContactPhone,
                 contractor: contractor, contractorPhone: contractorPhone,
                 foremanName: foremanName, foremanPhone: foremanPhone,
-                status: .active, dueDate: dueDate, createdAt: .now
+                status: .active, createdAt: .now, projectFolderPath: projectFolderPath
             )
             modelContext.insert(np)
             try? modelContext.save()

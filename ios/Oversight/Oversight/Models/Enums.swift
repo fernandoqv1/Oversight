@@ -11,9 +11,7 @@
 import SwiftUI
 
 /// Containment lifecycle stage. Raw values match `ALL_STAGES` in js/project.js
-/// exactly (STAGE_CONTAINMENT_PREPARATION, STAGE_ACTIVE_ABATEMENT, etc.) —
-/// these strings are written into stored projects and documents, so they
-/// must stay byte-identical to the desktop app's stage names.
+/// exactly — these strings are written into stored projects and documents.
 enum Stage: String, CaseIterable, Codable, Identifiable {
     case containmentPreparation = "Containment Preparation"
     case activeAbatement = "Active Abatement"
@@ -23,7 +21,6 @@ enum Stage: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Short label for compact UI (stage stepper, badges).
     var shortLabel: String {
         switch self {
         case .containmentPreparation: return "Prep"
@@ -39,16 +36,23 @@ enum Stage: String, CaseIterable, Codable, Identifiable {
     var tintColor: Color {
         switch self {
         case .containmentPreparation: return .orange
-        case .activeAbatement: return Color(red: 0.01, green: 0.365, blue: 0.671) // AsbTrack Blue
+        case .activeAbatement: return Color(red: 0.01, green: 0.365, blue: 0.671)
         case .containmentClearance: return .purple
         case .containmentTeardown: return .brown
         case .abatementCompleted: return .green
         }
     }
 
-    /// Stages that count as "abated" for percentage-complete rollups
-    /// (mirrors ABATED_STAGES in js/main.js — material removal completed,
-    /// on or after Containment Clearance).
+    var systemImage: String {
+        switch self {
+        case .containmentPreparation: return "hammer.fill"
+        case .activeAbatement:        return "shield.fill"
+        case .containmentClearance:   return "magnifyingglass"
+        case .containmentTeardown:    return "wrench.and.screwdriver.fill"
+        case .abatementCompleted:     return "checkmark.circle.fill"
+        }
+    }
+
     var isAbated: Bool {
         switch self {
         case .containmentClearance, .containmentTeardown, .abatementCompleted: return true
@@ -57,23 +61,21 @@ enum Stage: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-/// Air sample category. Matches SAMPLE_TYPES in the prototype and the
-/// `type` field used throughout js/project.js air sample records.
+/// Air sample category. Matches SAMPLE_TYPES in the prototype.
 enum SampleType: String, CaseIterable, Codable, Identifiable {
     case area = "Area"
     case personal = "Personal"
     case clearance = "Clearance"
-    case background = "Background"
 
     var id: String { rawValue }
 
-    /// Sample ID prefix — matches getAirSampleTypePrefix() in js/project.js:
-    /// Personal -> PS, Clearance -> CA, everything else (Area, Background) -> AS.
+    /// Base prefix — matches getAirSampleTypePrefix() in js/project.js.
+    /// For lead samples the HazardType contributes "Pb-" before this prefix.
     var idPrefix: String {
         switch self {
         case .personal: return "PS"
         case .clearance: return "CA"
-        case .area, .background: return "AS"
+        case .area: return "AS"
         }
     }
 
@@ -82,13 +84,40 @@ enum SampleType: String, CaseIterable, Codable, Identifiable {
         case .area: return .blue
         case .personal: return .teal
         case .clearance: return .purple
-        case .background: return .gray
         }
     }
 }
 
-/// Worker certification role. Matches certificationType values ('S'/'W')
-/// used in js/project.js worker records ("Supervisor" / "Worker" badges).
+/// Hazard type for an air sample — Asbestos or Lead (Pb).
+/// Mirrors the hazard dropdown in the desktop app's sample form; lead samples
+/// get "Pb-" inserted into the sample ID prefix.
+enum HazardType: String, CaseIterable, Codable, Identifiable {
+    case asbestos = "Asbestos"
+    case lead = "Lead"
+
+    var id: String { rawValue }
+
+    /// Inserted between the project number and sample-type prefix for lead.
+    /// e.g. OVS-2041-AS08 (asbestos) vs OVS-2041-Pb-PS01 (lead personal).
+    var idSegment: String {
+        switch self {
+        case .asbestos: return ""
+        case .lead: return "Pb-"
+        }
+    }
+}
+
+/// Visual inspection type — Pre-Start (before abatement begins) or Final
+/// (before clearance sampling). Mirrors visualInspectionType values in
+/// js/project.js openEditVisualInspectionModal.
+enum VisualInspectionType: String, CaseIterable, Codable, Identifiable {
+    case preStart = "Pre-Start"
+    case finalInspection = "Final"
+
+    var id: String { rawValue }
+}
+
+/// Worker certification role. Matches certificationType values ('S'/'W').
 enum WorkerRole: String, CaseIterable, Codable, Identifiable {
     case supervisor = "S"
     case worker = "W"
@@ -112,8 +141,7 @@ enum RespiratorType: String, CaseIterable, Codable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Material assessment/category — matches the material "type" values used
-/// on desktop (Surfacing, TSI = Thermal System Insulation, Misc).
+/// Material assessment/category.
 enum MaterialType: String, CaseIterable, Codable, Identifiable {
     case surfacing = "Surfacing"
     case tsi = "TSI"
@@ -161,8 +189,27 @@ enum AppAccent: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-/// Document templates available for generation. File names match the real
-/// .docx templates shipped with the desktop app under /templates.
+/// Analysis method for a bulk sample — PLM/TEM/SEM for asbestos, XRF/ICP for lead.
+enum BulkAnalysisType: String, CaseIterable, Codable, Identifiable {
+    case plm = "PLM"
+    case tem = "TEM"
+    case sem = "SEM"
+    case xrf = "XRF"
+    case icp = "ICP"
+
+    var id: String { rawValue }
+}
+
+/// Wipe sample category — mirrors wipe sample types in the Windows desktop app.
+enum WipeSampleType: String, CaseIterable, Codable, Identifiable {
+    case preStart = "Pre-Start"
+    case clearance = "Clearance"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+}
+
+/// Document templates available for generation.
 enum DocumentTemplate: String, CaseIterable, Codable, Identifiable {
     case airSample = "Air Sample Template"
     case dailyLog = "Daily Log Template"

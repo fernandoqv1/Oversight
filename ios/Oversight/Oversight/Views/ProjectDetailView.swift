@@ -15,6 +15,7 @@ struct ProjectDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.modelContext) private var modelContext
     @State private var showEditMenu = false
+    @State private var showAllContainments = false
 
     var body: some View {
         List {
@@ -24,26 +25,24 @@ struct ProjectDetailView: View {
             .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)
 
-            Section {
-                kpiGrid
-            }
-            .listRowInsets(EdgeInsets())
-
-            Section("Lifecycle") {
-                lifecycleStepper
+            Section("Containment Stage") {
+                containmentStageSection
             }
 
             Section("Sections") {
                 sectionLink(title: "Containments", icon: "shippingbox.fill", color: .blue, count: project.containments.count) {
                     ContainmentsView(project: project)
                 }
-                sectionLink(title: "Air Samples", icon: "aqi.medium", color: .indigo, count: project.airSamples.count) {
-                    AirSamplesView(project: project)
+                sectionLink(title: "Samples", icon: "aqi.medium", color: .indigo, count: project.totalSamplesCount) {
+                    SamplesView(project: project)
                 }
-                sectionLink(title: "Materials", icon: "square.stack.3d.up.fill", color: .purple, count: project.totalMaterialsCount) {
+                sectionLink(title: "Daily Logs", icon: "calendar.badge.clock", color: .orange, count: project.dailyLogs.count) {
+                    DailyLogsView(project: project)
+                }
+                sectionLink(title: "Materials & Spaces", icon: "square.stack.3d.up.fill", color: .purple, count: project.totalMaterialsCount) {
                     MaterialsView(project: project)
                 }
-                sectionLink(title: "Team", icon: "person.2.fill", color: .brown, count: project.workerRoster.count) {
+                sectionLink(title: "Workers", icon: "person.2.fill", color: .brown, count: project.workerRoster.count) {
                     TeamView(project: project)
                 }
                 sectionLink(title: "Documents", icon: "doc.text.fill", color: .green, count: project.documents.count) {
@@ -69,18 +68,19 @@ struct ProjectDetailView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .groupedListStyle()
         .navigationTitle(project.siteName)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavTitle()
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .primaryAction) {
                 Button("Edit") { showEditMenu = true }
             }
         }
         .confirmationDialog("\(project.projectNumber) · \(project.siteName)", isPresented: $showEditMenu, titleVisibility: .visible) {
             Button("Edit project details") { appState.present(.editProject(project)) }
             Button("Add air sample") { appState.present(.newSample(project)) }
-            Button("Add daily log entry") { appState.present(.newDailyLog(project)) }
+            Button("Add daily log") { appState.present(.newDailyLog(project)) }
+            Button("Export to Excel") { appState.present(.exportExcel(project)) }
             Button(project.status == .completed ? "Reopen project" : "Mark completed") {
                 project.status = project.status == .completed ? .active : .completed
                 try? modelContext.save()
@@ -104,7 +104,9 @@ struct ProjectDetailView: View {
                 if !project.contractor.isEmpty {
                     Label(project.contractor, systemImage: "person.fill")
                 }
-                Label("Due \(Fmt.dateFull(project.dueDate))\(project.isOverdue ? " · \(project.dueLabel)" : "")", systemImage: "calendar")
+                if !project.projectFolderPath.isEmpty {
+                    Label(URL(fileURLWithPath: project.projectFolderPath).lastPathComponent, systemImage: "folder")
+                }
             }
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -124,54 +126,56 @@ struct ProjectDetailView: View {
         .foregroundStyle(color)
     }
 
-    private var kpiGrid: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 10) {
-            kpi("Complete", "\(project.percentComplete)%")
-            kpi("Containments", "\(project.containments.count)")
-            kpi("Samples", "\(project.airSamples.count)")
-            kpi("Workers", "\(project.workerRoster.count)")
-            kpi("Days Left", project.daysLeft.map { "\($0)" } ?? "—")
+    private var sortedContainments: [Containment] {
+        project.containments.sorted {
+            $0.stage.index != $1.stage.index ? $0.stage.index < $1.stage.index : $0.name < $1.name
         }
-        .padding(.horizontal)
-        .padding(.bottom, 8)
     }
 
-    private func kpi(_ label: String, _ value: String) -> some View {
-        VStack(spacing: 2) {
-            Text(value).font(.headline.monospacedDigit())
-            Text(label).font(.caption2).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private var lifecycleStepper: some View {
-        let curIdx = project.containments.isEmpty ? 0 : Int((Double(project.containments.reduce(0) { $0 + $1.stage.index }) / Double(project.containments.count)).rounded())
-        return HStack(spacing: 0) {
-            ForEach(Array(Stage.allCases.enumerated()), id: \.offset) { i, stage in
-                VStack(spacing: 4) {
-                    ZStack {
-                        Circle()
-                            .fill(i < curIdx ? Color.accentColor : (i == curIdx ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.15)))
-                            .frame(width: 26, height: 26)
-                        if i < curIdx {
-                            Image(systemName: "checkmark").font(.caption2.weight(.bold)).foregroundStyle(.white)
-                        } else {
-                            Text("\(i + 1)").font(.caption2.weight(.semibold)).foregroundStyle(i == curIdx ? Color.accentColor : .secondary)
-                        }
-                    }
-                    Text(stage.shortLabel).font(.system(size: 9)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                }
-                if i < Stage.allCases.count - 1 {
-                    Rectangle()
-                        .fill(i < curIdx ? Color.accentColor : Color.secondary.opacity(0.15))
-                        .frame(height: 2)
-                        .padding(.bottom, 14)
+    @ViewBuilder
+    private var containmentStageSection: some View {
+        let sorted = sortedContainments
+        if sorted.isEmpty {
+            Text("No containments yet")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+        } else {
+            let visible = showAllContainments ? sorted : Array(sorted.prefix(4))
+            ForEach(visible) { c in
+                stageRow(for: c)
+            }
+            if sorted.count > 4 {
+                Button {
+                    withAnimation { showAllContainments.toggle() }
+                } label: {
+                    Text(showAllContainments ? "Show less" : "Show all (\(sorted.count))")
+                        .font(.subheadline)
                 }
             }
         }
-        .padding(.vertical, 6)
+    }
+
+    private func stageRow(for c: Containment) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(c.stage.tintColor.opacity(0.15))
+                    .frame(width: 34, height: 34)
+                Image(systemName: c.stage.systemImage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(c.stage.tintColor)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(c.name)
+                    .font(.subheadline)
+                Text(c.stage.shortLabel)
+                    .font(.caption)
+                    .foregroundStyle(c.stage.tintColor)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
     }
 
     private func sectionLink<Destination: View>(title: String, icon: String, color: Color, count: Int, @ViewBuilder destination: () -> Destination) -> some View {

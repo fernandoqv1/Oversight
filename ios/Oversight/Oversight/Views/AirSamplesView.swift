@@ -2,8 +2,8 @@
 //  AirSamplesView.swift
 //  Oversight
 //
-//  Ported from SamplesScreen in oversight-screens.jsx — All/Running/
-//  Clearance segments, tap a row to edit.
+//  All/Running/Clearance segments, tap a row to edit, swipe to delete.
+//  Mirrors the Samples tab in js/project.js.
 //
 
 import SwiftUI
@@ -12,7 +12,9 @@ import SwiftData
 struct AirSamplesView: View {
     @Bindable var project: Project
     @Environment(AppState.self) private var appState
+    @Environment(\.modelContext) private var modelContext
     @State private var segment: Segment = .all
+    @State private var deleteConfirmFor: AirSample?
 
     enum Segment: String, CaseIterable, Identifiable {
         case all = "All", running = "Running", clearance = "Clearance"
@@ -34,7 +36,11 @@ struct AirSamplesView: View {
             Section {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                     StatCard(label: "Total Samples", value: "\(project.airSamples.count)", subtitle: "")
-                    StatCard(label: "Running", value: "\(project.airSamples.filter(\.isRunning).count)", subtitle: "\(project.airSamples.compactMap(\.sampleVolume).reduce(0, +)) L logged")
+                    StatCard(
+                        label: "Running",
+                        value: "\(project.airSamples.filter(\.isRunning).count)",
+                        subtitle: "\(project.airSamples.compactMap(\.sampleVolume).reduce(0, +)) L logged"
+                    )
                 }
                 .listRowInsets(EdgeInsets())
                 .padding(12)
@@ -42,7 +48,11 @@ struct AirSamplesView: View {
 
             Section("\(samples.count) sample\(samples.count == 1 ? "" : "s")") {
                 if samples.isEmpty {
-                    EmptyStateView(title: "No samples", subtitle: "Log the first air sample.", actionLabel: "Add air sample") {
+                    EmptyStateView(
+                        title: "No samples",
+                        subtitle: "Log the first air sample.",
+                        actionLabel: "Add air sample"
+                    ) {
                         appState.present(.newSample(project))
                     }
                 } else {
@@ -53,11 +63,18 @@ struct AirSamplesView: View {
                             sampleRow(sample)
                         }
                         .foregroundStyle(.primary)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                deleteConfirmFor = sample
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .groupedListStyle()
         .safeAreaInset(edge: .top) {
             Picker("Filter", selection: $segment) {
                 ForEach(Segment.allCases) { Text($0.rawValue).tag($0) }
@@ -67,12 +84,18 @@ struct AirSamplesView: View {
             .padding(.top, 6)
             .background(.bar)
         }
-        .navigationTitle("Air Samples")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { appState.present(.newSample(project)) } label: { Image(systemName: "plus") }
+        .confirmationDialog(
+            "Delete sample \(deleteConfirmFor?.sampleId ?? "")?",
+            isPresented: Binding(get: { deleteConfirmFor != nil }, set: { if !$0 { deleteConfirmFor = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Sample", role: .destructive) {
+                if let s = deleteConfirmFor {
+                    modelContext.delete(s)
+                    try? modelContext.save()
+                }
             }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -82,11 +105,21 @@ struct AirSamplesView: View {
             HStack {
                 Text(sample.sampleId).font(.subheadline.weight(.semibold).monospaced())
                 SampleTypeTag(type: sample.sampleType)
+                if sample.hazardType == .lead {
+                    Text("Pb")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.15), in: Capsule())
+                        .foregroundStyle(.orange)
+                }
                 Spacer()
                 Text(sample.isRunning ? "Running" : "Complete")
                     .font(.caption2.weight(.semibold))
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background((sample.isRunning ? Color.green : Color.secondary).opacity(0.15), in: Capsule())
+                    .background(
+                        (sample.isRunning ? Color.green : Color.secondary).opacity(0.15),
+                        in: Capsule()
+                    )
                     .foregroundStyle(sample.isRunning ? .green : .secondary)
             }
             if !sample.location.isEmpty {

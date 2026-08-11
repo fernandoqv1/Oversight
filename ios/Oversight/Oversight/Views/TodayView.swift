@@ -10,9 +10,12 @@ import SwiftUI
 import SwiftData
 
 struct TodayView: View {
+    /// Passed from RootView which already owns the authoritative @Query — avoids
+    /// stale-render race when the inspector is first created during onboarding.
+    var inspector: Inspector?
+
     @Environment(AppState.self) private var appState
     @Query(sort: \Project.createdAt, order: .reverse) private var allProjects: [Project]
-    @Query private var inspectors: [Inspector]
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { _ in
@@ -20,11 +23,11 @@ struct TodayView: View {
         }
         .navigationTitle("Today")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     appState.tab = .profile
                 } label: {
-                    Text(inspectors.first?.initials ?? "?")
+                    Text(inspector?.initials ?? "?")
                         .font(.caption.weight(.bold))
                         .frame(width: 28, height: 28)
                         .background(Circle().fill(Color.accentColor.opacity(0.15)))
@@ -88,7 +91,7 @@ struct TodayView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .groupedListStyle()
         .navigationDestination(for: Project.self) { project in
             ProjectDetailView(project: project)
         }

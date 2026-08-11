@@ -4,7 +4,7 @@
 //
 //  App entry point. Sets up the on-device SwiftData store (no backend,
 //  offline-only — matching the desktop app's localStorage model per
-//  CLAUDE.md) and seeds demo data on first launch.
+//  CLAUDE.md).
 //
 
 import SwiftUI
@@ -17,8 +17,9 @@ struct OversightApp: App {
     init() {
         let schema = Schema([
             Project.self, Building.self, Space.self, Material.self,
-            Containment.self, AirSample.self, Worker.self,
-            DailyLog.self, LogEntry.self, GeneratedDocument.self, Inspector.self,
+            Containment.self, VisualInspection.self, AirSample.self, BulkSample.self, WipeSample.self,
+            Worker.self, DailyLog.self, LogEntry.self, GeneratedDocument.self, Inspector.self,
+            ScannedDocument.self, ScannedPage.self, LogEntryPhoto.self,
         ])
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
@@ -26,7 +27,6 @@ struct OversightApp: App {
         } catch {
             fatalError("Failed to create Oversight data store: \(error)")
         }
-        SeedData.populateIfNeeded(container.mainContext)
     }
 
     var body: some Scene {

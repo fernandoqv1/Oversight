@@ -104,11 +104,3 @@ extension Project {
         return "\(prefix)\(String(format: "%02d", maxN + 1))"
     }
 }
-
-extension AirSample {
-    /// Short label for compact rows — last segment of the sample ID
-    /// (e.g. "AS08" from "OVS-2041-AS08").
-    var shortID: String {
-        sampleId.replacingOccurrences(of: "\(project?.projectNumber ?? "")-", with: "")
-    }
-}

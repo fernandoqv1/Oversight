@@ -81,13 +81,14 @@ def collect_asset_catalogs(node):
     return out
 
 root = build_tree()
+root.path = "Oversight"  # the source folder sits at <project>/Oversight/
 swift_files = collect_swift_files(root)
 asset_catalogs = collect_asset_catalogs(root)
 
 app_ref_id = new_id()
 target_id = new_id()
 project_id = new_id()
-main_group_id = root.id
+main_group_id = new_id()  # synthetic top-level group wrapping sources + Products
 products_group_id = new_id()
 frameworks_phase_id = new_id()
 sources_phase_id = new_id()
@@ -203,13 +204,19 @@ for gid, name, path, child_ids in groups:
     for cid in child_ids:
         w(f"\t\t\t\t{cid},")
     w("\t\t\t);")
-    if gid == main_group_id:
-        pass  # main group keeps its name as project display name below
-    else:
-        w(f"\t\t\tpath = \"{path}\";")
+    w(f"\t\t\tpath = \"{path}\";")
     w(f"\t\t\tsourceTree = \"<group>\";")
     w("\t\t};")
-w(f"\t\t{new_id()} /* placeholder */ = {{isa = PBXGroup; children = (); sourceTree = \"<group>\"; }};" if False else "")
+# Synthetic main group: contains the Oversight source group + Products,
+# no path (resolves to the project directory).
+w(f"\t\t{main_group_id} = {{")
+w("\t\t\tisa = PBXGroup;")
+w("\t\t\tchildren = (")
+w(f"\t\t\t\t{root.id} /* Oversight */,")
+w(f"\t\t\t\t{products_group_id} /* Products */,")
+w("\t\t\t);")
+w("\t\t\tsourceTree = \"<group>\";")
+w("\t\t};")
 w("/* End PBXGroup section */")
 
 # Root group needs Products child added — rebuild main group entry with Products included.
@@ -399,13 +406,16 @@ target_common = f"""
 \t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 \t\t\t\tASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 \t\t\t\tCODE_SIGN_STYLE = Automatic;
+\t\t\t\tDEVELOPMENT_TEAM = Q5SQT5K24A;
 \t\t\t\tCURRENT_PROJECT_VERSION = 1;
 \t\t\t\tDEVELOPMENT_ASSET_PATHS = "";
 \t\t\t\tENABLE_PREVIEWS = YES;
 \t\t\t\tGENERATE_INFOPLIST_FILE = YES;
 \t\t\t\tINFOPLIST_KEY_CFBundleDisplayName = Oversight;
 \t\t\t\tINFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
-\t\t\t\tINFOPLIST_KEY_NSHumanReadableCopyright = "";
+\t\t\t\tINFOPLIST_KEY_NSCameraUsageDescription = "Oversight uses the camera to photograph site conditions for daily field log entries.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Oversight accesses your photos to attach site documentation to daily log entries.";
 \t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = {IOS_DEPLOYMENT_TARGET};
 \t\t\t\tMACOSX_DEPLOYMENT_TARGET = {MACOS_DEPLOYMENT_TARGET};
 \t\t\t\tMARKETING_VERSION = 1.0;
@@ -464,14 +474,7 @@ w("\t};")
 w(f"\trootObject = {project_id} /* Project object */;")
 w("}")
 
-# --- Patch: the main group needs to include the Products group as a child.
 text = "\n".join(lines)
-main_group_marker = f"\t\t{main_group_id} /* Oversight */ = {{\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n"
-idx = text.find(main_group_marker)
-if idx == -1:
-    raise SystemExit("Could not locate main group to patch in Products reference")
-insert_at = idx + len(main_group_marker)
-text = text[:insert_at] + f"\t\t\t\t{products_group_id} /* Products */,\n" + text[insert_at:]
 
 os.makedirs(os.path.dirname(PBXPROJ_PATH), exist_ok=True)
 with open(PBXPROJ_PATH, "w") as f:
@@ -483,9 +486,11 @@ print(f"Registered {len(build_files_sources)} Swift source files, {len(asset_cat
 # --- Patch the shared scheme with the real target id.
 scheme_path = os.path.join(PROJECT_DIR, "Oversight.xcodeproj", "xcshareddata", "xcschemes", "Oversight.xcscheme")
 if os.path.exists(scheme_path):
+    import re
     with open(scheme_path) as f:
         scheme_text = f.read()
     scheme_text = scheme_text.replace("OVERSIGHT_TARGET_ID", target_id)
+    scheme_text = re.sub(r'BlueprintIdentifier = "[A-F0-9]{24}"', f'BlueprintIdentifier = "{target_id}"', scheme_text)
     with open(scheme_path, "w") as f:
         f.write(scheme_text)
     print(f"Patched scheme with target id {target_id}")
