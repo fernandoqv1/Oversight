@@ -2522,6 +2522,37 @@ ipcMain.handle('stop-wireless-import', async () => {
   }
 });
 
+// Encode UTF-8 text as a QR PNG data URL for offline transfer (inspector profile share).
+// Spec: ios/INSPECTOR_PROFILE_TRANSFER.md — ECC L maximizes capacity for signature payloads.
+ipcMain.handle('generate-qr-data-url', async (_event, text, options = {}) => {
+  try {
+    if (typeof text !== 'string' || !text.length) {
+      return { success: false, error: 'QR payload must be a non-empty string.' };
+    }
+    // QR version 40 + ECC L ≈ 2953 bytes. Reject early with a clear error.
+    const byteLength = Buffer.byteLength(text, 'utf8');
+    if (byteLength > 2953) {
+      return {
+        success: false,
+        error: `Payload is ${byteLength} bytes; QR codes hold at most 2953 bytes.`,
+        byteLength,
+      };
+    }
+    const QRCode = require('qrcode');
+    const width = Number(options.width) > 0 ? Number(options.width) : 280;
+    const margin = Number.isFinite(Number(options.margin)) ? Number(options.margin) : 2;
+    const dataUrl = await QRCode.toDataURL(text, {
+      errorCorrectionLevel: 'L',
+      width,
+      margin,
+    });
+    return { success: true, dataUrl, byteLength };
+  } catch (err) {
+    console.error('[generate-qr-data-url] error:', err);
+    return { success: false, error: err.message || String(err) };
+  }
+});
+
 // ---------- Project JSON Disk Backup (resilient against localStorage wipes) ----------
 
 function getProjectJsonPath(projectId) {

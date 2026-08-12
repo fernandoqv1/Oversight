@@ -1,6 +1,6 @@
 {
   "name": "oversight-desktop",
-  "version": "1.0.37",
+  "version": "1.0.40",
   "description": "Oversight Desktop - Standalone offline project management application",
   "main": "main.js",
   "scripts": {

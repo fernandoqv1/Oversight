@@ -369,6 +369,10 @@ a { color:inherit; text-decoration:none; }
   max-width:540px !important;
   max-height:calc(100vh - 48px) !important;
 }
+.inspector-profile-share-modal .modal-content {
+  max-width:min(820px,96vw) !important;
+  max-height:98vh !important;
+}
 .inspector-profile-modal .modal-content > div:first-child {
   padding:16px 22px !important;
   margin:0 !important;
@@ -456,7 +460,10 @@ a { color:inherit; text-decoration:none; }
 .inspector-profile-modal .profile-save-btn,
 .inspector-profile-modal #sig-canvas-save { background:var(--accent) !important; color:#fff !important; }
 .inspector-profile-modal .profile-cancel-btn,
+.inspector-profile-modal .profile-share-btn,
+.inspector-profile-modal .profile-share-close-btn,
 .inspector-profile-modal #sig-canvas-clear { background:var(--surface) !important; color:var(--text-2) !important; border:1px solid var(--border) !important; }
+.inspector-profile-modal .profile-share-btn:hover { border-color:var(--accent) !important; color:var(--accent) !important; }
 .modal-content label:not(:has(input[type="checkbox"])):not(:has(input[type="radio"])) { font-size:11.5px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); display:block; margin-bottom:5px; }
 .modal-content input[type=text], .modal-content input[type=tel], .modal-content input[type=number], .modal-content input[type=date], .modal-content input[type=time], .modal-content input[type=email], .modal-content select, .modal-content textarea { width:100%; background:var(--bg-sunken); border:1px solid var(--border); border-radius:7px; padding:7px 10px; font-size:13px; color:var(--text); transition:border-color 120ms, box-shadow 120ms; }
 .modal-content input[type=text]:focus, .modal-content input[type=tel]:focus, .modal-content input[type=number]:focus, .modal-content input[type=date]:focus, .modal-content input[type=time]:focus, .modal-content input[type=email]:focus, .modal-content select:focus, .modal-content textarea:focus { outline:none; border-color:var(--accent); background:var(--surface); box-shadow:0 0 0 3px var(--accent-soft); }

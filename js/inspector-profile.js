@@ -375,6 +375,393 @@ function updateProfileButton() {
     }
 }
 
+/** Contract version + type discriminator — keep in sync with ios/INSPECTOR_PROFILE_TRANSFER.md */
+const INSPECTOR_PROFILE_SHARE_TYPE = 'oversight.inspectorProfile';
+const INSPECTOR_PROFILE_SHARE_PART_TYPE = 'oversight.inspectorProfilePart';
+/** Profile document version (reassembled payload). Part envelopes also use this major. */
+const INSPECTOR_PROFILE_SHARE_VERSION = 2;
+/** QR version 40 + ECC L hard limit (bytes). */
+const INSPECTOR_PROFILE_QR_MAX_BYTES = 2953;
+/** Leave headroom for the multipart envelope JSON around each chunk. */
+const INSPECTOR_PROFILE_QR_CHUNK_BYTES = 2200;
+/** Soft cap so huge photo-uploads don't create dozens of parts — still sharp for ink. */
+const INSPECTOR_PROFILE_SIG_MAX_W = 1000;
+const INSPECTOR_PROFILE_SIG_MAX_H = 320;
+
+/**
+ * Strip a data-URL prefix and return raw base64, or '' if invalid.
+ * @param {string} value
+ * @returns {{ base64: string, mime: string }}
+ */
+function _splitSignatureDataUrl(value) {
+    if (typeof value !== 'string') return { base64: '', mime: 'image/png' };
+    const trimmed = value.trim().replace(/\s/g, '');
+    const m = /^data:(image\/(?:png|jpe?g));base64,(.+)$/i.exec(trimmed);
+    if (m) {
+        const mime = m[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : m[1].toLowerCase();
+        return { base64: m[2], mime };
+    }
+    // Already-raw base64 (legacy / recompressed)
+    if (/^[A-Za-z0-9+/]+=*$/.test(trimmed) && trimmed.length > 32) {
+        return { base64: trimmed, mime: 'image/png' };
+    }
+    return { base64: '', mime: 'image/png' };
+}
+
+/**
+ * Prepare a signature for share transfer without crushing quality.
+ * Only downscales when larger than INSPECTOR_PROFILE_SIG_MAX_* — keeps PNG otherwise.
+ * @param {string} dataUrl
+ * @returns {Promise<{ base64: string, mime: string, dataUrl: string }>}
+ */
+function prepareSignatureForShare(dataUrl) {
+    return new Promise((resolve) => {
+        if (!dataUrl || typeof dataUrl !== 'string') {
+            resolve({ base64: '', mime: 'image/png', dataUrl: '' });
+            return;
+        }
+        const existing = _splitSignatureDataUrl(dataUrl);
+        const img = new Image();
+        img.onload = () => {
+            try {
+                const srcW = img.naturalWidth || img.width || 1;
+                const srcH = img.naturalHeight || img.height || 1;
+                const needsScale = srcW > INSPECTOR_PROFILE_SIG_MAX_W || srcH > INSPECTOR_PROFILE_SIG_MAX_H;
+                if (!needsScale && existing.base64) {
+                    resolve({
+                        base64: existing.base64,
+                        mime: existing.mime || 'image/png',
+                        dataUrl: dataUrl.startsWith('data:') ? dataUrl : `data:${existing.mime};base64,${existing.base64}`,
+                    });
+                    return;
+                }
+                const scale = Math.min(
+                    INSPECTOR_PROFILE_SIG_MAX_W / srcW,
+                    INSPECTOR_PROFILE_SIG_MAX_H / srcH,
+                    1
+                );
+                const w = Math.max(1, Math.round(srcW * scale));
+                const h = Math.max(1, Math.round(srcH * scale));
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, w, h);
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(img, 0, 0, w, h);
+                const out = canvas.toDataURL('image/png');
+                const parts = _splitSignatureDataUrl(out);
+                resolve({
+                    base64: parts.base64,
+                    mime: 'image/png',
+                    dataUrl: out,
+                });
+            } catch (e) {
+                resolve({
+                    base64: existing.base64,
+                    mime: existing.mime || 'image/png',
+                    dataUrl: existing.base64 ? `data:${existing.mime || 'image/png'};base64,${existing.base64}` : '',
+                });
+            }
+        };
+        img.onerror = () => resolve({
+            base64: existing.base64,
+            mime: existing.mime || 'image/png',
+            dataUrl: existing.base64 ? `data:${existing.mime || 'image/png'};base64,${existing.base64}` : '',
+        });
+        img.src = _safeImageSrc(dataUrl);
+    });
+}
+
+function _utf8ByteLength(str) {
+    if (typeof TextEncoder !== 'undefined') {
+        return new TextEncoder().encode(str).length;
+    }
+    return unescape(encodeURIComponent(str)).length;
+}
+
+function _randomTransferId() {
+    const bytes = new Uint8Array(4);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+        crypto.getRandomValues(bytes);
+    } else {
+        for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Split a UTF-8 string into chunks that stay under maxBytes (no mid-codepoint splits).
+ * @param {string} str
+ * @param {number} maxBytes
+ * @returns {string[]}
+ */
+function chunkUtf8String(str, maxBytes) {
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const bytes = encoder.encode(str);
+    if (bytes.length <= maxBytes) return [str];
+    const chunks = [];
+    let offset = 0;
+    while (offset < bytes.length) {
+        let end = Math.min(offset + maxBytes, bytes.length);
+        if (end < bytes.length) {
+            while (end > offset && (bytes[end] & 0xc0) === 0x80) end--;
+            if (end === offset) end = Math.min(offset + maxBytes, bytes.length);
+        }
+        chunks.push(decoder.decode(bytes.subarray(offset, end)));
+        offset = end;
+    }
+    return chunks;
+}
+
+/**
+ * Build high-quality profile JSON and split it across one or more QR payloads.
+ * Spec: ios/INSPECTOR_PROFILE_TRANSFER.md (v2 multipart)
+ *
+ * @param {Object} profile
+ * @param {{ signatureDataUrl?: string }} [options]
+ * @returns {Promise<{
+ *   payload: Object,
+ *   profileJson: string,
+ *   byteLength: number,
+ *   signatureIncluded: boolean,
+ *   signatureStatus: 'included'|'none',
+ *   signaturePreviewUrl: string,
+ *   transferId: string,
+ *   parts: string[],
+ * }>}
+ */
+async function buildInspectorProfileSharePayload(profile, options = {}) {
+    const name = String(profile?.name || '').trim();
+    if (!name) {
+        throw new Error('Enter your name before sharing the inspector profile.');
+    }
+
+    const sourceSig = options.signatureDataUrl != null
+        ? options.signatureDataUrl
+        : (profile?.signatureBase64 || '');
+
+    let signatureMime = 'image/png';
+    let signatureBase64 = '';
+    let signaturePreviewUrl = '';
+    /** @type {'included'|'none'} */
+    let signatureStatus = 'none';
+
+    if (sourceSig) {
+        const prepared = await prepareSignatureForShare(sourceSig);
+        if (prepared.base64) {
+            signatureBase64 = prepared.base64;
+            signatureMime = prepared.mime || 'image/png';
+            signaturePreviewUrl = prepared.dataUrl || `data:${signatureMime};base64,${signatureBase64}`;
+            signatureStatus = 'included';
+        }
+    }
+
+    const payload = {
+        v: INSPECTOR_PROFILE_SHARE_VERSION,
+        type: INSPECTOR_PROFILE_SHARE_TYPE,
+        name,
+        initials: String(profile?.initials || '').trim().slice(0, 4),
+        company: String(profile?.company || '').trim(),
+        phone: String(profile?.phone || '').trim(),
+        email: String(profile?.email || '').trim(),
+        certificationNumber: String(profile?.certificationNumber || '').trim(),
+        license: String(profile?.license || '').trim(),
+        signatureMime,
+        signatureBase64,
+        exportedAt: new Date().toISOString(),
+    };
+
+    const profileJson = JSON.stringify(payload);
+    const byteLength = _utf8ByteLength(profileJson);
+    const transferId = _randomTransferId();
+
+    // Pack into multipart envelopes so a crisp signature can span several large QR frames.
+    let chunkBudget = INSPECTOR_PROFILE_QR_CHUNK_BYTES;
+    let parts = [];
+    for (let attempt = 0; attempt < 8; attempt++) {
+        const chunks = chunkUtf8String(profileJson, chunkBudget);
+        const count = chunks.length;
+        parts = chunks.map((chunk, index) => JSON.stringify({
+            v: INSPECTOR_PROFILE_SHARE_VERSION,
+            type: INSPECTOR_PROFILE_SHARE_PART_TYPE,
+            id: transferId,
+            i: index,
+            n: count,
+            c: chunk,
+        }));
+        const oversized = parts.some((p) => _utf8ByteLength(p) > INSPECTOR_PROFILE_QR_MAX_BYTES);
+        if (!oversized) break;
+        chunkBudget = Math.max(800, Math.floor(chunkBudget * 0.75));
+        parts = [];
+    }
+
+    if (!parts.length || parts.some((p) => _utf8ByteLength(p) > INSPECTOR_PROFILE_QR_MAX_BYTES)) {
+        throw new Error('Could not pack the inspector profile into scannable QR parts. Try a simpler signature drawing.');
+    }
+
+    return {
+        payload,
+        profileJson,
+        byteLength,
+        signatureIncluded: signatureStatus === 'included',
+        signatureStatus,
+        signaturePreviewUrl,
+        transferId,
+        parts,
+    };
+}
+
+/**
+ * Show a modal with large cycling QR parts for the iOS app to scan.
+ * @param {Object} profile - Profile fields to encode (usually current form values).
+ */
+async function openInspectorProfileShareModal(profile) {
+    document.querySelector('.inspector-profile-share-modal')?.remove();
+
+    // Large on-screen QR — dense multipart frames need big modules for phone cameras.
+    const qrDisplayPx = Math.min(720, Math.max(520, Math.floor(Math.min(window.innerHeight * 0.68, window.innerWidth * 0.72))));
+    const qrRenderPx = Math.max(800, qrDisplayPx);
+
+    const modal = document.createElement('div');
+    modal.className = 'modal active inspector-profile-modal inspector-profile-share-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+    modal.innerHTML = `
+        <div class="modal-content" style="background:white;border-radius:1rem;padding:1.25rem 1.5rem;max-width:min(820px,96vw);width:auto;max-height:98vh;overflow-y:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);">
+            <div style="margin-bottom:0.65rem;">
+                <h3 style="font-size:1.25rem;font-weight:600;color:#111827;margin:0;">Share Inspector Profile</h3>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:0.65rem;align-items:center;text-align:center;">
+                <p class="profile-hint" id="profile-share-instructions" style="font-size:0.85rem;color:#6b7280;margin:0;line-height:1.45;max-width:40rem;">
+                    Preparing a high-quality transfer…
+                </p>
+                <div id="profile-share-sig-preview" style="display:none;width:min(420px,80%);padding:0.5rem 0.75rem;border:1px solid #e5e7eb;border-radius:0.5rem;background:#fafafa;">
+                    <p class="profile-hint" style="font-size:0.7rem;color:#6b7280;margin:0 0 0.35rem;">Signature included (full quality)</p>
+                    <img id="profile-share-sig-img" alt="Signature preview" style="max-width:100%;max-height:72px;display:block;margin:0 auto;">
+                </div>
+                <div id="profile-share-qr-wrap" style="width:${qrDisplayPx}px;height:${qrDisplayPx}px;display:flex;align-items:center;justify-content:center;border:1px solid #e5e7eb;border-radius:0.75rem;background:#ffffff;padding:16px;box-sizing:border-box;">
+                    <span id="profile-share-status" style="font-size:0.85rem;color:#6b7280;">Generating QR…</span>
+                </div>
+                <div id="profile-share-pager" style="display:none;align-items:center;gap:0.75rem;">
+                    <button type="button" id="profile-share-prev" class="profile-cancel-btn" style="padding:0.4rem 0.9rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.8rem;cursor:pointer;">Previous</button>
+                    <span id="profile-share-part-label" style="font-size:0.85rem;font-weight:600;color:#111827;min-width:7rem;"></span>
+                    <button type="button" id="profile-share-next" class="profile-cancel-btn" style="padding:0.4rem 0.9rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.8rem;cursor:pointer;">Next</button>
+                </div>
+                <p id="profile-share-meta" class="profile-hint" style="font-size:0.75rem;color:#6b7280;margin:0;"></p>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:0.75rem;margin-top:1rem;padding-top:0.85rem;border-top:1px solid #e5e7eb;">
+                <button type="button" class="profile-share-close-btn profile-cancel-btn" style="padding:0.625rem 1.25rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.875rem;font-weight:500;cursor:pointer;">Close</button>
+            </div>
+        </div>
+    `;
+
+    let mouseDownOnBackdrop = false;
+    let cycleTimer = null;
+    const stopCycle = () => {
+        if (cycleTimer) {
+            clearInterval(cycleTimer);
+            cycleTimer = null;
+        }
+    };
+
+    modal.addEventListener('mousedown', (e) => {
+        mouseDownOnBackdrop = (e.target === modal);
+    });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal && mouseDownOnBackdrop) {
+            stopCycle();
+            modal.remove();
+        }
+        mouseDownOnBackdrop = false;
+    });
+    modal.querySelector('.profile-share-close-btn').addEventListener('click', () => {
+        stopCycle();
+        modal.remove();
+    });
+    document.body.appendChild(modal);
+
+    const statusEl = modal.querySelector('#profile-share-status');
+    const wrapEl = modal.querySelector('#profile-share-qr-wrap');
+    const metaEl = modal.querySelector('#profile-share-meta');
+    const instructionsEl = modal.querySelector('#profile-share-instructions');
+    const pagerEl = modal.querySelector('#profile-share-pager');
+    const partLabelEl = modal.querySelector('#profile-share-part-label');
+    const sigPreviewEl = modal.querySelector('#profile-share-sig-preview');
+    const sigImgEl = modal.querySelector('#profile-share-sig-img');
+
+    try {
+        const built = await buildInspectorProfileSharePayload(profile);
+        const api = window.electronAPI;
+        if (!api || typeof api.generateQrDataUrl !== 'function') {
+            throw new Error('QR generation is only available in the Oversight desktop app.');
+        }
+
+        if (built.signaturePreviewUrl && sigPreviewEl && sigImgEl) {
+            sigImgEl.src = _safeImageSrc(built.signaturePreviewUrl);
+            sigPreviewEl.style.display = 'block';
+        }
+
+        const qrDataUrls = [];
+        for (let i = 0; i < built.parts.length; i++) {
+            if (statusEl) {
+                statusEl.textContent = `Generating QR ${i + 1} of ${built.parts.length}…`;
+            }
+            const result = await api.generateQrDataUrl(built.parts[i], { width: qrRenderPx, margin: 4 });
+            if (!result?.success || !result.dataUrl) {
+                throw new Error(result?.error || `Could not generate QR part ${i + 1}.`);
+            }
+            qrDataUrls.push(result.dataUrl);
+        }
+
+        wrapEl.innerHTML = '';
+        const img = document.createElement('img');
+        img.alt = 'Inspector profile QR code';
+        img.width = qrDisplayPx;
+        img.height = qrDisplayPx;
+        img.style.cssText = 'width:100%;height:100%;object-fit:contain;image-rendering:pixelated;display:block;background:#fff;';
+        wrapEl.appendChild(img);
+
+        let partIndex = 0;
+        const showPart = (index) => {
+            partIndex = (index + qrDataUrls.length) % qrDataUrls.length;
+            img.src = qrDataUrls[partIndex];
+            if (partLabelEl) {
+                partLabelEl.textContent = `Part ${partIndex + 1} of ${qrDataUrls.length}`;
+            }
+        };
+        showPart(0);
+
+        if (qrDataUrls.length > 1) {
+            pagerEl.style.display = 'flex';
+            instructionsEl.textContent =
+                'Keep the Oversight iOS camera on this code — it auto-advances through every part so your full signature transfers without pixelation.';
+            modal.querySelector('#profile-share-prev').addEventListener('click', () => {
+                showPart(partIndex - 1);
+            });
+            modal.querySelector('#profile-share-next').addEventListener('click', () => {
+                showPart(partIndex + 1);
+            });
+            cycleTimer = setInterval(() => showPart(partIndex + 1), 1600);
+        } else {
+            instructionsEl.textContent =
+                'Hold your iPhone close and fill the camera with this QR code to copy your inspector details and signature.';
+        }
+
+        const sigNote = built.signatureStatus === 'included'
+            ? 'Full-quality signature included.'
+            : 'No signature on profile.';
+        metaEl.textContent = `${built.payload.name} · ${built.byteLength} bytes · ${qrDataUrls.length} QR part${qrDataUrls.length === 1 ? '' : 's'} · ${sigNote}`;
+    } catch (err) {
+        stopCycle();
+        if (statusEl) {
+            statusEl.textContent = err?.message || 'Failed to build share QR.';
+            statusEl.style.color = '#b91c1c';
+        }
+    }
+}
+
 function openInspectorProfileModal(options = {}) {
     const profile = getInspectorProfile();
     const isStartupPrompt = !!options.startup;
@@ -479,9 +866,15 @@ function openInspectorProfileModal(options = {}) {
                     </div>
                 </div>
             </div>
-            <div style="display:flex;justify-content:flex-end;gap:0.75rem;margin-top:1.5rem;padding-top:1rem;border-top:1px solid #e5e7eb;">
-                <button class="profile-cancel-btn" style="padding:0.625rem 1.25rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.875rem;font-weight:500;cursor:pointer;">Cancel</button>
-                <button class="profile-save-btn" style="padding:0.625rem 1.25rem;border:none;border-radius:0.5rem;background:#4f46e5;color:white;font-size:0.875rem;font-weight:500;cursor:pointer;">Save Profile</button>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:0.75rem;margin-top:1.5rem;padding-top:1rem;border-top:1px solid #e5e7eb;">
+                <button type="button" class="profile-share-btn" title="Share profile to iOS via QR code" style="padding:0.625rem 1.25rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.875rem;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:0.4rem;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M15 8a3 3 0 10-2.977-2.63l-4.94 2.47a3 3 0 100 4.319l4.94 2.47a3 3 0 10.895-1.789l-4.94-2.47a3.027 3.027 0 000-.74l4.94-2.47C13.456 7.68 14.19 8 15 8z"/></svg>
+                    Share
+                </button>
+                <div style="display:flex;gap:0.75rem;">
+                    <button class="profile-cancel-btn" style="padding:0.625rem 1.25rem;border:1px solid #d1d5db;border-radius:0.5rem;background:white;color:#374151;font-size:0.875rem;font-weight:500;cursor:pointer;">Cancel</button>
+                    <button class="profile-save-btn" style="padding:0.625rem 1.25rem;border:none;border-radius:0.5rem;background:#4f46e5;color:white;font-size:0.875rem;font-weight:500;cursor:pointer;">Save Profile</button>
+                </div>
             </div>
         </div>
     `;
@@ -502,6 +895,24 @@ function openInspectorProfileModal(options = {}) {
     });
     
     modal.querySelector('.profile-cancel-btn').addEventListener('click', () => modal.remove());
+
+    modal.querySelector('.profile-share-btn').addEventListener('click', async () => {
+        const draft = {
+            name: (document.getElementById('profile-name')?.value || '').trim(),
+            initials: (document.getElementById('profile-initials')?.value || '').trim(),
+            company: (document.getElementById('profile-company')?.value || '').trim(),
+            phone: (document.getElementById('profile-phone')?.value || '').trim(),
+            email: (document.getElementById('profile-email')?.value || '').trim(),
+            certificationNumber: (document.getElementById('profile-certification')?.value || '').trim(),
+            license: (document.getElementById('profile-license')?.value || '').trim(),
+            signatureBase64: currentSignatureBase64 || '',
+        };
+        if (!draft.name) {
+            alert('Please enter your name before sharing.');
+            return;
+        }
+        await openInspectorProfileShareModal(draft);
+    });
     
     // ========== Signature Tab Switching ==========
     const tabUpload = modal.querySelector('#sig-tab-upload');

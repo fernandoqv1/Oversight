@@ -89,4 +89,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('wireless-document-received', listener);
     return () => ipcRenderer.removeListener('wireless-document-received', listener);
   },
+  // Encode arbitrary UTF-8 text as a QR PNG data URL (used for inspector profile share)
+  generateQrDataUrl: (text, options) => ipcRenderer.invoke('generate-qr-data-url', text, options),
 });
