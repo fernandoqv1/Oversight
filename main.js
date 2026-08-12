@@ -2738,7 +2738,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .thumb-del{position:absolute;top:2px;right:2px;background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
 .crop-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px}
 .crop-overlay canvas{max-width:100%;max-height:60vh;touch-action:none;border-radius:4px;cursor:crosshair}
-.crop-overlay .crop-btns{display:flex;gap:10px}
+.crop-overlay .crop-btns{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
 .cam-wrap{position:relative;width:100%;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:3/4;max-height:55vh}
 .cam-wrap video{width:100%;height:100%;object-fit:cover}
 .cam-wrap canvas.overlay{position:absolute;inset:0;pointer-events:none}
@@ -2854,6 +2854,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <canvas class="crop-loupe" id="crop-loupe" width="132" height="132"></canvas>
   <div class="crop-btns">
     <button class="btn btn-secondary btn-sm" id="crop-skip-btn">Skip Crop</button>
+    <button class="btn btn-secondary btn-sm" id="crop-letter-btn">Letter 8.5&times;11</button>
     <button class="btn btn-primary btn-sm" id="crop-confirm-btn">Crop &amp; Add</button>
   </div>
 </div>
@@ -2977,6 +2978,56 @@ function buildPdf(jpegPages){
   return out;
 }
 
+// ---- Image helpers (downscale before crop/detect to avoid mobile OOM) ----
+// Phone library photos are often 12MP+; running Sobel/getImageData on the
+// full bitmap routinely crashes Safari/Chrome on iOS. Cap working resolution.
+var CROP_MAX_EDGE=1600;
+var DETECT_MAX_EDGE=900;
+var LETTER_RATIO=8.5/11; // US Letter portrait width/height
+
+function dist2(a,b){ var dx=a.x-b.x,dy=a.y-b.y; return Math.sqrt(dx*dx+dy*dy); }
+
+function drawImageToCanvas(src,maxEdge){
+  var nw=src.naturalWidth||src.width||0;
+  var nh=src.naturalHeight||src.height||0;
+  if(!nw||!nh) throw new Error('Image failed to load');
+  var scale=1;
+  var longest=Math.max(nw,nh);
+  if(longest>maxEdge) scale=maxEdge/longest;
+  var c=document.createElement('canvas');
+  c.width=Math.max(1,Math.round(nw*scale));
+  c.height=Math.max(1,Math.round(nh*scale));
+  c.getContext('2d').drawImage(src,0,0,c.width,c.height);
+  return c;
+}
+
+function canvasToJpegBlob(canvas,quality){
+  return new Promise(function(resolve,reject){
+    try{
+      canvas.toBlob(function(blob){
+        if(blob){ resolve(blob); return; }
+        try{
+          var data=canvas.toDataURL('image/jpeg',quality||0.88);
+          var bin=atob(data.split(',')[1]||'');
+          var arr=new Uint8Array(bin.length);
+          for(var i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+          resolve(new Blob([arr],{type:'image/jpeg'}));
+        }catch(e){ reject(e); }
+      },'image/jpeg',quality||0.88);
+    }catch(e){ reject(e); }
+  });
+}
+
+function loadFileAsImage(file){
+  return new Promise(function(resolve,reject){
+    var url=URL.createObjectURL(file);
+    var img=new Image();
+    img.onload=function(){ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror=function(){ URL.revokeObjectURL(url); reject(new Error('Failed to load photo')); };
+    img.src=url;
+  });
+}
+
 // ---- Perspective warp ----
 // Given src canvas/image and 4 corner points [{x,y}] in src space (TL,TR,BR,BL),
 // draw the perspective-corrected image onto dst canvas.
@@ -2984,17 +3035,28 @@ function perspectiveWarp(srcCanvas,corners,dstCanvas){
   var W=dstCanvas.width,H=dstCanvas.height;
   var ctx=dstCanvas.getContext('2d');
   ctx.clearRect(0,0,W,H);
-  // Sample each destination pixel from source using bilinear perspective mapping
-  var idata=ctx.createImageData(W,H);
   var src2d=srcCanvas.getContext('2d');
-  var srcData=src2d.getImageData(0,0,srcCanvas.width,srcCanvas.height);
+  var srcData;
+  try{
+    srcData=src2d.getImageData(0,0,srcCanvas.width,srcCanvas.height);
+  }catch(e){
+    // Security/memory failure — fall back to axis-aligned crop of the bbox.
+    var xs=corners.map(function(p){return p.x;});
+    var ys=corners.map(function(p){return p.y;});
+    var minX=Math.max(0,Math.min.apply(null,xs));
+    var maxX=Math.min(srcCanvas.width,Math.max.apply(null,xs));
+    var minY=Math.max(0,Math.min.apply(null,ys));
+    var maxY=Math.min(srcCanvas.height,Math.max.apply(null,ys));
+    ctx.drawImage(srcCanvas,minX,minY,Math.max(1,maxX-minX),Math.max(1,maxY-minY),0,0,W,H);
+    return;
+  }
+  var idata=ctx.createImageData(W,H);
   var sw=srcCanvas.width,sh=srcCanvas.height;
   var tl=corners[0],tr=corners[1],br=corners[2],bl=corners[3];
   for(var dy=0;dy<H;dy++){
     var v=dy/H;
     for(var dx=0;dx<W;dx++){
       var u=dx/W;
-      // Bilinear interpolation in source space
       var topX=tl.x+(tr.x-tl.x)*u;
       var topY=tl.y+(tr.y-tl.y)*u;
       var botX=bl.x+(br.x-bl.x)*u;
@@ -3018,7 +3080,9 @@ function perspectiveWarp(srcCanvas,corners,dstCanvas){
 function sobelEdges(canvas){
   var ctx=canvas.getContext('2d');
   var w=canvas.width,h=canvas.height;
-  var id=ctx.getImageData(0,0,w,h);
+  var id;
+  try{ id=ctx.getImageData(0,0,w,h); }
+  catch(e){ return {mag:new Float32Array(w*h),max:0,w:w,h:h}; }
   var gray=new Float32Array(w*h);
   for(var i=0;i<w*h;i++) gray[i]=0.299*id.data[i*4]+0.587*id.data[i*4+1]+0.114*id.data[i*4+2];
   var mag=new Float32Array(w*h);
@@ -3038,17 +3102,109 @@ function detectDocQuad(canvas){
   var s=sobelEdges(canvas);
   var thresh=s.max*0.25;
   var w=s.w,h=s.h;
-  // Find bounding box of strong edges
   var minX=w,maxX=0,minY=h,maxY=0;
   for(var y=0;y<h;y++) for(var x=0;x<w;x++){
     if(s.mag[y*w+x]>thresh){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
   }
-  // Pad a little
   var pad=8;
   minX=Math.max(0,minX-pad); minY=Math.max(0,minY-pad);
   maxX=Math.min(w-1,maxX+pad); maxY=Math.min(h-1,maxY+pad);
   if(maxX<=minX||maxY<=minY) return [{x:10,y:10},{x:w-10,y:10},{x:w-10,y:h-10},{x:10,y:h-10}];
   return [{x:minX,y:minY},{x:maxX,y:minY},{x:maxX,y:maxY},{x:minX,y:maxY}];
+}
+
+// ---- US Letter (8.5 x 11) helpers ----
+// Auto-crop often misses paper edges on phone photos; biasing toward letter
+// aspect gives inspectors a useful starting rectangle to fine-tune.
+function quadAspectRatio(q){
+  var top=dist2(q[0],q[1]), bot=dist2(q[3],q[2]);
+  var left=dist2(q[0],q[3]), right=dist2(q[1],q[2]);
+  var w=(top+bot)/2, h=(left+right)/2;
+  if(w<1||h<1) return 0;
+  return Math.min(w,h)/Math.max(w,h);
+}
+function letterAspectScore(q){
+  var r=quadAspectRatio(q);
+  if(!r) return 0;
+  return 1-Math.min(1,Math.abs(r-LETTER_RATIO)/LETTER_RATIO);
+}
+function letterInsetQuad(w,h,marginFrac){
+  var margin=Math.min(w,h)*(marginFrac==null?0.05:marginFrac);
+  var availW=Math.max(1,w-2*margin), availH=Math.max(1,h-2*margin);
+  var landscape=(w/h)>1.05;
+  var target=landscape?(11/8.5):LETTER_RATIO;
+  var boxW, boxH;
+  if(availW/availH > target){ boxH=availH; boxW=boxH*target; }
+  else { boxW=availW; boxH=boxW/target; }
+  var x0=(w-boxW)/2, y0=(h-boxH)/2;
+  return [{x:x0,y:y0},{x:x0+boxW,y:y0},{x:x0+boxW,y:y0+boxH},{x:x0,y:y0+boxH}];
+}
+function snapBBoxToLetter(minX,minY,maxX,maxY,imgW,imgH){
+  var bw=Math.max(1,maxX-minX), bh=Math.max(1,maxY-minY);
+  var cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+  var landscape=bw>=bh;
+  var target=landscape?(11/8.5):LETTER_RATIO;
+  var boxW=bw, boxH=bh;
+  if(boxW/boxH > target){ boxH=boxW/target; }
+  else { boxW=boxH*target; }
+  // Prefer expanding to cover the detected content while staying on-image.
+  var grow=1.04;
+  boxW=Math.min(imgW*0.98, boxW*grow);
+  boxH=Math.min(imgH*0.98, boxH*grow);
+  if(boxW/boxH > target) boxH=boxW/target; else boxW=boxH*target;
+  boxW=Math.min(boxW,imgW*0.98); boxH=Math.min(boxH,imgH*0.98);
+  if(boxW/boxH > target) boxH=boxW/target; else boxW=boxH*target;
+  var x0=Math.max(0,Math.min(imgW-boxW, cx-boxW/2));
+  var y0=Math.max(0,Math.min(imgH-boxH, cy-boxH/2));
+  return [{x:x0,y:y0},{x:x0+boxW,y:y0},{x:x0+boxW,y:y0+boxH},{x:x0,y:y0+boxH}];
+}
+function scaleQuad(q,sx,sy){
+  return q.map(function(p){ return {x:p.x*sx,y:p.y*sy}; });
+}
+function detectDocumentCorners(fullCanvas){
+  // Run detectors on a smaller canvas, then scale corners back up.
+  var detectCanvas=fullCanvas;
+  var sx=1, sy=1;
+  if(Math.max(fullCanvas.width,fullCanvas.height)>DETECT_MAX_EDGE){
+    detectCanvas=document.createElement('canvas');
+    var sc=DETECT_MAX_EDGE/Math.max(fullCanvas.width,fullCanvas.height);
+    detectCanvas.width=Math.max(1,Math.round(fullCanvas.width*sc));
+    detectCanvas.height=Math.max(1,Math.round(fullCanvas.height*sc));
+    detectCanvas.getContext('2d').drawImage(fullCanvas,0,0,detectCanvas.width,detectCanvas.height);
+    sx=fullCanvas.width/detectCanvas.width;
+    sy=fullCanvas.height/detectCanvas.height;
+  }
+  var w=detectCanvas.width, h=detectCanvas.height;
+  var frame=w*h;
+  var hint='letter';
+
+  try{
+    var j=detectWithJscanify(detectCanvas);
+    if(j && quadArea(j)>=frame*0.08 && quadArea(j)<=frame*0.95 && letterAspectScore(j)>=0.55){
+      return {quad:scaleQuad(j,sx,sy), hint:'auto'};
+    }
+    if(j && quadArea(j)>=frame*0.08 && quadArea(j)<=frame*0.95){
+      // Keep the detected polygon even if aspect is off — user can fine-tune.
+      return {quad:scaleQuad(j,sx,sy), hint:'auto'};
+    }
+  }catch(e){}
+
+  try{
+    var sobel=detectDocQuad(detectCanvas);
+    var area=quadArea(sobel);
+    if(area>=frame*0.08 && area<=frame*0.90){
+      var xs=sobel.map(function(p){return p.x;});
+      var ys=sobel.map(function(p){return p.y;});
+      var snapped=snapBBoxToLetter(
+        Math.min.apply(null,xs), Math.min.apply(null,ys),
+        Math.max.apply(null,xs), Math.max.apply(null,ys),
+        w,h
+      );
+      return {quad:scaleQuad(snapped,sx,sy), hint:'letter'};
+    }
+  }catch(e){}
+
+  return {quad:scaleQuad(letterInsetQuad(w,h,0.06),sx,sy), hint:'letter'};
 }
 
 // ---- OpenCV.js + jscanify document detection (self-hosted, offline) ----
@@ -3096,16 +3252,21 @@ function detectWithJscanify(canvas){
 }
 
 // ---- Magnifier loupe (iOS-style) shown while dragging a crop corner ----
+// Zoom is relative to the *on-screen* image (not raw canvas pixels). High-res
+// photos are displayed much smaller than their pixel size, so a fixed canvas
+// zoom previously felt ~10–15× — too tight to place edges. Aim ~1.85× screen.
 var loupeEl=document.getElementById('crop-loupe');
 function showLoupeAt(clientX,clientY,imgPt){
-  if(!loupeEl||!cropCurrentImg) return;
-  var LSIZE=132, ZOOM=1.5;
+  if(!loupeEl||!cropSourceCanvas) return;
+  var LSIZE=132, SCREEN_ZOOM=1.85;
   var lctx=loupeEl.getContext('2d');
-  var srcSpan=LSIZE/ZOOM;
+  var disp=cropCanvas.getBoundingClientRect();
+  var scale=disp.width/(cropCanvas.width||1);
+  var srcSpan=LSIZE/(SCREEN_ZOOM*Math.max(scale,0.02));
   var sx=imgPt.x-srcSpan/2, sy=imgPt.y-srcSpan/2;
   lctx.clearRect(0,0,LSIZE,LSIZE);
   lctx.fillStyle='#000'; lctx.fillRect(0,0,LSIZE,LSIZE);
-  try{ lctx.drawImage(cropCanvas,sx,sy,srcSpan,srcSpan,0,0,LSIZE,LSIZE); }catch(e){}
+  try{ lctx.drawImage(cropSourceCanvas,sx,sy,srcSpan,srcSpan,0,0,LSIZE,LSIZE); }catch(e){}
   lctx.strokeStyle='rgba(74,144,217,0.9)'; lctx.lineWidth=1.5;
   lctx.beginPath(); lctx.moveTo(LSIZE/2,0); lctx.lineTo(LSIZE/2,LSIZE); lctx.moveTo(0,LSIZE/2); lctx.lineTo(LSIZE,LSIZE/2); lctx.stroke();
   lctx.beginPath(); lctx.arc(LSIZE/2,LSIZE/2,7,0,Math.PI*2); lctx.strokeStyle='#fff'; lctx.lineWidth=2; lctx.stroke();
@@ -3118,9 +3279,12 @@ function showLoupeAt(clientX,clientY,imgPt){
 }
 function hideLoupe(){ if(loupeEl) loupeEl.style.display='none'; }
 
-// ---- Corner dragging ----
-function makeCornerDragger(canvas,corners,onDraw){
-  var dragging=-1;
+// ---- Corner dragging (listeners bound once; corners swapped per overlay) ----
+var cropDrag={corners:null,onDraw:null,dragging:-1,bound:false,lastCX:0,lastCY:0,rafPending:false};
+function ensureCornerDragger(){
+  if(cropDrag.bound) return;
+  cropDrag.bound=true;
+  var canvas=cropCanvas;
   function getScale(){return canvas.getBoundingClientRect().width/(canvas.width||1);}
   function getClient(e){var cl=e.touches?e.touches[0]:e;return {x:cl.clientX,y:cl.clientY};}
   function getPos(e){
@@ -3130,34 +3294,51 @@ function makeCornerDragger(canvas,corners,onDraw){
     return {x:(cl.clientX-r.left)/sc,y:(cl.clientY-r.top)/sc};
   }
   function hit(p){
+    if(!cropDrag.corners) return -1;
     var r=Math.max(22,40/getScale());
-    for(var i=0;i<corners.length;i++){
-      var dx=p.x-corners[i].x,dy=p.y-corners[i].y;
+    for(var i=0;i<cropDrag.corners.length;i++){
+      var dx=p.x-cropDrag.corners[i].x,dy=p.y-cropDrag.corners[i].y;
       if(Math.sqrt(dx*dx+dy*dy)<r) return i;
     }
     return -1;
   }
-  // Coalesce redraws to one per animation frame so rapid touchmove events don't
-  // queue up expensive full-image redraws (which caused lag while dragging).
-  var rafPending=false,lastCX=0,lastCY=0;
   function scheduleDraw(){
-    if(rafPending)return;
-    rafPending=true;
+    if(cropDrag.rafPending)return;
+    cropDrag.rafPending=true;
     requestAnimationFrame(function(){
-      rafPending=false;
-      onDraw();
-      if(dragging>=0)showLoupeAt(lastCX,lastCY,corners[dragging]);
+      cropDrag.rafPending=false;
+      if(cropDrag.onDraw) cropDrag.onDraw();
+      if(cropDrag.dragging>=0 && cropDrag.corners)
+        showLoupeAt(cropDrag.lastCX,cropDrag.lastCY,cropDrag.corners[cropDrag.dragging]);
     });
   }
-  function start(e){dragging=hit(getPos(e));if(dragging>=0){var c=getClient(e);lastCX=c.x;lastCY=c.y;showLoupeAt(c.x,c.y,corners[dragging]);}}
-  function move(e){if(dragging<0)return;var p=getPos(e);corners[dragging].x=p.x;corners[dragging].y=p.y;var c=getClient(e);lastCX=c.x;lastCY=c.y;scheduleDraw();}
-  function end(){dragging=-1;hideLoupe();}
+  function start(e){
+    cropDrag.dragging=hit(getPos(e));
+    if(cropDrag.dragging>=0){
+      var c=getClient(e); cropDrag.lastCX=c.x; cropDrag.lastCY=c.y;
+      showLoupeAt(c.x,c.y,cropDrag.corners[cropDrag.dragging]);
+    }
+  }
+  function move(e){
+    if(cropDrag.dragging<0||!cropDrag.corners)return;
+    var p=getPos(e);
+    cropDrag.corners[cropDrag.dragging].x=p.x;
+    cropDrag.corners[cropDrag.dragging].y=p.y;
+    var c=getClient(e); cropDrag.lastCX=c.x; cropDrag.lastCY=c.y;
+    scheduleDraw();
+  }
+  function end(){ cropDrag.dragging=-1; hideLoupe(); }
   canvas.addEventListener('mousedown',start);
   canvas.addEventListener('touchstart',function(e){e.preventDefault();start(e);},{passive:false});
   canvas.addEventListener('mousemove',move);
   canvas.addEventListener('touchmove',function(e){e.preventDefault();move(e);},{passive:false});
   canvas.addEventListener('mouseup',end);
   canvas.addEventListener('touchend',end);
+}
+function makeCornerDragger(canvas,corners,onDraw){
+  cropDrag.corners=corners;
+  cropDrag.onDraw=onDraw;
+  ensureCornerDragger();
 }
 
 // ---- Draw corners overlay ----
@@ -3166,22 +3347,22 @@ function drawCornersOverlay(canvas,img,corners){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   if(img) ctx.drawImage(img,0,0,canvas.width,canvas.height);
   ctx.strokeStyle='rgba(74,144,217,0.85)';
-  ctx.lineWidth=2;
+  ctx.lineWidth=Math.max(2, canvas.width/400);
   ctx.beginPath();
   ctx.moveTo(corners[0].x,corners[0].y);
   for(var i=1;i<corners.length;i++) ctx.lineTo(corners[i].x,corners[i].y);
   ctx.closePath();
   ctx.stroke();
-  // Fill overlay
   ctx.fillStyle='rgba(74,144,217,0.12)';
   ctx.beginPath();
   ctx.moveTo(corners[0].x,corners[0].y);
   for(var j=1;j<corners.length;j++) ctx.lineTo(corners[j].x,corners[j].y);
   ctx.closePath();
   ctx.fill();
+  var handleR=Math.max(10, canvas.width/80);
   corners.forEach(function(c){
     ctx.beginPath();
-    ctx.arc(c.x,c.y,10,0,Math.PI*2);
+    ctx.arc(c.x,c.y,handleR,0,Math.PI*2);
     ctx.fillStyle='#4A90D9';
     ctx.fill();
     ctx.strokeStyle='#fff';
@@ -3190,56 +3371,83 @@ function drawCornersOverlay(canvas,img,corners){
   });
 }
 
-// ---- Crop overlay (shared for library photos) ----
+// ---- Crop overlay (shared for library + camera photos) ----
 var cropQueue=[];
 var cropCurrentImg=null;
+var cropSourceCanvas=null;
 var cropCorners=null;
 var cropResolve=null;
 var cropCanvas=document.getElementById('crop-canvas');
 var cropOverlay=document.getElementById('crop-overlay');
 
+function letterOutputSize(corners){
+  var top=dist2(corners[0],corners[1]);
+  var side=dist2(corners[0],corners[3]);
+  // US Letter @ ~120 dpi — sharp enough for oversight docs without huge PDFs.
+  if(top>side) return {w:1320,h:1020}; // landscape 11 x 8.5
+  return {w:1020,h:1320}; // portrait 8.5 x 11
+}
+
 function showCropOverlay(imgEl){
   return new Promise(function(resolve){
     cropResolve=resolve;
     cropCurrentImg=imgEl;
-    cropCanvas.width=imgEl.naturalWidth||imgEl.width;
-    cropCanvas.height=imgEl.naturalHeight||imgEl.height;
+    hideLoupe();
+    try{
+      cropSourceCanvas=drawImageToCanvas(imgEl,CROP_MAX_EDGE);
+    }catch(e){
+      cropResolve=null;
+      resolve(null);
+      return;
+    }
+    cropCanvas.width=cropSourceCanvas.width;
+    cropCanvas.height=cropSourceCanvas.height;
     var w=cropCanvas.width,h=cropCanvas.height;
     var pad=Math.min(w,h)*0.05;
     cropCorners=[{x:pad,y:pad},{x:w-pad,y:pad},{x:w-pad,y:h-pad},{x:pad,y:h-pad}];
-    // Try auto-detect: OpenCV/jscanify first (real page detection), then Sobel fallback.
-    var tmpCanvas=document.createElement('canvas');
-    tmpCanvas.width=w; tmpCanvas.height=h;
-    tmpCanvas.getContext('2d').drawImage(imgEl,0,0,w,h);
-    var detected=detectWithJscanify(tmpCanvas);
+
     var autoHint=document.getElementById('crop-hint');
-    if(detected){
-      if(autoHint) autoHint.textContent='Page detected \u2014 drag the corners to fine-tune';
-    } else {
-      detected=detectDocQuad(tmpCanvas);
-      if(autoHint) autoHint.textContent='Drag the corners to align with the document edges';
+    var detected;
+    try{
+      detected=detectDocumentCorners(cropSourceCanvas);
+    }catch(e){
+      detected={quad:letterInsetQuad(w,h,0.06), hint:'letter'};
     }
-    cropCorners=detected;
-    drawCornersOverlay(cropCanvas,imgEl,cropCorners);
-    makeCornerDragger(cropCanvas,cropCorners,function(){drawCornersOverlay(cropCanvas,imgEl,cropCorners);});
+    cropCorners=detected.quad;
+    if(autoHint){
+      if(detected.hint==='auto')
+        autoHint.textContent='Page detected \\u2014 drag the corners to fine-tune';
+      else
+        autoHint.textContent='US Letter (8.5\\u00d711) guide \\u2014 drag corners to the page edges';
+    }
+    drawCornersOverlay(cropCanvas,cropSourceCanvas,cropCorners);
+    makeCornerDragger(cropCanvas,cropCorners,function(){drawCornersOverlay(cropCanvas,cropSourceCanvas,cropCorners);});
     cropOverlay.style.display='flex';
   });
 }
 
 document.getElementById('crop-skip-btn').addEventListener('click',function(){
   cropOverlay.style.display='none';
+  hideLoupe();
   if(cropResolve) cropResolve(null);
+});
+document.getElementById('crop-letter-btn').addEventListener('click',function(){
+  if(!cropSourceCanvas) return;
+  cropCorners=letterInsetQuad(cropSourceCanvas.width,cropSourceCanvas.height,0.06);
+  cropDrag.corners=cropCorners;
+  var autoHint=document.getElementById('crop-hint');
+  if(autoHint) autoHint.textContent='US Letter (8.5\\u00d711) guide \\u2014 drag corners to the page edges';
+  drawCornersOverlay(cropCanvas,cropSourceCanvas,cropCorners);
 });
 document.getElementById('crop-confirm-btn').addEventListener('click',function(){
   cropOverlay.style.display='none';
-  if(!cropResolve||!cropCurrentImg) return;
-  // Produce warp: output is A4 ratio
-  var imgW=cropCurrentImg.naturalWidth||cropCurrentImg.width;
-  var imgH=cropCurrentImg.naturalHeight||cropCurrentImg.height;
-  var outW=794,outH=1123; // A4 at 96dpi
+  hideLoupe();
+  if(!cropResolve||!cropSourceCanvas||!cropCorners) return;
+  var size=letterOutputSize(cropCorners);
   var out=document.createElement('canvas');
-  out.width=outW; out.height=outH;
-  perspectiveWarp(cropCanvas,cropCorners,out); // cropCanvas already has imgEl drawn
+  out.width=size.w; out.height=size.h;
+  // Warp from the clean source (not the overlay-painted cropCanvas).
+  perspectiveWarp(cropSourceCanvas,cropCorners,out);
   cropResolve(out);
 });
 
@@ -3278,40 +3486,42 @@ libUploadBtn.addEventListener('click',async function(){
   if(!libFiles.length) return;
   libUploadBtn.disabled=true;
   libProgBar.style.display='';
-  libStatus.textContent='Scanning photos\u2026';
+  libStatus.textContent='Scanning photos\\u2026';
 
   var pages=[];
-  for(var i=0;i<libFiles.length;i++){
-    libProgFill.style.width=Math.round((i/libFiles.length)*50)+'%';
-    var img=new Image();
-    await new Promise(function(res){
-      img.onload=res; img.onerror=res;
-      img.src=URL.createObjectURL(libFiles[i]);
-    });
-    // Show crop overlay
-    var croppedCanvas=await showCropOverlay(img);
-    var srcCanvas;
-    if(croppedCanvas){
-      srcCanvas=croppedCanvas;
-    } else {
-      srcCanvas=document.createElement('canvas');
-      srcCanvas.width=img.naturalWidth; srcCanvas.height=img.naturalHeight;
-      srcCanvas.getContext('2d').drawImage(img,0,0);
-    }
-    var jpegBlob=await new Promise(function(res){srcCanvas.toBlob(res,'image/jpeg',0.88);});
-    var buf=await jpegBlob.arrayBuffer();
-    pages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height});
-  }
-
-  libProgFill.style.width='70%';
-  libStatus.textContent='Building PDF\u2026';
-  var pdfBytes=buildPdf(pages);
-
-  libProgFill.style.width='85%';
-  libStatus.textContent='Uploading\u2026';
-  var fd=new FormData();
-  fd.append('document',new Blob([pdfBytes],{type:'application/pdf'}),'scan_'+Date.now()+'.pdf');
   try{
+    for(var i=0;i<libFiles.length;i++){
+      libProgFill.style.width=Math.round((i/libFiles.length)*50)+'%';
+      libStatus.textContent='Scanning photo '+(i+1)+' of '+libFiles.length+'\\u2026';
+      var img;
+      try{
+        img=await loadFileAsImage(libFiles[i]);
+      }catch(loadErr){
+        libStatus.textContent='Could not load photo '+(i+1)+'. Try JPEG/PNG.';
+        libUploadBtn.disabled=false;
+        return;
+      }
+      var croppedCanvas=await showCropOverlay(img);
+      var srcCanvas;
+      if(croppedCanvas){
+        srcCanvas=croppedCanvas;
+      } else {
+        try{ srcCanvas=drawImageToCanvas(img,CROP_MAX_EDGE); }
+        catch(e){ libStatus.textContent='Photo '+(i+1)+' is unreadable.'; libUploadBtn.disabled=false; return; }
+      }
+      var jpegBlob=await canvasToJpegBlob(srcCanvas,0.88);
+      var buf=await jpegBlob.arrayBuffer();
+      pages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height});
+    }
+
+    libProgFill.style.width='70%';
+    libStatus.textContent='Building PDF\\u2026';
+    var pdfBytes=buildPdf(pages);
+
+    libProgFill.style.width='85%';
+    libStatus.textContent='Uploading\\u2026';
+    var fd=new FormData();
+    fd.append('document',new Blob([pdfBytes],{type:'application/pdf'}),'scan_'+Date.now()+'.pdf');
     var r=await fetch(location.href.replace(location.search,'')+'?token='+encodeURIComponent(tk),{method:'POST',body:fd});
     libProgFill.style.width='100%';
     if(r.ok){
@@ -3323,7 +3533,7 @@ libUploadBtn.addEventListener('click',async function(){
       libUploadBtn.disabled=false;
     }
   } catch(e){
-    libStatus.textContent='Upload error: '+e.message;
+    libStatus.textContent='Scan error: '+(e&&e.message?e.message:'unknown');
     libUploadBtn.disabled=false;
   }
 });
@@ -3379,40 +3589,41 @@ camFallbackInput.addEventListener('change',async function(){
   var file=this.files[0];
   this.value='';
   if(!file) return;
-  camStatus.textContent='Loading\u2026';
-  var img=new Image();
-  var objUrl=URL.createObjectURL(file);
+  camStatus.textContent='Loading\\u2026';
+  var img;
   try{
-    await new Promise(function(res,rej){img.onload=res;img.onerror=rej;img.src=objUrl;});
+    img=await loadFileAsImage(file);
   }catch(e){
     camStatus.textContent='Failed to load photo. Please try again.';
-    URL.revokeObjectURL(objUrl);
     return;
   }
-  URL.revokeObjectURL(objUrl);
   camStatus.textContent='';
 
-  // showCropOverlay: auto-detects document quad, lets user drag corners, returns
-  // a perspective-corrected canvas \u2014 or null if the user taps Skip.
-  var croppedCanvas=await showCropOverlay(img);
-
-  var srcCanvas;
-  if(croppedCanvas){
-    srcCanvas=croppedCanvas;
-  } else {
-    srcCanvas=document.createElement('canvas');
-    srcCanvas.width=img.naturalWidth||img.width;
-    srcCanvas.height=img.naturalHeight||img.height;
-    srcCanvas.getContext('2d').drawImage(img,0,0);
+  var croppedCanvas;
+  try{
+    croppedCanvas=await showCropOverlay(img);
+  }catch(e){
+    camStatus.textContent='Crop failed \\u2014 try again or use a smaller photo.';
+    return;
   }
 
-  var jpegBlob=await new Promise(function(res){srcCanvas.toBlob(res,'image/jpeg',0.88);});
-  var buf=await jpegBlob.arrayBuffer();
-  camPages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height,objectUrl:URL.createObjectURL(new Blob([jpegBlob],{type:'image/jpeg'}))});
-  renderCamPages();
-  updateCamUploadBtn();
-  camStatus.textContent='Page '+camPages.length+' added \u2014 scan another or tap Upload.';
-  camTakeLabel.textContent='Tap to scan page '+(camPages.length+1);
+  var srcCanvas;
+  try{
+    if(croppedCanvas){
+      srcCanvas=croppedCanvas;
+    } else {
+      srcCanvas=drawImageToCanvas(img,CROP_MAX_EDGE);
+    }
+    var jpegBlob=await canvasToJpegBlob(srcCanvas,0.88);
+    var buf=await jpegBlob.arrayBuffer();
+    camPages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height,objectUrl:URL.createObjectURL(new Blob([jpegBlob],{type:'image/jpeg'}))});
+    renderCamPages();
+    updateCamUploadBtn();
+    camStatus.textContent='Page '+camPages.length+' added \\u2014 scan another or tap Upload.';
+    camTakeLabel.textContent='Tap to scan page '+(camPages.length+1);
+  }catch(e){
+    camStatus.textContent='Could not process photo: '+(e&&e.message?e.message:'unknown');
+  }
 });
 
 // Combine all scanned pages into one PDF and upload.
