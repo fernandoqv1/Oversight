@@ -2759,7 +2759,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .succ-card h2{color:#166534;font-size:1rem}
 .name-inp{width:100%;border:1.5px solid #d1d5db;border-radius:8px;padding:9px 12px;font-size:.9rem;background:#fff}
 .name-inp:focus{outline:none;border-color:#1e3a5f}
-.crop-loupe{position:fixed;width:132px;height:132px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 12px rgba(0,0,0,.55);pointer-events:none;display:none;z-index:120;background:#000;overflow:hidden}
+.crop-loupe{position:fixed;width:168px;height:168px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 12px rgba(0,0,0,.55);pointer-events:none;display:none;z-index:120;background:#000;overflow:hidden}
 </style>
 <!-- Self-hosted OpenCV.js + jscanify for automatic document (paper) detection. -->
 <!-- Served locally by the Oversight PC so the phone needs no internet access. -->
@@ -2851,7 +2851,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="crop-overlay" id="crop-overlay" style="display:none">
   <div id="crop-hint" style="color:#fff;font-size:.9rem;text-align:center">Drag the corners to align with the document edges</div>
   <canvas id="crop-canvas" width="400" height="530"></canvas>
-  <canvas class="crop-loupe" id="crop-loupe" width="132" height="132"></canvas>
+  <canvas class="crop-loupe" id="crop-loupe" width="168" height="168"></canvas>
   <div class="crop-btns">
     <button class="btn btn-secondary btn-sm" id="crop-skip-btn">Skip Crop</button>
     <button class="btn btn-secondary btn-sm" id="crop-letter-btn">Letter 8.5&times;11</button>
@@ -3254,11 +3254,12 @@ function detectWithJscanify(canvas){
 // ---- Magnifier loupe (iOS-style) shown while dragging a crop corner ----
 // Zoom is relative to the *on-screen* image (not raw canvas pixels). High-res
 // photos are displayed much smaller than their pixel size, so a fixed canvas
-// zoom previously felt ~10–15× — too tight to place edges. Aim ~1.85× screen.
+// zoom previously felt ~10–15× — too tight to place edges. Aim ~1.35× screen
+// so plenty of edge context stays visible while still magnifying.
 var loupeEl=document.getElementById('crop-loupe');
 function showLoupeAt(clientX,clientY,imgPt){
   if(!loupeEl||!cropSourceCanvas) return;
-  var LSIZE=132, SCREEN_ZOOM=1.85;
+  var LSIZE=168, SCREEN_ZOOM=1.35;
   var lctx=loupeEl.getContext('2d');
   var disp=cropCanvas.getBoundingClientRect();
   var scale=disp.width/(cropCanvas.width||1);
@@ -3270,8 +3271,8 @@ function showLoupeAt(clientX,clientY,imgPt){
   lctx.strokeStyle='rgba(74,144,217,0.9)'; lctx.lineWidth=1.5;
   lctx.beginPath(); lctx.moveTo(LSIZE/2,0); lctx.lineTo(LSIZE/2,LSIZE); lctx.moveTo(0,LSIZE/2); lctx.lineTo(LSIZE,LSIZE/2); lctx.stroke();
   lctx.beginPath(); lctx.arc(LSIZE/2,LSIZE/2,7,0,Math.PI*2); lctx.strokeStyle='#fff'; lctx.lineWidth=2; lctx.stroke();
-  var left=clientX-LSIZE/2, top=clientY-LSIZE-24;
-  if(top<8) top=clientY+24;
+  var left=clientX-LSIZE/2, top=clientY-LSIZE-28;
+  if(top<8) top=clientY+28;
   left=Math.max(8,Math.min(left,window.innerWidth-LSIZE-8));
   top=Math.max(8,Math.min(top,window.innerHeight-LSIZE-8));
   loupeEl.style.left=left+'px'; loupeEl.style.top=top+'px';
