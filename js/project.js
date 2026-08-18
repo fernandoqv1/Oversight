@@ -8635,13 +8635,24 @@ async function openWirelessDocumentImportModal() {
         await window.electronAPI.stopWirelessDocumentImport().catch(() => {});
     };
 
+    let closing = false;
     const closeModal = async () => {
+        if (closing) return;
+        closing = true;
         await stopImport();
         modal.remove();
     };
 
     cancelBtn.addEventListener('click', closeModal);
-    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+    // Same backdrop pattern as other modals: only close when the press started
+    // AND ended on the overlay. Selecting text in a name field and releasing
+    // outside must not close (and previously crashed the renderer).
+    let mouseDownOnBackdrop = false;
+    modal.addEventListener('mousedown', (e) => { mouseDownOnBackdrop = (e.target === modal); });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal && mouseDownOnBackdrop) closeModal();
+        mouseDownOnBackdrop = false;
+    });
 
     // Start the Wi-Fi Direct server
     let startResult;

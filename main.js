@@ -815,11 +815,10 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
 .upload-btn:disabled{background:#a5b4fc;cursor:default}
 .count-hint{font-size:13px;color:#6b7280;text-align:center;margin-top:10px}
 .succ-card{display:none;background:#fff;border-radius:16px;padding:32px 20px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+.succ-card.visible{display:block}
 .succ-ico{font-size:52px;margin-bottom:12px}
 .succ-card h2{font-size:20px;font-weight:800;color:#1a1a2e}
-.succ-card p{font-size:14px;color:#6b7280;margin-top:6px}
-.more-btn{margin-top:20px;display:block;width:100%;padding:14px;background:#f3f4f6;color:#4f46e5;border:1.5px solid #c7d2fe;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer}
-.limit-banner{margin-top:10px;padding:10px 14px;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;font-size:13px;color:#92400e;text-align:center}
+.succ-card p{font-size:14px;color:#6b7280;margin-top:6px;line-height:1.5}
 </style>
 </head>
 <body>
@@ -847,9 +846,8 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
   </div>
   <div class="succ-card" id="succ-card">
     <div class="succ-ico">&#9989;</div>
-    <h2 id="succ-msg">Photos uploaded!</h2>
-    <p>Return to Oversight on the PC to continue.</p>
-    <button class="more-btn" id="more-btn">Upload More Photos</button>
+    <h2>Photos have been uploaded successfully</h2>
+    <p id="succ-msg">Please check your computer. This tab will close in 3 seconds</p>
   </div>
 </div>
 <script>
@@ -866,7 +864,6 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
   var uploadSection=document.getElementById('upload-section');
   var succCard=document.getElementById('succ-card');
   var succMsg=document.getElementById('succ-msg');
-  var moreBtn=document.getElementById('more-btn');
   var selectedFiles=[];
   var thumbEls=[];
 
@@ -937,31 +934,26 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
       }
     }
     totalUploaded+=ok;
-    uploadSection.style.display='none';
-    succCard.style.display='';
-    succMsg.textContent=ok+' of '+selectedFiles.length+' photo'+(selectedFiles.length!==1?'s':'')+' uploaded!';
-    if(totalUploaded>=MAX){
-      moreBtn.style.display='none';
-      var lim=document.createElement('p');
-      lim.className='limit-banner';
-      lim.textContent='Maximum '+MAX+' photos reached. Return to Oversight on the PC.';
-      succCard.appendChild(lim);
-    } else {
-      moreBtn.textContent='Upload More Photos ('+(MAX-totalUploaded)+' remaining)';
+    if(ok<1){
+      uploadBtn.disabled=false;
+      fileInput.disabled=false;
+      pickLbl.style.pointerEvents='';
+      return;
     }
-  });
-
-  moreBtn.addEventListener('click',function(){
-    selectedFiles=[];thumbEls=[];
-    previewGrid.innerHTML='';
-    fileInput.value='';fileInput.disabled=false;
-    pickLbl.innerHTML='\u{1F4F7}&nbsp; Choose Photos from Camera Roll ('+(MAX-totalUploaded)+' remaining)';
-    pickLbl.style.pointerEvents='';
-    countHint.textContent='';countHint.style.color='';
-    uploadCard.style.display='none';
-    uploadBtn.disabled=false;
-    uploadSection.style.display='';
-    succCard.style.display='none';
+    uploadSection.style.display='none';
+    succCard.classList.add('visible');
+    succCard.style.display='block';
+    var secsLeft=3;
+    succMsg.textContent='Please check your computer. This tab will close in '+secsLeft+' seconds';
+    var tick=setInterval(function(){
+      secsLeft--;
+      if(secsLeft>0){
+        succMsg.textContent='Please check your computer. This tab will close in '+secsLeft+' second'+(secsLeft===1?'':'s');
+        return;
+      }
+      clearInterval(tick);
+      window.close();
+    },1000);
   });
 })();
 </script>
