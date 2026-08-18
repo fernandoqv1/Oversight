@@ -2772,9 +2772,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .crop-overlay canvas{max-width:100%;max-height:60vh;touch-action:none;border-radius:4px;cursor:crosshair}
 .crop-overlay .crop-btns{display:flex;gap:10px}
 .cam-wrap{position:relative;width:100%;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:3/4;max-height:55vh}
-.cam-wrap video{width:100%;height:100%;object-fit:cover}
-.cam-wrap canvas.overlay{position:absolute;inset:0;pointer-events:none}
-.cam-btns{display:flex;gap:10px;justify-content:center}
+.cam-wrap video{display:block;width:100%;height:100%;object-fit:cover;vertical-align:top}
+.cam-wrap canvas.overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.cam-btns{display:flex;gap:10px;justify-content:center;width:100%}
+.cam-scan-area{display:flex;flex-direction:column;gap:12px}
+.cam-loading{display:none;text-align:center;padding:28px 12px;color:#6b7280;font-size:.85rem}
+.cam-loading .spin{width:28px;height:28px;border:3px solid #e5e7eb;border-top-color:#1e3a5f;border-radius:50%;animation:camspin .8s linear infinite;margin:0 auto 10px}
+@keyframes camspin{to{transform:rotate(360deg)}}
 .cam-handle{position:absolute;width:44px;height:44px;border-radius:50%;background:#4A90D9;border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45);transform:translate(-50%,-50%);touch-action:none;cursor:grab;-webkit-tap-highlight-color:transparent}
 .btn{padding:11px 22px;border-radius:8px;font-size:.9rem;font-weight:600;border:none;cursor:pointer;transition:.15s;-webkit-tap-highlight-color:transparent}
 .btn-primary{background:#1e3a5f;color:#fff}
@@ -2844,22 +2848,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         First visit only: if Safari warns about the certificate, tap <strong>Show Details</strong> then <strong>visit this website</strong> to enable live scanning.
       </div>
       <div class="previews" id="cam-pages-list" style="display:none;"></div>
-      <div id="cam-live-wrap" style="display:none;">
-        <div class="cam-wrap">
-          <video id="cam-video" autoplay playsinline muted></video>
-          <canvas id="cam-overlay" class="overlay"></canvas>
+      <div class="cam-scan-area">
+        <div id="cam-loading" class="cam-loading">
+          <div class="spin"></div>
+          Starting camera&hellip;
         </div>
-        <div class="cam-btns" style="margin-top:12px;">
-          <button type="button" class="btn btn-primary" id="cam-capture-btn" style="flex:1;">&#128248; Capture Page</button>
+        <div id="cam-live-wrap" style="display:none;">
+          <div class="cam-wrap">
+            <video id="cam-video" autoplay playsinline muted></video>
+            <canvas id="cam-overlay" class="overlay"></canvas>
+          </div>
+          <div class="cam-btns" style="margin-top:12px;">
+            <button type="button" class="btn btn-primary" id="cam-capture-btn" style="width:100%;">&#128248; Capture Page</button>
+          </div>
         </div>
-      </div>
-      <div id="cam-fallback-wrap">
-        <button type="button" class="btn btn-primary" id="cam-start-live-btn" style="width:100%;margin-bottom:10px;display:none;">Start Live Scanner</button>
-        <label class="pick-area" id="cam-pick-area">
-          <input type="file" id="cam-fallback-input" accept="image/*" capture="environment">
-          <div class="pick-ico">&#128247;</div>
-          <p id="cam-take-label">Tap to scan first page</p>
-        </label>
+        <div id="cam-fallback-wrap" style="display:none;">
+          <label class="pick-area" id="cam-pick-area">
+            <input type="file" id="cam-fallback-input" accept="image/*" capture="environment">
+            <div class="pick-ico">&#128247;</div>
+            <p id="cam-take-label">Tap to scan first page</p>
+          </label>
+          <button type="button" class="btn btn-secondary btn-sm" id="cam-retry-live-btn" style="display:none;width:100%;">Try Live Scanner</button>
+        </div>
       </div>
       <div class="prog-bar" id="cam-prog-bar" style="display:none"><div class="prog-fill" id="cam-prog-fill"></div></div>
       <div class="status-msg" id="cam-status"></div>
@@ -3378,7 +3388,8 @@ libUploadBtn.addEventListener('click',async function(){
 var camFallbackInput=document.getElementById('cam-fallback-input');
 var camFallbackWrap=document.getElementById('cam-fallback-wrap');
 var camLiveWrap=document.getElementById('cam-live-wrap');
-var camStartLiveBtn=document.getElementById('cam-start-live-btn');
+var camLoadingEl=document.getElementById('cam-loading');
+var camRetryLiveBtn=document.getElementById('cam-retry-live-btn');
 var camCaptureBtn=document.getElementById('cam-capture-btn');
 var camVideo=document.getElementById('cam-video');
 var camOverlay=document.getElementById('cam-overlay');
@@ -3449,6 +3460,20 @@ async function processCapturedImage(imgEl,knownQuad){
   return frame;
 }
 
+function setCameraUiMode(mode){
+  var hideAll=(mode==='hidden');
+  if(camLoadingEl) camLoadingEl.style.display=(mode==='loading')?'block':'none';
+  if(camLiveWrap) camLiveWrap.style.display=(mode==='live')?'':'none';
+  if(camFallbackWrap) camFallbackWrap.style.display=(mode==='fallback')?'':'none';
+  if(camRetryLiveBtn) camRetryLiveBtn.style.display=(mode==='fallback'&&canLiveCamera)?'':'none';
+  if(hideAll){
+    if(camLoadingEl) camLoadingEl.style.display='none';
+    if(camLiveWrap) camLiveWrap.style.display='none';
+    if(camFallbackWrap) camFallbackWrap.style.display='none';
+    if(camRetryLiveBtn) camRetryLiveBtn.style.display='none';
+  }
+}
+
 function stopLiveCamera(){
   if(camDetectTimer){clearInterval(camDetectTimer);camDetectTimer=null;}
   camLiveQuad=null;
@@ -3457,12 +3482,11 @@ function stopLiveCamera(){
     camStream=null;
   }
   if(camVideo) camVideo.srcObject=null;
-  if(camLiveWrap) camLiveWrap.style.display='none';
-  if(camFallbackWrap) camFallbackWrap.style.display='';
   if(camOverlay){
     var ctx=camOverlay.getContext('2d');
     ctx.clearRect(0,0,camOverlay.width,camOverlay.height);
   }
+  setCameraUiMode('fallback');
 }
 
 function drawLiveOverlay(quad,detectW,detectH){
@@ -3492,7 +3516,8 @@ function scaleQuad(quad,fromW,fromH,toW,toH){
 
 async function startLiveCamera(){
   if(!canLiveCamera) return false;
-  camStatus.textContent='Starting camera\u2026';
+  setCameraUiMode('loading');
+  camStatus.textContent='';
   try{
     camStream=await navigator.mediaDevices.getUserMedia({
       video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},
@@ -3500,8 +3525,7 @@ async function startLiveCamera(){
     });
     camVideo.srcObject=camStream;
     await camVideo.play();
-    camLiveWrap.style.display='';
-    camFallbackWrap.style.display='none';
+    setCameraUiMode('live');
     camStatus.textContent='Align the document inside the blue frame, then tap Capture.';
     if(camDetectTimer) clearInterval(camDetectTimer);
     camDetectTimer=setInterval(function(){
@@ -3527,7 +3551,7 @@ async function startLiveCamera(){
     return true;
   }catch(e){
     stopLiveCamera();
-    camStatus.textContent='Live camera unavailable. Use the button below to take a photo instead.';
+    camStatus.textContent='Live camera unavailable \u2014 tap below to take a photo instead.';
     return false;
   }
 }
@@ -3538,18 +3562,19 @@ function initCameraTab(){
   var secureNote=document.getElementById('cam-secure-note');
   if(location.protocol==='https:'&&secureNote) secureNote.style.display='';
   if(canLiveCamera){
-    if(camStartLiveBtn) camStartLiveBtn.style.display='';
     startLiveCamera();
-  } else if(isIOS){
-    var hint=document.getElementById('cam-hint');
-    if(hint) hint.textContent='Take a photo of each page. The document will be auto-cropped when possible.';
-    camStatus.textContent='Tip: hold the phone parallel to the page for best auto-detection.';
+  } else {
+    setCameraUiMode('fallback');
+    if(isIOS){
+      var hint=document.getElementById('cam-hint');
+      if(hint) hint.textContent='Take a photo of each page. The document will be auto-cropped when possible.';
+      camStatus.textContent='Tip: hold the phone parallel to the page for best auto-detection.';
+    }
   }
 }
 
-
-if(camStartLiveBtn){
-  camStartLiveBtn.addEventListener('click',function(){startLiveCamera();});
+if(camRetryLiveBtn){
+  camRetryLiveBtn.addEventListener('click',function(){startLiveCamera();});
 }
 
 function renderCamPages(){
@@ -3627,8 +3652,12 @@ if(camCaptureBtn){
 camUploadBtn.addEventListener('click',async function(){
   if(!camPages.length) return;
   camUploadBtn.disabled=true;
-  stopLiveCamera();
-  camFallbackWrap.style.display='none';
+  if(camStream){
+    camStream.getTracks().forEach(function(t){t.stop();});
+    camStream=null;
+  }
+  if(camDetectTimer){clearInterval(camDetectTimer);camDetectTimer=null;}
+  setCameraUiMode('hidden');
   camProgBar.style.display='';
   camProgFill.style.width='50%';
   camStatus.textContent='Building PDF\u2026';
@@ -3648,12 +3677,12 @@ camUploadBtn.addEventListener('click',async function(){
       var j=await r.json().catch(function(){return{};});
       camStatus.textContent=j.error||('Upload failed ('+r.status+')');
       camUploadBtn.disabled=false;
-      camFallbackWrap.style.display='';
+      setCameraUiMode('fallback');
     }
   }catch(e){
     camStatus.textContent='Upload error: '+e.message;
     camUploadBtn.disabled=false;
-      camFallbackWrap.style.display='';
+    setCameraUiMode('fallback');
   }
 });
 
@@ -3744,7 +3773,7 @@ document.getElementById('upload-another-btn').addEventListener('click',function(
   camStatus.textContent=''; camTakeLabel.textContent='Tap to scan first page';
   stopLiveCamera();
   camTabInitialized=false;
-  camFallbackWrap.style.display='';
+  if(!canLiveCamera) setCameraUiMode('fallback');
   selectedFiles=[]; renderFilesList();
   filesProgBar.style.display='none'; filesProgFill.style.width='0';
   libProgBar.style.display='none'; libProgFill.style.width='0';
