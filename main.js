@@ -2744,7 +2744,7 @@ function getMobileDocumentUploadHtml() {
 <title>Oversight — Upload Document</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f7fa;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;overflow-x:hidden}
 .hdr{background:#1e3a5f;color:#fff;padding:12px 16px;padding-top:max(12px,env(safe-area-inset-top));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));display:flex;align-items:center;gap:10px;flex-shrink:0}
 .hdr svg{width:28px;height:28px;flex-shrink:0}
 .hdr h1{font-size:1.05rem;font-weight:700;letter-spacing:.01em}
@@ -2753,12 +2753,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .mode-tabs{display:flex;gap:0;border-radius:8px;overflow:hidden;border:1.5px solid #d1d5db;background:#fff}
 .mode-tab{flex:1;padding:9px 4px;text-align:center;font-size:.78rem;font-weight:600;color:#6b7280;cursor:pointer;border:none;background:transparent;transition:.15s;-webkit-tap-highlight-color:transparent}
 .mode-tab.active{background:#1e3a5f;color:#fff}
-.mode-panel{display:none}
-.mode-panel.active{display:flex;flex-direction:column;gap:12px}
-.card{background:#fff;border-radius:12px;border:1.5px solid #e5e7eb;padding:16px;display:flex;flex-direction:column;gap:12px}
+.mode-panel{display:none;width:100%}
+.mode-panel.active{display:block}
+.card{background:#fff;border-radius:12px;border:1.5px solid #e5e7eb;padding:16px;display:flex;flex-direction:column;gap:12px;width:100%;box-sizing:border-box}
 .lbl{font-size:.8rem;font-weight:600;color:#374151}
 .hint{font-size:.75rem;color:#6b7280}
-.pick-area{border:2px dashed #d1d5db;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fafafa;-webkit-tap-highlight-color:transparent}
+.pick-area{border:2px dashed #d1d5db;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fafafa;-webkit-tap-highlight-color:transparent;display:block;width:100%;box-sizing:border-box}
 .pick-area.drag,.pick-area:active{border-color:#1e3a5f;background:#eff6ff}
 @media (hover:hover){.pick-area:hover{border-color:#1e3a5f;background:#eff6ff}}
 .pick-area input{display:none}
@@ -2771,12 +2771,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .crop-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px}
 .crop-overlay canvas{max-width:100%;max-height:60vh;touch-action:none;border-radius:4px;cursor:crosshair}
 .crop-overlay .crop-btns{display:flex;gap:10px}
-.cam-wrap{position:relative;width:100%;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:3/4;max-height:55vh}
-.cam-wrap video{display:block;width:100%;height:100%;object-fit:cover;vertical-align:top}
-.cam-wrap canvas.overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
-.cam-btns{display:flex;gap:10px;justify-content:center;width:100%}
-.cam-scan-area{display:flex;flex-direction:column;gap:12px}
-.cam-loading{display:none;text-align:center;padding:28px 12px;color:#6b7280;font-size:.85rem}
+.cam-preview{position:relative;width:100%;background:#111;border-radius:12px;overflow:hidden;line-height:0}
+.cam-preview video{display:block;width:100%;max-height:58vh;object-fit:contain;background:#111}
+.cam-preview canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.cam-viewport{width:100%}
+.cam-viewport[hidden]{display:none!important}
+.cam-action-btn{width:100%;margin-top:12px}
+.cam-retry-link{display:block;width:100%;margin-top:10px;padding:8px 0;background:none;border:none;color:#1e3a5f;font-size:.8rem;font-weight:600;text-decoration:underline;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.cam-loading{text-align:center;padding:32px 12px;color:#6b7280;font-size:.85rem}
 .cam-loading .spin{width:28px;height:28px;border:3px solid #e5e7eb;border-top-color:#1e3a5f;border-radius:50%;animation:camspin .8s linear infinite;margin:0 auto 10px}
 @keyframes camspin{to{transform:rotate(360deg)}}
 .cam-handle{position:absolute;width:44px;height:44px;border-radius:50%;background:#4A90D9;border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45);transform:translate(-50%,-50%);touch-action:none;cursor:grab;-webkit-tap-highlight-color:transparent}
@@ -2843,37 +2845,35 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="mode-panel" id="panel-camera">
     <div class="card">
       <div class="lbl">Scan Document with Camera</div>
-      <div class="hint" id="cam-hint">Point your camera at the document. Edges are detected automatically.</div>
-      <div id="cam-secure-note" class="hint" style="display:none;margin-top:6px;padding:8px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;color:#1e40af;">
+      <p class="hint" id="cam-hint">Point your camera at the document. Edges are detected automatically.</p>
+      <p id="cam-secure-note" class="hint" hidden style="margin:0;padding:8px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;color:#1e40af;">
         First visit only: if Safari warns about the certificate, tap <strong>Show Details</strong> then <strong>visit this website</strong> to enable live scanning.
-      </div>
-      <div class="previews" id="cam-pages-list" style="display:none;"></div>
-      <div class="cam-scan-area">
-        <div id="cam-loading" class="cam-loading">
+      </p>
+      <div class="previews" id="cam-pages-list" hidden></div>
+      <div id="cam-viewport" class="cam-viewport">
+        <div id="cam-state-loading" class="cam-loading" hidden>
           <div class="spin"></div>
           Starting camera&hellip;
         </div>
-        <div id="cam-live-wrap" style="display:none;">
-          <div class="cam-wrap">
+        <div id="cam-state-live" hidden>
+          <div class="cam-preview">
             <video id="cam-video" autoplay playsinline muted></video>
-            <canvas id="cam-overlay" class="overlay"></canvas>
+            <canvas id="cam-overlay"></canvas>
           </div>
-          <div class="cam-btns" style="margin-top:12px;">
-            <button type="button" class="btn btn-primary" id="cam-capture-btn" style="width:100%;">&#128248; Capture Page</button>
-          </div>
+          <button type="button" class="btn btn-primary cam-action-btn" id="cam-capture-btn">&#128248; Capture Page</button>
         </div>
-        <div id="cam-fallback-wrap" style="display:none;">
+        <div id="cam-state-fallback" hidden>
           <label class="pick-area" id="cam-pick-area">
             <input type="file" id="cam-fallback-input" accept="image/*" capture="environment">
             <div class="pick-ico">&#128247;</div>
-            <p id="cam-take-label">Tap to scan first page</p>
+            <p id="cam-take-label" style="margin:0;">Tap to scan first page</p>
           </label>
-          <button type="button" class="btn btn-secondary btn-sm" id="cam-retry-live-btn" style="display:none;width:100%;">Try Live Scanner</button>
+          <button type="button" class="cam-retry-link" id="cam-retry-live-btn" hidden>Try live scanner</button>
         </div>
       </div>
-      <div class="prog-bar" id="cam-prog-bar" style="display:none"><div class="prog-fill" id="cam-prog-fill"></div></div>
-      <div class="status-msg" id="cam-status"></div>
-      <button class="btn btn-primary" id="cam-upload-btn" disabled style="display:none;">Upload Document</button>
+      <div class="prog-bar" id="cam-prog-bar" hidden><div class="prog-fill" id="cam-prog-fill"></div></div>
+      <p class="status-msg" id="cam-status"></p>
+      <button type="button" class="btn btn-primary" id="cam-upload-btn" hidden disabled>Upload Document</button>
     </div>
   </div>
 
@@ -2925,7 +2925,7 @@ var tk=new URLSearchParams(location.search).get('token')||'';
     this.classList.add('active');
     document.getElementById('panel-'+name).classList.add('active');
     if(name==='camera') initCameraTab();
-    else stopLiveCamera();
+    else { stopLiveCamera(); camTabInitialized=false; }
   }.bind(document.getElementById('tab-'+name)));
 });
 
@@ -3386,9 +3386,10 @@ libUploadBtn.addEventListener('click',async function(){
 
 // ---- Camera mode ----
 var camFallbackInput=document.getElementById('cam-fallback-input');
-var camFallbackWrap=document.getElementById('cam-fallback-wrap');
-var camLiveWrap=document.getElementById('cam-live-wrap');
-var camLoadingEl=document.getElementById('cam-loading');
+var camStateFallback=document.getElementById('cam-state-fallback');
+var camStateLive=document.getElementById('cam-state-live');
+var camStateLoading=document.getElementById('cam-state-loading');
+var camViewport=document.getElementById('cam-viewport');
 var camRetryLiveBtn=document.getElementById('cam-retry-live-btn');
 var camCaptureBtn=document.getElementById('cam-capture-btn');
 var camVideo=document.getElementById('cam-video');
@@ -3461,17 +3462,22 @@ async function processCapturedImage(imgEl,knownQuad){
 }
 
 function setCameraUiMode(mode){
-  var hideAll=(mode==='hidden');
-  if(camLoadingEl) camLoadingEl.style.display=(mode==='loading')?'block':'none';
-  if(camLiveWrap) camLiveWrap.style.display=(mode==='live')?'':'none';
-  if(camFallbackWrap) camFallbackWrap.style.display=(mode==='fallback')?'':'none';
-  if(camRetryLiveBtn) camRetryLiveBtn.style.display=(mode==='fallback'&&canLiveCamera)?'':'none';
-  if(hideAll){
-    if(camLoadingEl) camLoadingEl.style.display='none';
-    if(camLiveWrap) camLiveWrap.style.display='none';
-    if(camFallbackWrap) camFallbackWrap.style.display='none';
-    if(camRetryLiveBtn) camRetryLiveBtn.style.display='none';
-  }
+  if(camViewport) camViewport.hidden=(mode==='hidden');
+  if(camStateLoading) camStateLoading.hidden=(mode!=='loading');
+  if(camStateLive) camStateLive.hidden=(mode!=='live');
+  if(camStateFallback) camStateFallback.hidden=(mode!=='fallback');
+  if(camRetryLiveBtn) camRetryLiveBtn.hidden=!(mode==='fallback'&&canLiveCamera);
+  if(mode==='live') camStatus.textContent='Align the document inside the blue frame, then tap Capture.';
+  else if(mode==='loading') camStatus.textContent='';
+}
+
+function getVideoDrawRect(video){
+  var cw=video.clientWidth,ch=video.clientHeight;
+  var vw=video.videoWidth,vh=video.videoHeight;
+  if(!vw||!vh) return {dx:0,dy:0,dw:cw,dh:ch,scale:1,vw:vw||1,vh:vh||1};
+  var scale=Math.min(cw/vw,ch/vh);
+  var dw=vw*scale,dh=vh*scale;
+  return {dx:(cw-dw)/2,dy:(ch-dh)/2,dw:dw,dh:dh,scale:scale,vw:vw,vh:vh};
 }
 
 function stopLiveCamera(){
@@ -3490,19 +3496,22 @@ function stopLiveCamera(){
 }
 
 function drawLiveOverlay(quad,detectW,detectH){
-  if(!camOverlay||!camVideo||!quad) return;
-  var rect=camVideo.getBoundingClientRect();
+  if(!camOverlay||!camVideo||!quad||!camVideo.videoWidth) return;
+  var r=getVideoDrawRect(camVideo);
   var dpr=window.devicePixelRatio||1;
-  camOverlay.width=Math.round(rect.width*dpr);
-  camOverlay.height=Math.round(rect.height*dpr);
+  camOverlay.width=Math.round(camVideo.clientWidth*dpr);
+  camOverlay.height=Math.round(camVideo.clientHeight*dpr);
   var ctx=camOverlay.getContext('2d');
   ctx.clearRect(0,0,camOverlay.width,camOverlay.height);
-  var sx=camOverlay.width/detectW,sy=camOverlay.height/detectH;
+  var sx=r.vw/detectW,sy=r.vh/detectH;
   ctx.strokeStyle='rgba(74,144,217,0.95)';
   ctx.lineWidth=3*dpr;
   ctx.beginPath();
-  ctx.moveTo(quad[0].x*sx,quad[0].y*sy);
-  for(var i=1;i<4;i++) ctx.lineTo(quad[i].x*sx,quad[i].y*sy);
+  quad.forEach(function(p,i){
+    var x=(r.dx+p.x*sx*r.scale)*dpr;
+    var y=(r.dy+p.y*sy*r.scale)*dpr;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
   ctx.closePath();
   ctx.stroke();
   ctx.fillStyle='rgba(74,144,217,0.18)';
@@ -3517,7 +3526,6 @@ function scaleQuad(quad,fromW,fromH,toW,toH){
 async function startLiveCamera(){
   if(!canLiveCamera) return false;
   setCameraUiMode('loading');
-  camStatus.textContent='';
   try{
     camStream=await navigator.mediaDevices.getUserMedia({
       video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},
@@ -3526,7 +3534,6 @@ async function startLiveCamera(){
     camVideo.srcObject=camStream;
     await camVideo.play();
     setCameraUiMode('live');
-    camStatus.textContent='Align the document inside the blue frame, then tap Capture.';
     if(camDetectTimer) clearInterval(camDetectTimer);
     camDetectTimer=setInterval(function(){
       if(!camStream||!camVideo.videoWidth) return;
@@ -3551,7 +3558,7 @@ async function startLiveCamera(){
     return true;
   }catch(e){
     stopLiveCamera();
-    camStatus.textContent='Live camera unavailable \u2014 tap below to take a photo instead.';
+    camStatus.textContent='Live camera unavailable. Tap the area above to take a photo instead.';
     return false;
   }
 }
@@ -3560,7 +3567,7 @@ function initCameraTab(){
   if(camTabInitialized) return;
   camTabInitialized=true;
   var secureNote=document.getElementById('cam-secure-note');
-  if(location.protocol==='https:'&&secureNote) secureNote.style.display='';
+  if(location.protocol==='https:'&&secureNote) secureNote.hidden=false;
   if(canLiveCamera){
     startLiveCamera();
   } else {
@@ -3580,8 +3587,8 @@ if(camRetryLiveBtn){
 function renderCamPages(){
   var list=document.getElementById('cam-pages-list');
   list.innerHTML='';
-  if(camPages.length===0){list.style.display='none';return;}
-  list.style.display='';
+  if(camPages.length===0){list.hidden=true;return;}
+  list.hidden=false;
   camPages.forEach(function(pg,i){
     var w=document.createElement('div');
     w.className='thumb-wrap';
@@ -3606,8 +3613,8 @@ function renderCamPages(){
 }
 
 function updateCamUploadBtn(){
-  if(camPages.length===0){camUploadBtn.style.display='none';camUploadBtn.disabled=true;}
-  else{camUploadBtn.style.display='';camUploadBtn.disabled=false;camUploadBtn.textContent='Upload Document ('+camPages.length+' page'+(camPages.length!==1?'s':'')+')';}
+  if(camPages.length===0){camUploadBtn.hidden=true;camUploadBtn.disabled=true;}
+  else{camUploadBtn.hidden=false;camUploadBtn.disabled=false;camUploadBtn.textContent='Upload Document ('+camPages.length+' page'+(camPages.length!==1?'s':'')+')';}
 }
 
 // Photo taken → auto-extract when possible, otherwise show corner-drag overlay.
@@ -3658,7 +3665,7 @@ camUploadBtn.addEventListener('click',async function(){
   }
   if(camDetectTimer){clearInterval(camDetectTimer);camDetectTimer=null;}
   setCameraUiMode('hidden');
-  camProgBar.style.display='';
+  camProgBar.hidden=false;
   camProgFill.style.width='50%';
   camStatus.textContent='Building PDF\u2026';
   var pdfBytes=buildPdf(camPages);
@@ -3773,11 +3780,10 @@ document.getElementById('upload-another-btn').addEventListener('click',function(
   camStatus.textContent=''; camTakeLabel.textContent='Tap to scan first page';
   stopLiveCamera();
   camTabInitialized=false;
-  if(!canLiveCamera) setCameraUiMode('fallback');
+  camProgBar.hidden=true; camProgFill.style.width='0';
   selectedFiles=[]; renderFilesList();
   filesProgBar.style.display='none'; filesProgFill.style.width='0';
   libProgBar.style.display='none'; libProgFill.style.width='0';
-  camProgBar.style.display='none'; camProgFill.style.width='0';
 });
 
 })();
