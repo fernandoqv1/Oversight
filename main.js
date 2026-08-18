@@ -847,9 +847,8 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
   </div>
   <div class="succ-card" id="succ-card">
     <div class="succ-ico">&#9989;</div>
-    <h2 id="succ-msg">Photos uploaded!</h2>
-    <p>Return to Oversight on the PC to continue.</p>
-    <button class="more-btn" id="more-btn">Upload More Photos</button>
+    <h2 id="succ-msg">Photos have been uploaded successfully.</h2>
+    <p id="succ-sub">Please check your computer. This tab will close in <span id="succ-countdown">3</span> seconds.</p>
   </div>
 </div>
 <script>
@@ -866,7 +865,7 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
   var uploadSection=document.getElementById('upload-section');
   var succCard=document.getElementById('succ-card');
   var succMsg=document.getElementById('succ-msg');
-  var moreBtn=document.getElementById('more-btn');
+  var succSub=document.getElementById('succ-sub');
   var selectedFiles=[];
   var thumbEls=[];
 
@@ -937,31 +936,28 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
       }
     }
     totalUploaded+=ok;
-    uploadSection.style.display='none';
-    succCard.style.display='';
-    succMsg.textContent=ok+' of '+selectedFiles.length+' photo'+(selectedFiles.length!==1?'s':'')+' uploaded!';
-    if(totalUploaded>=MAX){
-      moreBtn.style.display='none';
-      var lim=document.createElement('p');
-      lim.className='limit-banner';
-      lim.textContent='Maximum '+MAX+' photos reached. Return to Oversight on the PC.';
-      succCard.appendChild(lim);
+    if(ok>0){
+      uploadSection.style.display='none';
+      succCard.style.display='block';
+      succMsg.textContent='Photos have been uploaded successfully.';
+      if(succSub)succSub.innerHTML='Please check your computer. This tab will close in <span id="succ-countdown">3</span> seconds.';
+      var secs=3;
+      var closeTimer=setInterval(function(){
+        secs--;
+        var cd=document.getElementById('succ-countdown');
+        if(cd)cd.textContent=secs;
+        if(secs<=0){
+          clearInterval(closeTimer);
+          window.close();
+        }
+      },1000);
     } else {
-      moreBtn.textContent='Upload More Photos ('+(MAX-totalUploaded)+' remaining)';
+      uploadBtn.disabled=false;
+      fileInput.disabled=false;
+      pickLbl.style.pointerEvents='';
+      countHint.textContent='Upload failed. Please try again.';
+      countHint.style.color='#dc2626';
     }
-  });
-
-  moreBtn.addEventListener('click',function(){
-    selectedFiles=[];thumbEls=[];
-    previewGrid.innerHTML='';
-    fileInput.value='';fileInput.disabled=false;
-    pickLbl.innerHTML='\u{1F4F7}&nbsp; Choose Photos from Camera Roll ('+(MAX-totalUploaded)+' remaining)';
-    pickLbl.style.pointerEvents='';
-    countHint.textContent='';countHint.style.color='';
-    uploadCard.style.display='none';
-    uploadBtn.disabled=false;
-    uploadSection.style.display='';
-    succCard.style.display='none';
   });
 })();
 </script>

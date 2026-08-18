@@ -8641,7 +8641,12 @@ async function openWirelessDocumentImportModal() {
     };
 
     cancelBtn.addEventListener('click', closeModal);
-    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+    let mouseDownOnBackdrop = false;
+    modal.addEventListener('mousedown', (e) => { mouseDownOnBackdrop = (e.target === modal); });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal && mouseDownOnBackdrop) closeModal();
+        mouseDownOnBackdrop = false;
+    });
 
     // Start the Wi-Fi Direct server
     let startResult;
