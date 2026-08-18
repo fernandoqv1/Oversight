@@ -781,6 +781,42 @@ function findFreePort() {
   });
 }
 
+// Self-signed TLS credentials for the wireless document-upload server.
+// iOS Safari requires HTTPS (secure context) for navigator.mediaDevices.
+function getOrCreateWirelessTlsCredentials() {
+  const fsSync = require('fs');
+  const { execFileSync } = require('child_process');
+  const userData = app.getPath('userData');
+  const keyFile = path.join(userData, 'wireless-tls-key.pem');
+  const certFile = path.join(userData, 'wireless-tls-cert.pem');
+  try {
+    if (fsSync.existsSync(keyFile) && fsSync.existsSync(certFile)) {
+      return { key: fsSync.readFileSync(keyFile), cert: fsSync.readFileSync(certFile) };
+    }
+    const opensslCandidates = [
+      'openssl',
+      'C:\\Program Files\\Git\\usr\\bin\\openssl.exe',
+      'C:\\Program Files (x86)\\Git\\usr\\bin\\openssl.exe',
+    ];
+    for (const openssl of opensslCandidates) {
+      try {
+        execFileSync(openssl, [
+          'req', '-x509', '-newkey', 'rsa:2048',
+          '-keyout', keyFile, '-out', certFile,
+          '-days', '3650', '-nodes',
+          '-subj', '/CN=Oversight-Local/O=AsbTrack',
+        ], { stdio: 'ignore', timeout: 20000 });
+        if (fsSync.existsSync(keyFile) && fsSync.existsSync(certFile)) {
+          return { key: fsSync.readFileSync(keyFile), cert: fsSync.readFileSync(certFile) };
+        }
+      } catch { /* try next openssl path */ }
+    }
+  } catch (err) {
+    console.warn('[wireless-tls] credential setup failed:', err.message);
+  }
+  return null;
+}
+
 // Returns the inline HTML served to the phone's browser at GET /upload.
 function getMobileUploadHtml() {
   return `<!DOCTYPE html>
@@ -2803,16 +2839,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="mode-panel" id="panel-camera">
     <div class="card">
       <div class="lbl">Scan Document with Camera</div>
-      <div class="hint">Scan one page at a time &mdash; add all pages, then tap Upload.</div>
+      <div class="hint" id="cam-hint">Point your camera at the document. Edges are detected automatically.</div>
+      <div id="cam-secure-note" class="hint" style="display:none;margin-top:6px;padding:8px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;color:#1e40af;">
+        First visit only: if Safari warns about the certificate, tap <strong>Show Details</strong> then <strong>visit this website</strong> to enable live scanning.
+      </div>
       <div class="previews" id="cam-pages-list" style="display:none;"></div>
-      <div id="cam-take-wrap">
-        <label class="pick-area">
+      <div id="cam-live-wrap" style="display:none;">
+        <div class="cam-wrap">
+          <video id="cam-video" autoplay playsinline muted></video>
+          <canvas id="cam-overlay" class="overlay"></canvas>
+        </div>
+        <div class="cam-btns" style="margin-top:12px;">
+          <button type="button" class="btn btn-primary" id="cam-capture-btn" style="flex:1;">&#128248; Capture Page</button>
+        </div>
+      </div>
+      <div id="cam-fallback-wrap">
+        <button type="button" class="btn btn-primary" id="cam-start-live-btn" style="width:100%;margin-bottom:10px;display:none;">Start Live Scanner</button>
+        <label class="pick-area" id="cam-pick-area">
           <input type="file" id="cam-fallback-input" accept="image/*" capture="environment">
           <div class="pick-ico">&#128247;</div>
           <p id="cam-take-label">Tap to scan first page</p>
         </label>
       </div>
-
       <div class="prog-bar" id="cam-prog-bar" style="display:none"><div class="prog-fill" id="cam-prog-fill"></div></div>
       <div class="status-msg" id="cam-status"></div>
       <button class="btn btn-primary" id="cam-upload-btn" disabled style="display:none;">Upload Document</button>
@@ -2866,6 +2914,8 @@ var tk=new URLSearchParams(location.search).get('token')||'';
     document.querySelectorAll('.mode-panel').forEach(function(p){p.classList.remove('active');});
     this.classList.add('active');
     document.getElementById('panel-'+name).classList.add('active');
+    if(name==='camera') initCameraTab();
+    else stopLiveCamera();
   }.bind(document.getElementById('tab-'+name)));
 });
 
@@ -3325,17 +3375,182 @@ libUploadBtn.addEventListener('click',async function(){
 });
 
 // ---- Camera mode ----
-// Uses the same corner-drag perspective-warp scanner as Library mode (showCropOverlay).
-// Cropper.js has been removed \u2014 it used Cropper.default which doesn't exist in the
-// UMD build and silently crashed the crop UI.
 var camFallbackInput=document.getElementById('cam-fallback-input');
-var camTakeWrap=document.getElementById('cam-take-wrap');
+var camFallbackWrap=document.getElementById('cam-fallback-wrap');
+var camLiveWrap=document.getElementById('cam-live-wrap');
+var camStartLiveBtn=document.getElementById('cam-start-live-btn');
+var camCaptureBtn=document.getElementById('cam-capture-btn');
+var camVideo=document.getElementById('cam-video');
+var camOverlay=document.getElementById('cam-overlay');
 var camTakeLabel=document.getElementById('cam-take-label');
 var camStatus=document.getElementById('cam-status');
 var camProgBar=document.getElementById('cam-prog-bar');
 var camProgFill=document.getElementById('cam-prog-fill');
 var camUploadBtn=document.getElementById('cam-upload-btn');
 var camPages=[];
+var camStream=null;
+var camDetectTimer=null;
+var camLiveQuad=null;
+var camTabInitialized=false;
+var isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+var canLiveCamera=!!(window.isSecureContext&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);
+
+function tryExtractFromCanvas(srcCanvas,knownQuad){
+  var w=srcCanvas.width,h=srcCanvas.height;
+  var quad=knownQuad;
+  if(!quad){
+    var detect=document.createElement('canvas');
+    var scale=Math.min(1,480/Math.max(w,h));
+    detect.width=Math.round(w*scale);
+    detect.height=Math.round(h*scale);
+    detect.getContext('2d').drawImage(srcCanvas,0,0,detect.width,detect.height);
+    quad=detectWithJscanify(detect);
+    if(quad){
+      var inv=1/scale;
+      quad=quad.map(function(p){return {x:p.x*inv,y:p.y*inv};});
+    }
+  }
+  if(!quad) return null;
+  var scanner=getScanner();
+  if(!scanner) return null;
+  try{
+    var cornerPoints={
+      topLeftCorner:quad[0],topRightCorner:quad[1],
+      bottomRightCorner:quad[2],bottomLeftCorner:quad[3]
+    };
+    var topW=Math.hypot(quad[1].x-quad[0].x,quad[1].y-quad[0].y);
+    var leftH=Math.hypot(quad[3].x-quad[0].x,quad[3].y-quad[0].y);
+    var outW=794;
+    var outH=Math.max(400,Math.min(1600,Math.round(outW*(leftH/Math.max(1,topW)))));
+    return scanner.extractPaper(srcCanvas,outW,outH,cornerPoints);
+  }catch(e){return null;}
+}
+
+async function addCamPageFromCanvas(srcCanvas){
+  var jpegBlob=await new Promise(function(res){srcCanvas.toBlob(res,'image/jpeg',0.88);});
+  var buf=await jpegBlob.arrayBuffer();
+  camPages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height,objectUrl:URL.createObjectURL(new Blob([jpegBlob],{type:'image/jpeg'}))});
+  renderCamPages();
+  updateCamUploadBtn();
+  camStatus.textContent='Page '+camPages.length+' added \u2014 scan another or tap Upload.';
+  camTakeLabel.textContent='Tap to scan page '+(camPages.length+1);
+}
+
+async function processCapturedImage(imgEl,knownQuad){
+  var w=imgEl.naturalWidth||imgEl.width;
+  var h=imgEl.naturalHeight||imgEl.height;
+  var frame=document.createElement('canvas');
+  frame.width=w; frame.height=h;
+  frame.getContext('2d').drawImage(imgEl,0,0,w,h);
+  var extracted=tryExtractFromCanvas(frame,knownQuad);
+  if(extracted) return extracted;
+  var manual=await showCropOverlay(imgEl);
+  if(manual) return manual;
+  return frame;
+}
+
+function stopLiveCamera(){
+  if(camDetectTimer){clearInterval(camDetectTimer);camDetectTimer=null;}
+  camLiveQuad=null;
+  if(camStream){
+    camStream.getTracks().forEach(function(t){t.stop();});
+    camStream=null;
+  }
+  if(camVideo) camVideo.srcObject=null;
+  if(camLiveWrap) camLiveWrap.style.display='none';
+  if(camFallbackWrap) camFallbackWrap.style.display='';
+  if(camOverlay){
+    var ctx=camOverlay.getContext('2d');
+    ctx.clearRect(0,0,camOverlay.width,camOverlay.height);
+  }
+}
+
+function drawLiveOverlay(quad,detectW,detectH){
+  if(!camOverlay||!camVideo||!quad) return;
+  var rect=camVideo.getBoundingClientRect();
+  var dpr=window.devicePixelRatio||1;
+  camOverlay.width=Math.round(rect.width*dpr);
+  camOverlay.height=Math.round(rect.height*dpr);
+  var ctx=camOverlay.getContext('2d');
+  ctx.clearRect(0,0,camOverlay.width,camOverlay.height);
+  var sx=camOverlay.width/detectW,sy=camOverlay.height/detectH;
+  ctx.strokeStyle='rgba(74,144,217,0.95)';
+  ctx.lineWidth=3*dpr;
+  ctx.beginPath();
+  ctx.moveTo(quad[0].x*sx,quad[0].y*sy);
+  for(var i=1;i<4;i++) ctx.lineTo(quad[i].x*sx,quad[i].y*sy);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.fillStyle='rgba(74,144,217,0.18)';
+  ctx.fill();
+}
+
+function scaleQuad(quad,fromW,fromH,toW,toH){
+  var sx=toW/fromW,sy=toH/fromH;
+  return quad.map(function(p){return {x:p.x*sx,y:p.y*sy};});
+}
+
+async function startLiveCamera(){
+  if(!canLiveCamera) return false;
+  camStatus.textContent='Starting camera\u2026';
+  try{
+    camStream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},
+      audio:false
+    });
+    camVideo.srcObject=camStream;
+    await camVideo.play();
+    camLiveWrap.style.display='';
+    camFallbackWrap.style.display='none';
+    camStatus.textContent='Align the document inside the blue frame, then tap Capture.';
+    if(camDetectTimer) clearInterval(camDetectTimer);
+    camDetectTimer=setInterval(function(){
+      if(!camStream||!camVideo.videoWidth) return;
+      var vw=camVideo.videoWidth,vh=camVideo.videoHeight;
+      var detect=document.createElement('canvas');
+      var scale=Math.min(1,360/Math.max(vw,vh));
+      detect.width=Math.round(vw*scale);
+      detect.height=Math.round(vh*scale);
+      detect.getContext('2d').drawImage(camVideo,0,0,detect.width,detect.height);
+      var quad=detectWithJscanify(detect);
+      if(quad){
+        camLiveQuad=scaleQuad(quad,detect.width,detect.height,vw,vh);
+        drawLiveOverlay(quad,detect.width,detect.height);
+      } else {
+        camLiveQuad=null;
+        if(camOverlay){
+          var ctx=camOverlay.getContext('2d');
+          ctx.clearRect(0,0,camOverlay.width,camOverlay.height);
+        }
+      }
+    },280);
+    return true;
+  }catch(e){
+    stopLiveCamera();
+    camStatus.textContent='Live camera unavailable. Use the button below to take a photo instead.';
+    return false;
+  }
+}
+
+function initCameraTab(){
+  if(camTabInitialized) return;
+  camTabInitialized=true;
+  var secureNote=document.getElementById('cam-secure-note');
+  if(location.protocol==='https:'&&secureNote) secureNote.style.display='';
+  if(canLiveCamera){
+    if(camStartLiveBtn) camStartLiveBtn.style.display='';
+    startLiveCamera();
+  } else if(isIOS){
+    var hint=document.getElementById('cam-hint');
+    if(hint) hint.textContent='Take a photo of each page. The document will be auto-cropped when possible.';
+    camStatus.textContent='Tip: hold the phone parallel to the page for best auto-detection.';
+  }
+}
+
+
+if(camStartLiveBtn){
+  camStartLiveBtn.addEventListener('click',function(){startLiveCamera();});
+}
 
 function renderCamPages(){
   var list=document.getElementById('cam-pages-list');
@@ -3370,12 +3585,12 @@ function updateCamUploadBtn(){
   else{camUploadBtn.style.display='';camUploadBtn.disabled=false;camUploadBtn.textContent='Upload Document ('+camPages.length+' page'+(camPages.length!==1?'s':'')+')';}
 }
 
-// Photo taken \u2192 show the shared corner-drag overlay \u2192 add to pages list.
+// Photo taken → auto-extract when possible, otherwise show corner-drag overlay.
 camFallbackInput.addEventListener('change',async function(){
   var file=this.files[0];
   this.value='';
   if(!file) return;
-  camStatus.textContent='Loading\u2026';
+  camStatus.textContent='Processing page\u2026';
   var img=new Image();
   var objUrl=URL.createObjectURL(file);
   try{
@@ -3386,36 +3601,34 @@ camFallbackInput.addEventListener('change',async function(){
     return;
   }
   URL.revokeObjectURL(objUrl);
-  camStatus.textContent='';
-
-  // showCropOverlay: auto-detects document quad, lets user drag corners, returns
-  // a perspective-corrected canvas \u2014 or null if the user taps Skip.
-  var croppedCanvas=await showCropOverlay(img);
-
-  var srcCanvas;
-  if(croppedCanvas){
-    srcCanvas=croppedCanvas;
-  } else {
-    srcCanvas=document.createElement('canvas');
-    srcCanvas.width=img.naturalWidth||img.width;
-    srcCanvas.height=img.naturalHeight||img.height;
-    srcCanvas.getContext('2d').drawImage(img,0,0);
-  }
-
-  var jpegBlob=await new Promise(function(res){srcCanvas.toBlob(res,'image/jpeg',0.88);});
-  var buf=await jpegBlob.arrayBuffer();
-  camPages.push({data:new Uint8Array(buf),w:srcCanvas.width,h:srcCanvas.height,objectUrl:URL.createObjectURL(new Blob([jpegBlob],{type:'image/jpeg'}))});
-  renderCamPages();
-  updateCamUploadBtn();
-  camStatus.textContent='Page '+camPages.length+' added \u2014 scan another or tap Upload.';
-  camTakeLabel.textContent='Tap to scan page '+(camPages.length+1);
+  var srcCanvas=await processCapturedImage(img,null);
+  await addCamPageFromCanvas(srcCanvas);
 });
+
+if(camCaptureBtn){
+  camCaptureBtn.addEventListener('click',async function(){
+    if(!camStream||!camVideo.videoWidth) return;
+    camCaptureBtn.disabled=true;
+    camStatus.textContent='Capturing\u2026';
+    var w=camVideo.videoWidth,h=camVideo.videoHeight;
+    var frame=document.createElement('canvas');
+    frame.width=w; frame.height=h;
+    frame.getContext('2d').drawImage(camVideo,0,0,w,h);
+    var img=new Image();
+    await new Promise(function(res){img.onload=res;img.src=frame.toDataURL('image/jpeg',0.92);});
+    var srcCanvas=await processCapturedImage(img,camLiveQuad);
+    await addCamPageFromCanvas(srcCanvas);
+    camCaptureBtn.disabled=false;
+    camStatus.textContent='Page '+camPages.length+' added \u2014 align the next page and tap Capture.';
+  });
+}
 
 // Combine all scanned pages into one PDF and upload.
 camUploadBtn.addEventListener('click',async function(){
   if(!camPages.length) return;
   camUploadBtn.disabled=true;
-  camTakeWrap.style.display='none';
+  stopLiveCamera();
+  camFallbackWrap.style.display='none';
   camProgBar.style.display='';
   camProgFill.style.width='50%';
   camStatus.textContent='Building PDF\u2026';
@@ -3435,12 +3648,12 @@ camUploadBtn.addEventListener('click',async function(){
       var j=await r.json().catch(function(){return{};});
       camStatus.textContent=j.error||('Upload failed ('+r.status+')');
       camUploadBtn.disabled=false;
-      camTakeWrap.style.display='';
+      camFallbackWrap.style.display='';
     }
   }catch(e){
     camStatus.textContent='Upload error: '+e.message;
     camUploadBtn.disabled=false;
-    camTakeWrap.style.display='';
+      camFallbackWrap.style.display='';
   }
 });
 
@@ -3529,7 +3742,9 @@ document.getElementById('upload-another-btn').addEventListener('click',function(
   camPages.forEach(function(pg){URL.revokeObjectURL(pg.objectUrl);}); camPages=[];
   renderCamPages(); updateCamUploadBtn();
   camStatus.textContent=''; camTakeLabel.textContent='Tap to scan first page';
-  camTakeWrap.style.display='';
+  stopLiveCamera();
+  camTabInitialized=false;
+  camFallbackWrap.style.display='';
   selectedFiles=[]; renderFilesList();
   filesProgBar.style.display='none'; filesProgFill.style.width='0';
   libProgBar.style.display='none'; libProgFill.style.width='0';
@@ -3544,6 +3759,7 @@ document.getElementById('upload-another-btn').addEventListener('click',function(
 
 function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
   const http = require('http');
+  const https = require('https');
   const Busboy = require('busboy');
   const fsSync = require('fs');
 
@@ -3554,7 +3770,10 @@ function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
     'application/msword',
   ]);
 
-  const server = http.createServer((req, res) => {
+  const tlsCreds = getOrCreateWirelessTlsCredentials();
+  const protocol = tlsCreds ? 'https' : 'http';
+
+  const handler = (req, res) => {
     let urlObj;
     try { urlObj = new URL(req.url, `http://localhost:${port}`); } catch (e) {
       res.writeHead(400); res.end('Bad request'); return;
@@ -3645,11 +3864,15 @@ function startDocumentUploadServer(tempDir, sessionToken, port, onDocument) {
     }
 
     res.writeHead(404); res.end('Not found');
-  });
+  };
+
+  const server = tlsCreds
+    ? https.createServer({ key: tlsCreds.key, cert: tlsCreds.cert }, handler)
+    : http.createServer(handler);
 
   server.on('error', (err) => console.error('[doc-upload] server error:', err.message));
   server.listen(port, '0.0.0.0');
-  return server;
+  return { server, protocol };
 }
 
 // ---------- Wireless Document Upload ----------
@@ -3709,10 +3932,17 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
 
     const port = await findFreePort();
     const sessionToken = require('crypto').randomBytes(16).toString('hex');
-    const uploadUrl = `http://${result.gatewayIp}:${port}/upload?token=${sessionToken}`;
     lastWirelessGatewayIp = result.gatewayIp;
 
     await ensureWirelessFirewallRule().catch(() => {});
+
+    const docSrv = startDocumentUploadServer(tempDir, sessionToken, port, ({ localPath, name, mimeType, sizeBytes }) => {
+      if (wirelessDocSender && !wirelessDocSender.isDestroyed()) {
+        wirelessDocSender.send('wireless-document-received', { localPath, name, mimeType, sizeBytes });
+      }
+    });
+    wirelessDocServer = docSrv.server;
+    const uploadUrl = `${docSrv.protocol}://${result.gatewayIp}:${port}/upload?token=${sessionToken}`;
 
     const QRCode = require('qrcode');
     const wifiQrString = `WIFI:T:WPA;S:${result.ssid};P:${result.password};;`;
@@ -3721,13 +3951,7 @@ ipcMain.handle('start-wireless-document-import', async (event) => {
       QRCode.toDataURL(uploadUrl, { width: 256, margin: 2 }),
     ]);
 
-    wirelessDocServer = startDocumentUploadServer(tempDir, sessionToken, port, ({ localPath, name, mimeType, sizeBytes }) => {
-      if (wirelessDocSender && !wirelessDocSender.isDestroyed()) {
-        wirelessDocSender.send('wireless-document-received', { localPath, name, mimeType, sizeBytes });
-      }
-    });
-
-    return { success: true, ssid: result.ssid, password: result.password, uploadUrl, wifiQr, urlQr };
+    return { success: true, ssid: result.ssid, password: result.password, uploadUrl, wifiQr, urlQr, usesHttps: docSrv.protocol === 'https' };
   } catch (err) {
     console.error('[start-wireless-document-import] error:', err);
     // Keep the shared AP alive for the next attempt instead of tearing it down.

@@ -8602,6 +8602,9 @@ async function openWirelessDocumentImportModal() {
                 <div class="mt-3 p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
                     &#9888; Make sure Wi-Fi is <strong>turned on</strong> on your phone before scanning the Wi-Fi QR code.
                 </div>
+                <div id="wdoc-https-note" class="mt-2 p-3 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800" style="display:none;">
+                    &#128274; On iPhone, the first time you open the scanner page Safari may warn about the certificate. Tap <strong>Show Details</strong> &rarr; <strong>visit this website</strong> to enable live document scanning.
+                </div>
                 <div id="wdoc-received-list" style="margin-top:12px;display:flex;flex-direction:column;gap:6px;"></div>
             </div>
             <div id="wdoc-error" style="display:none;color:#dc2626;font-size:.85rem;margin-top:12px;"></div>
@@ -8671,6 +8674,10 @@ async function openWirelessDocumentImportModal() {
     ssidEl.textContent = `${startResult.ssid} · ${startResult.password}`;
     qrSection.style.display = '';
     doneBtn.style.display = '';
+    if (startResult.usesHttps) {
+        const httpsNote = modal.querySelector('#wdoc-https-note');
+        if (httpsNote) httpsNote.style.display = '';
+    }
 
     // Two-stage QR: show the Wi-Fi QR first, then reveal the upload-page QR once
     // the phone has joined the network (detected via ARP), or after a short
