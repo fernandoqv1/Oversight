@@ -6497,8 +6497,6 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
         const grid  = modal.querySelector('#wireless-received-grid');
         const badge = modal.querySelector('#wireless-received-badge');
         if (!grid) return;
-        const count = receivedPhotos.length;
-        if (badge) badge.textContent = `${count} photo${count !== 1 ? 's' : ''} received \u2014 select Done when finished`;
 
         const tile = document.createElement('div');
         tile.title = photo.name;
@@ -6522,6 +6520,20 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
             tile.textContent = '\uD83D\uDCF7';
             tile.style.fontSize = '1.5rem';
         });
+    }
+
+    function refreshReceivedGrid() {
+        const grid = modal.querySelector('#wireless-received-grid');
+        const badge = modal.querySelector('#wireless-received-badge');
+        if (!grid) return;
+        const count = receivedPhotos.length;
+        if (badge) {
+            badge.textContent = count === 0
+                ? 'Waiting for photos\u2026'
+                : `${count} photo${count !== 1 ? 's' : ''} received \u2014 select Done when finished`;
+        }
+        grid.innerHTML = '';
+        receivedPhotos.forEach((photo) => addReceivedThumbnail(photo));
     }
 
     // Subscribe to incoming photo events from main process
@@ -6586,6 +6598,8 @@ async function openWirelessPhotoImportModal(onImportComplete, logDate = null) {
             <div id="wireless-received-grid" class="flex flex-wrap gap-2"></div>
         </div>
     `;
+
+    refreshReceivedGrid();
 
     // Two-stage QR: reveal the upload-page QR once the phone joins the Wi-Fi
     // (detected via ARP), or after a short fallback timeout so it always appears.
@@ -7594,17 +7608,9 @@ async function printDailyLog(project, dailyLog) {
             for (const entry of sortedEntries) {
                 const entryPhotoNums = [];
                 for (const p of (entry.photos || [])) {
-                    let base64 = (p.base64 || '').trim();
-                    // Load from disk if stored as a file reference
-                    if (!base64 && p.fileId && window.electronAPI?.readProjectFile) {
-                        try {
-                            const result = await window.electronAPI.readProjectFile(project.id, 'photos', p.fileId);
-                            if (result?.success && result.data) {
-                                base64 = Buffer.from ? Buffer.from(result.data).toString('base64')
-                                    : btoa(Array.from(new Uint8Array(result.data), b => String.fromCharCode(b)).join(''));
-                            }
-                        } catch (e) { /* skip this photo */ }
-                    }
+                    const base64 = typeof loadProjectPhotoDataUrlForDocx === 'function'
+                        ? await loadProjectPhotoDataUrlForDocx(project.id, p)
+                        : ((p.base64 || '').trim());
                     if (!base64) continue; // Skip empty photos
                     entryPhotoNums.push(photoCounter);
                     photoLogFlat.push({ number: photoCounter, photo: base64 });

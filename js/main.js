@@ -1675,18 +1675,9 @@ async function downloadArchivedProject(projectId, projectName) {
                     for (const entry of sortedEntries) {
                         const entryPhotoNums = [];
                         for (const p of (entry.photos || [])) {
-                            let base64 = (p.base64 || '').trim();
-                            if (!base64 && p.fileId && window.electronAPI?.readProjectFile) {
-                                try {
-                                    const result = await window.electronAPI.readProjectFile(project.id, 'photos', p.fileId);
-                                    if (result?.success && result.data) {
-                                        const u8 = new Uint8Array(result.data);
-                                        const isPng = u8[0] === 0x89 && u8[1] === 0x50;
-                                        const mime = isPng ? 'image/png' : 'image/jpeg';
-                                        base64 = `data:${mime};base64,` + btoa(Array.from(u8, b => String.fromCharCode(b)).join(''));
-                                    }
-                                } catch (e) { /* skip this photo */ }
-                            }
+                            const base64 = typeof loadProjectPhotoDataUrlForDocx === 'function'
+                                ? await loadProjectPhotoDataUrlForDocx(project.id, p)
+                                : ((p.base64 || '').trim());
                             if (!base64) continue;
                             entryPhotoNums.push(photoCounter);
                             photoLogFlat.push({ number: photoCounter, photo: base64 });

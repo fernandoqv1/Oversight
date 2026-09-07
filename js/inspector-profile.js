@@ -146,6 +146,106 @@ function base64DataURLToArrayBuffer(dataURL) {
     return bytes.buffer;
 }
 
+/**
+ * Convert a data URL or raw base64 string to an ArrayBuffer for the image module.
+ * @param {string} value
+ * @returns {ArrayBuffer|false}
+ */
+function imageTagValueToArrayBuffer(value) {
+    if (!value || typeof value !== 'string') return false;
+    const cleaned = String(value).trim().replace(/\s/g, '');
+    const fromDataUrl = base64DataURLToArrayBuffer(cleaned);
+    if (fromDataUrl) return fromDataUrl;
+    if (!/^[A-Za-z0-9+/=]+$/.test(cleaned) || cleaned.length < 32) return false;
+    try {
+        const binaryString = typeof window !== 'undefined'
+            ? window.atob(cleaned)
+            : Buffer.from(cleaned, 'base64').toString('binary');
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+        return bytes.buffer;
+    } catch (e) {
+        return false;
+    }
+}
+
+const PHOTO_LOG_MAX_PX = 336;
+const PHOTO_LOG_CELL_HEIGHT_TWIPS = 5040; // 3.5"
+const PHOTO_LOG_MAX_EMU = PHOTO_LOG_MAX_PX * 9525;
+
+/**
+ * Resize a photo data URL to fit the daily-log photo-log cell (max 336px).
+ * @param {string} dataUrl
+ * @param {number} [maxPx]
+ * @returns {Promise<string>}
+ */
+function resizePhotoDataUrlForDocx(dataUrl, maxPx = PHOTO_LOG_MAX_PX) {
+    return new Promise((resolve) => {
+        if (!dataUrl || typeof dataUrl !== 'string') {
+            resolve('');
+            return;
+        }
+        let normalized = dataUrl.trim();
+        if (!/^data:image\//i.test(normalized)) {
+            normalized = `data:image/jpeg;base64,${normalized.replace(/\s/g, '')}`;
+        }
+        const img = new Image();
+        img.onload = () => {
+            let w = img.width;
+            let h = img.height;
+            if (!w || !h) {
+                resolve(normalized);
+                return;
+            }
+            if (w > maxPx || h > maxPx) {
+                const scale = Math.min(maxPx / w, maxPx / h);
+                w = Math.max(1, Math.round(w * scale));
+                h = Math.max(1, Math.round(h * scale));
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+            try {
+                resolve(canvas.toDataURL('image/jpeg', 0.85));
+            } catch (e) {
+                resolve(normalized);
+            }
+        };
+        img.onerror = () => resolve(normalized);
+        img.src = normalized;
+    });
+}
+
+/**
+ * Load a project photo reference as a resized data URL for DOCX export.
+ * @param {string} projectId
+ * @param {{ base64?: string, fileId?: string }} photoRef
+ * @returns {Promise<string>}
+ */
+async function loadProjectPhotoDataUrlForDocx(projectId, photoRef) {
+    let base64 = (photoRef?.base64 || '').trim();
+    if (base64 && !/^data:image\//i.test(base64)) {
+        base64 = `data:image/jpeg;base64,${base64.replace(/\s/g, '')}`;
+    }
+    if (!base64 && photoRef?.fileId && window.electronAPI?.readProjectFile) {
+        try {
+            const result = await window.electronAPI.readProjectFile(projectId, 'photos', photoRef.fileId);
+            if (result?.success && result.data) {
+                const u8 = new Uint8Array(result.data);
+                const isPng = u8[0] === 0x89 && u8[1] === 0x50;
+                const mime = isPng ? 'image/png' : 'image/jpeg';
+                const encoded = typeof Buffer !== 'undefined'
+                    ? Buffer.from(u8).toString('base64')
+                    : btoa(Array.from(u8, (b) => String.fromCharCode(b)).join(''));
+                base64 = `data:${mime};base64,${encoded}`;
+            }
+        } catch (e) { /* skip */ }
+    }
+    if (!base64) return '';
+    return resizePhotoDataUrlForDocx(base64, PHOTO_LOG_MAX_PX);
+}
+
 /** 1x1 transparent PNG for empty signature placeholder */
 const EMPTY_SIGNATURE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
@@ -209,22 +309,21 @@ function createSignatureImageModule() {
                 for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
                 return bytes.buffer;
             }
-            // Strip whitespace/newlines that can corrupt base64
-            const cleaned = String(tagValue).trim().replace(/\s/g, '');
-            const buf = base64DataURLToArrayBuffer(cleaned);
-            return buf || (function () {
-                const decoded = atob(EMPTY_SIGNATURE_PNG);
-                const bytes = new Uint8Array(decoded.length);
-                for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
-                return bytes.buffer;
-            })();
+            const buf = imageTagValueToArrayBuffer(tagValue);
+            if (buf) return buf;
+            const decoded = atob(EMPTY_SIGNATURE_PNG);
+            const bytes = new Uint8Array(decoded.length);
+            for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+            return bytes.buffer;
         },
         getSize: function (imgBuffer, tagValue, partValue) {
+            const tag = String(partValue || '').toLowerCase();
+            const isPhotoTag = tag === 'photo' || tag.endsWith('.photo');
             // Photo log: max 3.5" x 3.5" (336px), preserve aspect ratio
-            if (partValue === 'photo') {
+            if (isPhotoTag) {
                 const dims = getImageDimensionsFromBuffer(imgBuffer);
-                if (dims) return fitDimensions(dims.width, dims.height, 336, 336);
-                return [336, 336];
+                if (dims) return fitDimensions(dims.width, dims.height, PHOTO_LOG_MAX_PX, PHOTO_LOG_MAX_PX);
+                return [PHOTO_LOG_MAX_PX, PHOTO_LOG_MAX_PX];
             }
             // Signature: small
             return [250, 80];
@@ -347,9 +446,71 @@ function paginatePhotoLogTable(zip) {
     zip.file('word/document.xml', updatedXml);
 }
 
+function _photoLogClampImageExtents(cellXml) {
+    return cellXml.replace(/<wp:extent\s+cx="(\d+)"\s+cy="(\d+)"\s*\/>/g, (match, cx, cy) => {
+        const w = parseInt(cx, 10);
+        const h = parseInt(cy, 10);
+        if (!w || !h || (w <= PHOTO_LOG_MAX_EMU && h <= PHOTO_LOG_MAX_EMU)) return match;
+        const scale = Math.min(PHOTO_LOG_MAX_EMU / w, PHOTO_LOG_MAX_EMU / h, 1);
+        return `<wp:extent cx="${Math.max(1, Math.round(w * scale))}" cy="${Math.max(1, Math.round(h * scale))}"/>`;
+    });
+}
+
+function _photoLogAddImageCellLayout(rowXml) {
+    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+    return rowXml.replace(cellPattern, (cellXml) => {
+        if (!_photoLogHasImage(cellXml)) return cellXml;
+        let updated = _photoLogClampImageExtents(cellXml);
+        if (!/<w:vAlign\b/.test(updated)) {
+            if (/<w:tcPr\b/.test(updated)) {
+                updated = updated.replace(/<w:tcPr\b[^>]*>/, (tcPr) => `${tcPr}<w:vAlign w:val="center"/>`);
+            } else {
+                updated = updated.replace(/(<w:tc\b[^>]*>)/, `$1<w:tcPr><w:vAlign w:val="center"/></w:tcPr>`);
+            }
+        }
+        return updated;
+    });
+}
+
+function constrainPhotoLogImageExtents(zip) {
+    const docFile = zip?.file?.('word/document.xml');
+    if (!docFile) return;
+
+    const cellPattern = /<w:tc\b[\s\S]*?<\/w:tc>/g;
+    let expectImageRow = false;
+    const updatedXml = docFile.asText().replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
+        const cells = rowXml.match(cellPattern);
+        if (!cells || cells.length < 1) {
+            expectImageRow = false;
+            return rowXml;
+        }
+
+        const isLabelRow = /Photo\s*#/.test(_photoLogGetCellText(cells[0]));
+        const isImageRow = expectImageRow && _photoLogHasImage(cells[0]);
+
+        if (isLabelRow) {
+            expectImageRow = true;
+            return rowXml;
+        }
+
+        if (isImageRow) {
+            expectImageRow = false;
+            let updated = _photoLogAddImageCellLayout(rowXml);
+            updated = _photoLogAddTrPrProperty(updated, `<w:trHeight w:val="${PHOTO_LOG_CELL_HEIGHT_TWIPS}" w:hRule="atLeast"/>`);
+            return _photoLogAddTrPrProperty(updated, '<w:cantSplit/>');
+        }
+
+        expectImageRow = false;
+        return rowXml;
+    });
+
+    zip.file('word/document.xml', updatedXml);
+}
+
 function processPhotoLogInDocx(zip) {
     removeEmptyPhotoLogCells(zip);
     paginatePhotoLogTable(zip);
+    constrainPhotoLogImageExtents(zip);
 }
 
 /**

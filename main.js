@@ -848,7 +848,7 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
   <div class="succ-card" id="succ-card">
     <div class="succ-ico">&#9989;</div>
     <h2 id="succ-msg">Photos uploaded!</h2>
-    <p>Return to Oversight on the PC to continue.</p>
+    <p id="succ-sub">Return to Oversight on the PC to continue.</p>
     <button class="more-btn" id="more-btn">Upload More Photos</button>
   </div>
 </div>
@@ -866,9 +866,11 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
   var uploadSection=document.getElementById('upload-section');
   var succCard=document.getElementById('succ-card');
   var succMsg=document.getElementById('succ-msg');
+  var succSub=document.getElementById('succ-sub');
   var moreBtn=document.getElementById('more-btn');
   var selectedFiles=[];
   var thumbEls=[];
+  var closeTimer=null;
 
   function remaining(){return MAX-totalUploaded;}
 
@@ -937,21 +939,54 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
       }
     }
     totalUploaded+=ok;
-    uploadSection.style.display='none';
-    succCard.style.display='';
-    succMsg.textContent=ok+' of '+selectedFiles.length+' photo'+(selectedFiles.length!==1?'s':'')+' uploaded!';
-    if(totalUploaded>=MAX){
-      moreBtn.style.display='none';
-      var lim=document.createElement('p');
-      lim.className='limit-banner';
-      lim.textContent='Maximum '+MAX+' photos reached. Return to Oversight on the PC.';
-      succCard.appendChild(lim);
+    if(ok>0){
+      uploadSection.style.display='none';
+      succCard.style.display='block';
+      succMsg.textContent='Photos have been uploaded successfully.';
+      var canUploadMore=totalUploaded<MAX;
+      if(canUploadMore){
+        moreBtn.style.display='';
+        moreBtn.textContent='Upload More Photos ('+(MAX-totalUploaded)+' remaining)';
+        if(succSub)succSub.innerHTML='Please check your computer. You can upload more photos or this tab will close in <span id="succ-countdown">5</span> seconds.';
+      } else {
+        moreBtn.style.display='none';
+        if(succSub)succSub.innerHTML='Please check your computer. This tab will close in <span id="succ-countdown">5</span> seconds.';
+        var lim=succCard.querySelector('.limit-banner');
+        if(!lim){
+          lim=document.createElement('p');
+          lim.className='limit-banner';
+          lim.textContent='Maximum '+MAX+' photos reached. Return to Oversight on the PC.';
+          succCard.appendChild(lim);
+        }
+      }
+      var secs=5;
+      if(closeTimer)clearInterval(closeTimer);
+      closeTimer=setInterval(function(){
+        secs--;
+        var cd=document.getElementById('succ-countdown');
+        if(cd)cd.textContent=secs;
+        if(secs<=0){
+          clearInterval(closeTimer);
+          closeTimer=null;
+          window.close();
+          setTimeout(function(){
+            if(!document.hidden && succSub){
+              succSub.textContent='Upload complete. You can close this tab and return to Oversight on your computer.';
+            }
+          },400);
+        }
+      },1000);
     } else {
-      moreBtn.textContent='Upload More Photos ('+(MAX-totalUploaded)+' remaining)';
+      uploadBtn.disabled=false;
+      fileInput.disabled=false;
+      pickLbl.style.pointerEvents='';
+      countHint.textContent='Upload failed. Please try again.';
+      countHint.style.color='#dc2626';
     }
   });
 
   moreBtn.addEventListener('click',function(){
+    if(closeTimer){clearInterval(closeTimer);closeTimer=null;}
     selectedFiles=[];thumbEls=[];
     previewGrid.innerHTML='';
     fileInput.value='';fileInput.disabled=false;
@@ -962,6 +997,8 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
     uploadBtn.disabled=false;
     uploadSection.style.display='';
     succCard.style.display='none';
+    var lim=succCard.querySelector('.limit-banner');
+    if(lim)lim.remove();
   });
 })();
 </script>
